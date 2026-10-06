@@ -65,7 +65,7 @@ $resolvedPlugin = (Resolve-Path -LiteralPath $PluginPath).Path
 if (-not (Test-Path -LiteralPath (Join-Path $resolvedPlugin 'cordis.patch.yml'))) {
   throw "目标目录缺少 cordis.patch.yml，不是可安装的 bundle：$resolvedPlugin"
 }
-$manifest = Get-Content -LiteralPath (Join-Path $resolvedPlugin 'package.json') -Raw | ConvertFrom-Json
+$manifest = Get-Content -LiteralPath (Join-Path $resolvedPlugin 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($manifest.dsh.bundle.patch -ne './cordis.patch.yml') {
   throw "package.json 未声明 dsh.bundle.patch：$resolvedPlugin"
 }

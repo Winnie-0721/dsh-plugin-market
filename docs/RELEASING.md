@@ -63,7 +63,7 @@
    - `cordis.patch.yml` 存在且行 `name` 与包名一致；
    - 客户端 bundle 含 `__ModuleLoader__.load` 且 `id` 等于包名，且不含 `eval` / `new Function`；
    - `lib/` 里不存在**写死的旧版本号**（版本必须从包清单读；这条拦过一次真实的漂移）；
-   - `verify/*.test.mjs` 全部通过（含来源判定矩阵、样式生命周期、版本一致性、PS 脚本 BOM、自更新通道、文案与动效不变量）；
+   - `verify/*.test.mjs` 全部通过（含来源判定矩阵、样式生命周期、版本一致性、PS 脚本 BOM 与读取编码、自更新通道、文案与动效不变量）；
    - **发布面干净**：`plugin-market/`、`docs/`、`scripts/` 与根文件不能有未提交改动。
      其它路径（例如并行进行的 `verify/**` 验收脚本）有改动只警告、不阻塞——它们既不进发布物，
      也不进发布提交，把一场正在跑的验收当成发布阻塞没有意义。
@@ -78,6 +78,9 @@ CI 段（`.github/workflows/pack-release.yml`，`push: tags: ['v*']` 触发；�
    （`version` / `versionCode` / 提交数 / 短哈希 / 构建时间）——产物只落在 CI 工作区，用完即弃；
 3. `gh release create v<version> dist/*.tgz dist/version.json`：**Release 附件是回退与旧版安装的唯一下载源**；
    Release 已存在时改走 `gh release upload --clobber`（重跑幂等）；
+   Release 正文取标签上 CHANGELOG 的同名节（`-NotesFile` 可覆盖），读文件一律显式 `-Encoding UTF8`——
+   PS 5.1 的 `Get-Content` 默认按系统 ANSI（GBK）解码 UTF-8，漏写就会上去一页乱码（v1.0.0–v1.1.5
+   实际发生过，8 个页面已按标签版 CHANGELOG 重建；`verify/ps-encoding.test.mjs` 负责拦住再犯）；
 4. `publish-npm` job：`npm publish --access public`，版本已在 npm 上则跳过；凭据是
    npm Trusted Publishing（OIDC，job 上 `id-token: write`）——与 `publish-npm.yml` 同一套，
    前提是在 npmjs.com 给本包添加 Trusted publisher（repository=本仓库 + workflow 文件名，

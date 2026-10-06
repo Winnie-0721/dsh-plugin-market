@@ -76,6 +76,15 @@
   不发版，并对「HEAD 不在远端」（`-SkipPush` / 推送失败的补推场景）点名提示。门禁新增**档位判定自检**
   判例表 16 条（与版本算术自检同等待遇，负向对照：认不出的类型不许虚报档位）；`docs/RELEASING.md`
   §1/§2/§3 同步。
+- **修复 GitHub 发布页正文乱码**（用户报：github发布页怎么这么乱）：v1.0.0–v1.1.5 的 Release 正文里
+  CHANGELOG 段整页乱码（只有 v1.0.2 干净——那版没有 CHANGELOG 节，走的是脚本字面量回退文案）。
+  根因是发版脚本 `Get-Content CHANGELOG.md -Raw` 没带 `-Encoding`：Windows PowerShell 5.1 默认按
+  系统 ANSI（本机 GBK）解码，UTF-8 中文被读成乱码后原样写进 `--notes-file` 传上 GitHub。正文底部
+  versionName/安装 那几行是 .ps1 里的字符串字面量（脚本带 BOM，解码正确），「只有 CHANGELOG 段乱、
+  字面量行好好的」正好把锅钉在读文件这一步。修复：`scripts/` 下所有 `Get-Content` 显式
+  `-Encoding UTF8`，新增 `verify/ps-encoding.test.mjs` 钉死这条不变量（漏写即报错、负向对照先验尺子）；
+  已发布的 8 个乱码页用 `gh release edit` 按**对应标签上的 CHANGELOG 节**重建正文（trailer 逐字保留），
+  9 个 Release 已全部可读。
 
 ## 1.1.5
 

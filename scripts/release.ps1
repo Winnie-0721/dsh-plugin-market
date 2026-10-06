@@ -222,7 +222,7 @@ if ($CiPack) {
     $Tag = $refName            # 标签推送：打的就是这个标签
   } elseif (-not $Tag) {
     # 手动补跑（分支上触发）：从包版本推导标签（例如 package.json=1.1.5 → v1.1.5）
-    $Tag = "v$((Get-Content $manifestPath -Raw | ConvertFrom-Json).version)"
+    $Tag = "v$((Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).version)"
   }
   Push-Location $root
   try {
@@ -246,7 +246,7 @@ if ($Version) {
 if ($CiPack -and ($Bump -eq 'auto' -or $Version)) {
   throw '-CiPack 不做版本决策——版本号在本地用 -Bump/-Version 定好并打成标签，CI 只按标签打包。'
 }
-$manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+$manifest = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $current = [string]$manifest.version
 if ($current -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
   throw "package.json 的 version 不是 MAJOR.MINOR.PATCH：$current"
@@ -443,13 +443,13 @@ Ok 'dsh.bundle.patch / dsh.client.platform / exports["./client"] 齐全'
 
 $patchFile = Join-Path $pkgDir 'cordis.patch.yml'
 if (-not (Test-Path $patchFile)) { throw '缺 cordis.patch.yml' }
-$patchText = Get-Content $patchFile -Raw
+$patchText = Get-Content $patchFile -Raw -Encoding UTF8
 if ($patchText -notmatch [regex]::Escape("name: $($manifest.name)")) {
   throw "cordis.patch.yml 里的 name 与包名不一致（应为 $($manifest.name)）"
 }
 Ok "cordis.patch.yml 行 name 与包名一致（$($manifest.name)）"
 
-$clientText = Get-Content (Join-Path $pkgDir 'lib\client.js') -Raw
+$clientText = Get-Content (Join-Path $pkgDir 'lib\client.js') -Raw -Encoding UTF8
 if ($clientText -notmatch '__ModuleLoader__\s*\.\s*load') { throw 'client bundle 缺 __ModuleLoader__.load' }
 if ($clientText -notmatch ('id\s*:\s*"' + [regex]::Escape($manifest.name) + '"')) { throw 'client bundle 的 id 与包名不一致' }
 if ($clientText -match 'eval\s*\(' -or $clientText -match 'new\s+Function\s*\(') { throw 'client bundle 含 eval/new Function' }
@@ -548,9 +548,13 @@ if ($CiPack) {
   if (-not $gh) { throw '找不到 gh CLI，无法创建 Release' }
 
   $notes = ''
-  if ($NotesFile) { $notes = Get-Content (Join-Path $root $NotesFile) -Raw }
+  if ($NotesFile) { $notes = Get-Content (Join-Path $root $NotesFile) -Raw -Encoding UTF8 }
   if (-not $notes) {
-    $changelog = Get-Content (Join-Path $pkgDir 'CHANGELOG.md') -Raw
+    # 正文从 CHANGELOG 取，读文件必须显式 UTF-8：PS 5.1 的 Get-Content 默认按系统 ANSI
+    # （本机 GBK）解码，UTF-8 中文会被读成乱码并原样传上发布页——v1.0.0–v1.1.5 的 Release
+    # 正文就是这么坏掉的（底部 versionName/安装等字面量行是脚本 BOM 解码的，反而正常）。
+    # 仓库由 verify/ps-encoding.test.mjs 钉死「scripts/ 里 Get-Content 必须带 -Encoding UTF8」。
+    $changelog = Get-Content (Join-Path $pkgDir 'CHANGELOG.md') -Raw -Encoding UTF8
     $m = [regex]::Match($changelog, "(?ms)^##\s+$([regex]::Escape($version))\s*$\s*(.*?)(?=^##\s|\z)")
     if ($m.Success) { $notes = $m.Groups[1].Value.Trim() }
   }
@@ -583,7 +587,7 @@ if ($CiPack) {
 
 Step '3/5 写入版本'
 if (-not $LocalOnly -and $version -ne $current) {
-  $raw = Get-Content $manifestPath -Raw
+  $raw = Get-Content $manifestPath -Raw -Encoding UTF8
   $updated = $raw -replace '"version"\s*:\s*"[^"]+"', ('"version": "' + $version + '"')
   [System.IO.File]::WriteAllText($manifestPath, $updated, [System.Text.UTF8Encoding]::new($false))
   Ok "package.json version → $version"

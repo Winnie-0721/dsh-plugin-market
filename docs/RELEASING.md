@@ -28,6 +28,13 @@
 - 首个正式版本固定 `1.0.0`；
 - 需要试用但仍未定稿时用预发布号 `1.1.0-rc.1` 这类形式，**不占用正式号段**；
 - 已经发布过的版本号**永不重用、永不覆盖**（npm 也不允许覆盖），出错就往上加 PATCH。
+- **升哪一位可以自动识别**（`release.ps1 -Bump auto`，判据就是上面三条规则本身）：
+  **证据** = 自上个 `v<版本>` 标签以来触及 `plugin-market/` 的提交类型前缀（`feat`→MINOR、
+  `fix`/`修复`/`perf`→PATCH、`feat!`/`BREAKING`/「不兼容」→MAJOR、`chore`/`docs`/`ci`/`test`→不升档；
+  认不出的类型走关键词兜底，还认不出就按「包体有改动至少 PATCH」）；**声明** = CHANGELOG 顶部还没打标签的
+  `## x.y.z` 节（或 `-Version x.y.z` 直接指定）。两边**双向都硬拦**：声明低于证据（有 `feat` 却写 1.1.6）
+  或高于证据（只有 `fix` 却写 1.2.0）都拒绝，报错会列出判定档位的提交并给出两条出路；
+  显式 `-Bump patch|minor|major` 是人工覆盖路径——证据高于所选档位时只警告、不拦。
 
 举两个实际判例：样式生命周期修复（只改行为、不改契约）发 `1.0.1`、`1.0.2`（PATCH）；
 新增两个按钮 + `/self-update` 两个端点 + 自更新通道 + 一套动效，对用户是**新功能**，
@@ -48,6 +55,9 @@
 2. **门禁**（全绿才继续）：
    - **版本算术自检**：判例表验证「高位递增时低位归零」（`1.0.2 +minor → 1.1.0`、`1.9.9 +minor → 1.10.0`、
      `1.4.7 +major → 2.0.0`），并负向对照 `versionCode` 的撞号边界（`MINOR`/`PATCH` ≥ 100 必须被拒绝）；
+   - **档位判定自检**：提交主题判档表（`fix：…`→PATCH、`feat：…`/`feat(ui): …`→MINOR、
+     `feat!：…`/`BREAKING CHANGE`→MAJOR、`chore(release): …`/`docs…`/`ci: …`→不升档），并要求
+     认不出的类型落回不升档——虚报档位会让 `-Bump auto` 拿假证据放行/拦错；
    - `node --check` 过 host/client 每个 `lib/*.js`；
    - `package.json` 可解析，且 `dsh.bundle.patch` / `dsh.client.platform` / `exports["./client"]` 齐全；
    - `cordis.patch.yml` 存在且行 `name` 与包名一致；
@@ -57,7 +67,7 @@
    - **发布面干净**：`plugin-market/`、`docs/`、`scripts/` 与根文件不能有未提交改动。
      其它路径（例如并行进行的 `verify/**` 验收脚本）有改动只警告、不阻塞——它们既不进发布物，
      也不进发布提交，把一场正在跑的验收当成发布阻塞没有意义。
-3. **递增**：按 `-Bump` 写入新的 `version`；
+3. **递增**：按 `-Bump`（或 `-Bump auto` 识别 / `-Version` 指定的结果）写入新的 `version`；
 4. **提交**：`git commit`（内容只有 `plugin-market/package.json`）+ `git tag -a v<version>`；
 5. **推送**：`git push --follow-tags`。标签一推上去，Actions「Pack and Release」自动接手。
 
@@ -84,6 +94,8 @@ CI 段（`.github/workflows/pack-release.yml`，`push: tags: ['v*']` 触发；�
 pwsh -File scripts\release.ps1 -Bump patch      # 修复
 pwsh -File scripts\release.ps1 -Bump minor      # 新功能
 pwsh -File scripts\release.ps1 -Bump major      # 破坏兼容
+pwsh -File scripts\release.ps1 -Bump auto       # 自动识别升档：CHANGELOG 新节定号 + 提交证据验档位（双向都拦）
+pwsh -File scripts\release.ps1 -Version 1.2.0   # 直接指定目标版本（与 -Bump 二选一；CHANGELOG 需有同名节或配 -NotesFile）
 
 # 只跑门禁：不改版本、不打包、不提交、不发布（本地验证的唯一正确姿势）
 pwsh -File scripts\release.ps1 -LocalOnly
@@ -91,6 +103,10 @@ pwsh -File scripts\release.ps1 -LocalOnly
 # 递增 + 提交 + 打标签，但不推送（想先看一眼再推）
 pwsh -File scripts\release.ps1 -Bump patch -SkipPush
 ```
+
+`-Bump auto` 的判定口径见 §1「升哪一位可以自动识别」；`-Bump auto` 与 `-Version` 都会被提交证据
+双向校验（声明档位低于或高于证据都会被拒绝），显式 `-Bump patch|minor|major` 信任人工判断——
+证据高于所选档位时只给警告、不拦。
 
 `-CiPack` 是 CI 专用：只在 `GITHUB_ACTIONS=true` 时放行，本地调用直接被拒——
 本地打包会留产物、还会消耗 gh token，正是这次迁移要消灭的两件事。

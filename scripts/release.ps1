@@ -7,6 +7,8 @@
 #
 # 本地路径（不产生任何打包产物，不消耗 gh / npm token）：
 #   pwsh -File scripts\release.ps1 -Bump patch|minor|major   # 门禁 → 递增 → 提交 → 打标签 → 推送
+#   pwsh -File scripts\release.ps1 -Bump auto                # 自动识别升档：CHANGELOG 新节定目标号 + 提交证据验档位（双向都拦）
+#   pwsh -File scripts\release.ps1 -Version 1.2.0            # 直接指定目标版本（与 -Bump auto|patch|minor|major 二选一）
 #   pwsh -File scripts\release.ps1 -LocalOnly                # 只跑门禁（不改版本、不留产物、不发布）
 #   pwsh -File scripts\release.ps1 -SkipPush                 # 递增 + 提交 + 打标签，但不推送
 #
@@ -17,8 +19,10 @@
 
 [CmdletBinding()]
 param(
-  [ValidateSet('none', 'patch', 'minor', 'major')]
+  [ValidateSet('none', 'patch', 'minor', 'major', 'auto')]
   [string]$Bump = 'none',
+  # 直接指定目标版本（如 1.2.0）：与显式 -Bump 二选一；-Bump auto 时它就是「声明」本身
+  [string]$Version,
   [string]$NotesFile,
   [string]$Tag,
   [switch]$LocalOnly,
@@ -91,6 +95,123 @@ function Get-VersionCode([int[]]$Parts) {
   return $Parts[0] * 10000 + $Parts[1] * 100 + $Parts[2]
 }
 
+# ── 档位自动识别（-Bump auto / -Version 用）────────────────────────────
+# 判定口径就是 docs/RELEASING.md §1 的三条：破坏兼容→MAJOR、向后兼容的新功能→MINOR、
+# 修复（含安全/性能）→至少 PATCH。证据来自**提交类型前缀**，声明来自 CHANGELOG 新节或 -Version；
+# 两边任何方向的偏差都拒绝（双向硬拦），显式 -Bump patch|minor|major 是人工覆盖路径。
+function Get-LevelOrdinal([string]$Level) {
+  switch ($Level) {
+    'none' { return 0 }
+    'patch' { return 1 }
+    'minor' { return 2 }
+    'major' { return 3 }
+    default { throw "未知档位：$Level" }
+  }
+}
+
+# 类型前缀 → 档位。键不区分大小写（PS 哈希表默认行为），中文类型名与仓库历史提交对齐。
+$typeLevels = @{
+  feat = 'minor'; feature = 'minor'; enhancement = 'minor'; '新功能' = 'minor'
+  fix = 'patch'; '修复' = 'patch'; bugfix = 'patch'; perf = 'patch'; performance = 'patch'
+  security = 'patch'; '性能' = 'patch'; '安全' = 'patch'
+  chore = 'none'; docs = 'none'; ci = 'none'; test = 'none'; style = 'none'
+  build = 'none'; refactor = 'none'; release = 'none'; revert = 'none'; '文案' = 'none'
+}
+
+# 从一条提交主题判档位：none=不升档 / patch / minor / major。
+# 形态：`type：标题`、`type(scope): 标题`、`type+type：标题`（全半角冒号都认）、`type!：` 破坏标记。
+# 认不出的类型（如 `Update publish-npm.yml`、`UI：两颗黑按钮…`）不虚报，落回关键词兜底；
+# 关键词也认不出就返回 none——宁可让「包体有改动至少 PATCH」那条兜底，也不制造假的档位证据。
+function Get-SubjectLevel([string]$Subject) {
+  $s = "$Subject".Trim()
+  if (-not $s) { return 'none' }
+  # 破坏兼容标记最优先：feat! / BREAKING CHANGE，中文口径「破坏兼容 / 不兼容」
+  if ($s -match '(?i)breaking|破坏兼容|不兼容') { return 'major' }
+  $m = [regex]::Match($s, '^([A-Za-z\u4e00-\u9fff]+(?:\+[A-Za-z\u4e00-\u9fff]+)*)(?:\([^)]*\))?(!?)\s*[:：]')
+  if ($m.Success) {
+    if ($m.Groups[2].Value -eq '!') { return 'major' }
+    $anyKnown = $false; $allKnown = $true; $best = 'none'
+    foreach ($type in ($m.Groups[1].Value -split '\+')) {
+      if ($typeLevels.ContainsKey($type)) {
+        $anyKnown = $true
+        if ((Get-LevelOrdinal $typeLevels[$type]) -gt (Get-LevelOrdinal $best)) { $best = $typeLevels[$type] }
+      } else { $allKnown = $false }
+    }
+    if ($anyKnown -and $allKnown) { return $best }
+    # 混着认不出的成分（如 feat+X）→ 不拿半截证据下结论，走关键词兜底
+  }
+  if ($s -match '(?i)(?<![\w-])feat(?![\w-])|新功能|新增|支持') { return 'minor' }
+  if ($s -match '(?i)(?<![\w-])fix(?![\w-])|修复|修正|修「|修了|报错|崩溃|闪退') { return 'patch' }
+  return 'none'
+}
+
+# 与 Invoke-Native 同理（原生命令的 stderr 在 EAP=Stop 下会掐断脚本），但安静地取输出不打印。
+function Invoke-Quiet([string]$exe, [string[]]$argv) {
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $text = @(& $exe @argv 2>&1 | ForEach-Object { $_.ToString() }) } finally { $ErrorActionPreference = $previous }
+  return @{ Code = $LASTEXITCODE; Out = $text }
+}
+
+# 采集「自上个 v<版本> 标签以来、触及 plugin-market/ 的提交」作为升档证据：
+#   LastTag/LastVersion = 比较基线；Subjects = 每条主题 + 判定档位；Level = 最高档位。
+# 两条兜底：有提交但全认不出类型 → 至少 PATCH（包体变了就必须有新版本号）；
+# 没提交但有未提交改动 → 同样按「内容有变更」计一条（LocalOnly 干跑时也别谎称无改动）。
+function Get-ReleaseEvidence {
+  Push-Location $root
+  try {
+    $tags = Invoke-Quiet 'git' @('tag', '--merged', 'HEAD', '--sort=-version:refname')
+    if ($tags.Code -ne 0) { throw "git tag 失败：$($tags.Out -join ' ')" }
+    $lastTag = @($tags.Out | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }) | Select-Object -First 1
+    if (-not $lastTag) {
+      throw 'HEAD 历史里没有可用的 v<版本> 标签作为基线，自动识别无从比较——请用 -Bump patch|minor|major 显式指定。'
+    }
+    # git 的提交主题是 UTF-8，Windows 控制台默认 OEM 码页会把它解成乱码（关键词判定就废了），
+    # 所以取 git 输出期间临时切成 UTF-8，用完还原。
+    $prevEnc = [Console]::OutputEncoding
+    try {
+      [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+      $log = Invoke-Quiet 'git' @('log', '--no-merges', '--pretty=%s', "$lastTag..HEAD", '--', 'plugin-market/')
+      if ($log.Code -ne 0) { throw "git log 失败：$($log.Out -join ' ')" }
+      $dirty = Invoke-Quiet 'git' @('status', '--porcelain', '--', 'plugin-market/')
+      if ($dirty.Code -ne 0) { throw "git status 失败：$($dirty.Out -join ' ')" }
+    } finally { [Console]::OutputEncoding = $prevEnc }
+    $subjects = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in @($log.Out)) {
+      if ($line) { $subjects.Add(@{ S = [string]$line; Level = (Get-SubjectLevel $line) }) }
+    }
+    if ($subjects.Count -eq 0 -and @($dirty.Out | Where-Object { $_ }).Count -gt 0) {
+      $subjects.Add(@{ S = '（plugin-market/ 有未提交改动，档位按「内容有变更」计）'; Level = 'none' })
+    }
+    $level = 'none'
+    foreach ($s in $subjects) {
+      if ((Get-LevelOrdinal $s.Level) -gt (Get-LevelOrdinal $level)) { $level = $s.Level }
+    }
+    if ($subjects.Count -gt 0 -and $level -eq 'none') { $level = 'patch' }
+    return @{ LastTag = [string]$lastTag; LastVersion = ([string]$lastTag).Substring(1); Subjects = @($subjects); Level = $level }
+  } finally { Pop-Location }
+}
+
+# CHANGELOG 顶部第一个还没打标签的 `## x.y.z` 节 = 本次发布的「声明」（Release notes 也从它取）。
+# 全部节都已有标签 → 没有未发布的新节，返回 $null。
+function Get-ChangelogDecl {
+  $path = Join-Path $pkgDir 'CHANGELOG.md'
+  if (-not (Test-Path $path)) { return $null }
+  $text = Get-Content $path -Raw -Encoding UTF8
+  $heads = @([regex]::Matches($text, '(?m)^##\s+(\d+\.\d+\.\d+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+  if ($heads.Count -eq 0) { return $null }
+  Push-Location $root
+  try {
+    $tags = Invoke-Quiet 'git' @('tag', '--list', 'v*')
+    if ($tags.Code -ne 0) { throw "git tag --list 失败：$($tags.Out -join ' ')" }
+  } finally { Pop-Location }
+  $existing = @($tags.Out)
+  foreach ($h in $heads) {
+    if ("v$h" -notin $existing) { return $h }
+  }
+  return $null
+}
+
 # ── CI（-CiPack）：先解析标签并检出标签内容，门禁与打包都以标签为准 ──
 if ($CiPack) {
   if ($env:GITHUB_ACTIONS -ne 'true') {
@@ -115,6 +236,16 @@ if ($CiPack) {
 
 # ── 1. 读并校验当前版本 ─────────────────────────────────────────────
 Step '1/5 读取并校验版本'
+# —— 参数一致性：先于一切读取与判定 ——
+if ($Version) {
+  if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "-Version 必须是 MAJOR.MINOR.PATCH：$Version" }
+  if ($PSBoundParameters.ContainsKey('Bump') -and $Bump -ne 'none') {
+    throw '-Version 与 -Bump 二选一：-Version 直接指定目标号，-Bump 相对当前版本升档（auto = 交给脚本判）。'
+  }
+}
+if ($CiPack -and ($Bump -eq 'auto' -or $Version)) {
+  throw '-CiPack 不做版本决策——版本号在本地用 -Bump/-Version 定好并打成标签，CI 只按标签打包。'
+}
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $current = [string]$manifest.version
 if ($current -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
@@ -122,13 +253,117 @@ if ($current -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
 }
 $major = [int]$Matches[1]; $minor = [int]$Matches[2]; $patch = [int]$Matches[3]
 Ok "当前 versionName=$current versionCode=$(Get-VersionCode @($major, $minor, $patch))"
+# 升档前的原始三段：显式 -Bump 的证据建议要用它算目标号（bump 之后就没有「当前」了）。
+$currentParts = @($major, $minor, $patch)
 
-$bumped = Get-BumpedParts @($major, $minor, $patch) $Bump
-$major = $bumped[0]; $minor = $bumped[1]; $patch = $bumped[2]
-$version = "$major.$minor.$patch"
-$versionCode = Get-VersionCode @($major, $minor, $patch)
-if ($version -ne $current) { Ok "递增后 versionName=$version versionCode=$versionCode" }
-else { Ok '不递增（首个版本或 -Bump none）' }
+if ($Bump -eq 'auto' -or $Version) {
+  # —— 自动识别：声明（CHANGELOG 新节 / -Version）× 证据（触及包体的提交类型），双向都硬拦 ——
+  $evi = Get-ReleaseEvidence
+  foreach ($s in ($evi.Subjects | Select-Object -First 50)) {
+    Write-Host ("    {0,-6} {1}" -f $s.Level, $s.S) -ForegroundColor DarkGray
+  }
+  if ($evi.Subjects.Count -gt 50) { Write-Host "    ……另有 $($evi.Subjects.Count - 50) 条未列出" -ForegroundColor DarkGray }
+
+  if ($evi.Subjects.Count -eq 0) {
+    # 没有触及包体的提交 = 没有要发的东西。顺手把「上一轮 -SkipPush / 推送失败」的补推场景点出来，
+    # 否则人会把「无需发版」误读成「已经发出去了」。
+    Ok "plugin-market/ 自 $($evi.LastTag) 起无改动，无需发新版本"
+    $onRemote = Invoke-Quiet 'git' @('branch', '-r', '--contains', 'HEAD')
+    if ($onRemote.Code -eq 0 -and -not (@($onRemote.Out | Where-Object { $_ -match 'origin/' }) | Select-Object -First 1)) {
+      Write-Warning '但 HEAD 还不在任何远端分支上——上一轮多半是 -SkipPush 或推送失败；补推：git push --follow-tags'
+    }
+    if (-not $LocalOnly) { exit 0 }
+    Ok 'LocalOnly：照常跑门禁（不升档）'
+  }
+  else {
+    # 目标号：-Version 直接指定；否则取 CHANGELOG 顶部还没打标签的 ## x.y.z 节（Release notes 从它取）。
+    if ($Version) {
+      $target = [string]$Version
+      $declSource = "-Version $Version"
+      $changelogText = Get-Content (Join-Path $pkgDir 'CHANGELOG.md') -Raw -Encoding UTF8
+      if (-not $NotesFile -and $changelogText -notmatch ("(?m)^##\s+" + [regex]::Escape($target) + "\s*$")) {
+        throw ("CHANGELOG.md 里没有 `n## $target`n 一节（Release notes 默认从它取）。补上该节，或用 -NotesFile <说明文件> 指定。")
+      }
+    }
+    else {
+      $declared = Get-ChangelogDecl
+      if (-not $declared) {
+        $sp = Get-BumpedParts $currentParts $evi.Level
+        $suggest = "$($sp[0]).$($sp[1]).$($sp[2])"
+        throw ("CHANGELOG.md 没有未发布的新节，定不了目标号。按提交证据应发 $suggest（$($evi.Level) 档）。" + "`n" +
+          "在 plugin-market/CHANGELOG.md 顶部写一节：`n## $suggest …`n，或用 -Version $suggest -NotesFile <说明文件> 显式指定。")
+      }
+      $target = [string]$declared
+      $declSource = "CHANGELOG ## $target"
+    }
+
+    # 档位 = 目标相对基线升了几档。基线正常是当前版本；package.json 已手工改成目标号时，
+    # 「升了几档」就得对着上一个标签算（否则 1.2.0 vs 1.2.0 会被误判成没升）。
+    $refVersion = $current
+    if ($target -eq $current) { $refVersion = $evi.LastVersion }
+    $refMatch = [regex]::Match($refVersion, '^(\d+)\.(\d+)\.(\d+)$')
+    $refParts = @([int]$refMatch.Groups[1].Value, [int]$refMatch.Groups[2].Value, [int]$refMatch.Groups[3].Value)
+    $step = $null
+    foreach ($kind in 'patch', 'minor', 'major') {
+      $p = Get-BumpedParts $refParts $kind
+      if ("$($p[0]).$($p[1]).$($p[2])" -eq $target) { $step = $kind; break }
+    }
+    if (-not $step) {
+      if ($target -eq $refVersion) {
+        throw "$declSource 的 $target 等于基线 $refVersion——该版本已发过，标签与版本号永不重用。"
+      }
+      throw "$declSource 的 $target 与基线 $refVersion 不是一档之差（patch/minor/major 都对不上）——自动识别不放行多档跳版；检查 CHANGELOG 节名与 package.json 是否漏改。"
+    }
+
+    # 双向都硬拦：声明档位必须与提交证据完全一致（低于、高于都拒绝）。
+    if ($evi.Level -ne $step) {
+      $eviOrdinal = Get-LevelOrdinal $evi.Level
+      $stepOrdinal = Get-LevelOrdinal $step
+      $drivers = @($evi.Subjects | Where-Object { (Get-LevelOrdinal $_.Level) -eq $eviOrdinal } | ForEach-Object { $_.S })
+      $sp2 = Get-BumpedParts $refParts $evi.Level
+      $suggest = "$($sp2[0]).$($sp2[1]).$($sp2[2])"
+      $evidenceText = if ($drivers.Count -gt 0) { "$($evi.Level) 档 —— " + ($drivers -join '、') }
+      else { "$($evi.Level) 档（有提交但类型都认不出，按「包体有改动至少 PATCH」定档）" }
+      $direction = if ($stepOrdinal -gt $eviOrdinal) { '高于' } else { '低于' }
+      throw (@(
+        "自动识别拒绝：$declSource 的档位（升 $step）$direction 提交证据（升 $($evi.Level)）——双向都拦，两边任何偏差都不发。",
+        "  声明：$declSource（基线 $refVersion 升 $step 档 → $target）",
+        "  证据：$evidenceText",
+        "  按 docs/RELEASING.md §1 的判定口径应发 $suggest。",
+        "  出路①：把声明改成 ## $suggest 后重跑；",
+        "  出路②：确认声明正确就显式发——-Bump $step 或 -Version $target（显式路径信任人工判断，不做证据校验）。"
+      ) -join "`n")
+    }
+
+    $targetMatch = [regex]::Match($target, '^(\d+)\.(\d+)\.(\d+)$')
+    $major = [int]$targetMatch.Groups[1].Value; $minor = [int]$targetMatch.Groups[2].Value; $patch = [int]$targetMatch.Groups[3].Value
+    $version = $target
+    $versionCode = Get-VersionCode @($major, $minor, $patch)
+    Ok "auto：$declSource 升 $step 档，与提交证据一致（基线 $($evi.LastTag)，证据 $($evi.Subjects.Count) 条提交）→ versionName=$version versionCode=$versionCode"
+  }
+}
+else {
+  $bumped = Get-BumpedParts $currentParts $Bump
+  $major = $bumped[0]; $minor = $bumped[1]; $patch = $bumped[2]
+  $version = "$major.$minor.$patch"
+  $versionCode = Get-VersionCode @($major, $minor, $patch)
+  if ($version -ne $current) { Ok "递增后 versionName=$version versionCode=$versionCode" }
+  else { Ok '不递增（首个版本或 -Bump none）' }
+
+  # 显式升档时把提交证据当**建议**给出来：只提醒「证据高于所选档位」这一个有真实风险的方向，
+  # 不拦——显式 -Bump 的定位就是信任人工判断。证据取不到（无标签等）也绝不反过来拦发布。
+  if ($Bump -in @('patch', 'minor', 'major') -and -not $CiPack) {
+    try {
+      $adv = Get-ReleaseEvidence
+      if ((Get-LevelOrdinal $adv.Level) -gt (Get-LevelOrdinal $Bump)) {
+        $advDrivers = @($adv.Subjects | Where-Object { (Get-LevelOrdinal $_.Level) -eq (Get-LevelOrdinal $adv.Level) } | ForEach-Object { $_.S })
+        $advTarget = Get-BumpedParts $currentParts $adv.Level
+        Write-Warning ("提交证据判为 $($adv.Level) 档（" + ($advDrivers -join '、') + "），高于 -Bump $Bump——" +
+          "按 RELEASING §1 该发 $($advTarget -join '.')。显式路径信任人工判断，继续。")
+      }
+    } catch { }
+  }
+}
 
 if ($CiPack) {
   if ($Bump -ne 'none') { throw '-CiPack 不做递增——版本号在本地 -Bump 时写好、打成标签，CI 只负责打包发布' }
@@ -163,6 +398,35 @@ if (-not $boundRejected) {
   throw '版本算术自检失败：Get-VersionCode 没有拒绝 PATCH=100（会与 1.1.0 撞成同一个 versionCode）'
 }
 Ok '版本算术自检通过（1.0.2 +minor → 1.1.0，低位归零；MINOR/PATCH ≥ 100 的撞号被拒绝）'
+
+# 档位判定自检：把「什么提交升什么位」也变成每次发布都跑一遍的断言。判错会静默地发错号——
+# 版本号一旦发布就再也改不回来，所以与版本算术自检同等待遇。负向对照：认不出的类型必须落回
+# none，不许虚报档位（虚报会让 auto 在发布时拿假证据拦人/放行）。
+$subjectCases = @(
+  @{ s = 'fix：搜索框只留一颗清除键'; e = 'patch' },
+  @{ s = 'feat：重启助手——一键真动作'; e = 'minor' },
+  @{ s = 'feat(ui): 可更新页改成第三个页签'; e = 'minor' },
+  @{ s = 'feat!：包名重命名'; e = 'major' },
+  @{ s = 'fix(ci): spec 步骤括号笔误'; e = 'patch' },
+  @{ s = '修复：自更新检查改读附件元数据'; e = 'patch' },
+  @{ s = '性能：拆开共享 tick'; e = 'patch' },
+  @{ s = 'test+fix(market): 断言修正'; e = 'patch' },
+  @{ s = 'chore(release): v1.1.5'; e = 'none' },
+  @{ s = 'docs(readme)：默认英文，中文走切换'; e = 'none' },
+  @{ s = 'ci: npm 发布凭据对齐 OIDC'; e = 'none' },
+  @{ s = 'Update publish-npm.yml'; e = 'none' },
+  @{ s = 'BREAKING CHANGE：端点字段删除'; e = 'major' },
+  @{ s = '不兼容旧版宿主的旧字段已移除'; e = 'major' },
+  @{ s = '修「点更新不会更新」根因'; e = 'patch' },
+  @{ s = '右键补成四态状态机：更新/正在更新/成功'; e = 'none' }
+)
+foreach ($case in $subjectCases) {
+  $got = Get-SubjectLevel $case.s
+  if ($got -ne $case.e) {
+    throw "档位判定自检失败：'$($case.s)' 判成 $got，应为 $($case.e)"
+  }
+}
+Ok '档位判定自检通过（feat→minor、fix/修复/性能→patch、!/BREAKING→major、chore/docs/ci→不升档、认不出的类型不虚报）'
 
 # .js 与 .cjs 都查：restart-helper.cjs 是重启助手的分离脚本，语法错误要在这里就拦下。
 $libFiles = Get-ChildItem (Join-Path $pkgDir 'lib') | Where-Object { $_.Extension -in '.js', '.cjs' } | Sort-Object Name

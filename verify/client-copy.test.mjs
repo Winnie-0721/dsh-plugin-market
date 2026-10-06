@@ -330,6 +330,21 @@ check('第三个页签「可更新」：排在已安装右边、带计数角标�
   assert.equal(source.includes('scrollIntoView'), false, '不再需要滚动定位：内容现在整页出现')
   assert.match(source, /updateCount > 0 \? el\("span", \{ className: "dshpm-count" \}/, '页签要带可更新计数角标')
 })
+check('搜索框只有一个清除键：样式表关掉 Chromium 原生的 ::-webkit-search-cancel-button', () => {
+  // 用户截图（2026-10-06）：搜索框聚焦且有值时出现两个清除键——我们 .dshpm-search 里那颗，
+  // 加上 Chromium 给 input[type=search] 画的原生 ✕（按 accent-color 上色，所以是蓝的）。
+  // 原生那颗不在 DOM 里，数不出来，所以先在样式表层面钉死；真机行为由 market-ui.e2e.mjs 的
+  // [3a]（聚焦输入 + 截图 market-search-clear.png）与本条一起兜底。
+  const rules = (css.match(/\.dshpm-input::-webkit-search-cancel-button\s*\{[^}]*\}/g) || []).join('\n')
+  assert.ok(rules.length > 0, '必须有 .dshpm-input::-webkit-search-cancel-button 规则')
+  assert.match(rules, /-webkit-appearance:\s*none/, '原生取消按钮要 -webkit-appearance:none')
+  assert.match(rules, /display:\s*none/, '还要 display:none（连它的点击热区一起去掉）')
+  // 输入框保持 type=search（role=searchbox 语义），靠上面的样式而不是改类型来去重；
+  // 我们那颗仍在：有值才出现，点击走 onQueryClear（resetFilters 连筛选一起清）。
+  assert.match(source, /type: "search"/, '搜索框仍是 type=search（语义留给原生，视觉交给我们的按钮）')
+  assert.match(source, /props\.queryInput\s*\? el\("button"/, '清除键按输入值条件渲染')
+  assert.match(source, /onClick: props\.onQueryClear/, '清除键要接 onQueryClear 而不是靠浏览器默认行为')
+})
 
 console.log('')
 if (failures.length > 0) {

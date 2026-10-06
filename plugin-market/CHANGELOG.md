@@ -52,6 +52,20 @@
   （用 DSH 退出方式或 taskkill）。失败码 `restart-failed`（宿主没退出，可原地重试）。回归：
   新增 `verify/restart-helper.test.mjs`（8 条，含真助手：死父拉起且 env 已清 / 活父绝不拉起）、
   `client-copy.test.mjs` 重启接线检查、e2e 断言横幅出现（**不点击**——会杀掉验收宿主）。
+- **搜索框只有一个清除键**（用户报：搜索框有两个清除键）：根因是 `input[type=search]` 在
+  **聚焦且有值**时，Chromium 会自己再画一颗原生 ✕（按 `accent-color` 上色，所以是蓝的），
+  与 `.dshpm-search` 里我们那颗（带 zh/en `title`/`aria-label`、点击走 `onQueryClear` 连筛选
+  一起清）并排出现。裸页 A/B 实测（headless Edge 聚焦态截图）：无规则是「原生 ✕ + 我们的 ×」
+  两颗，`-webkit-appearance:none` 或 `display:none` **任一**都能让原生那颗消失，现在两个都写：
+  `.dshpm-input::-webkit-search-cancel-button { -webkit-appearance:none; appearance:none; display:none; }`
+  ——输入框保持 `type=search`（`role=searchbox` 语义不丢），不靠改类型去重。回归：
+  `client-copy.test.mjs` 新增 1 条（样式表必须带这条规则 + 我们那颗仍按值条件渲染并接
+  `onQueryClear`），23→24；`market-ui.e2e.mjs` 新增 `[3a]`（在**生效的样式表里挑出我们这条**规则
+  ——宿主自己的 `._3Y3Nma_search` 同名规则不算数、聚焦输入后 `.dshpm-search` 内清除按钮精确 1 颗、
+  截图 `market-search-clear.png`、点它必须把输入框与按钮一起复位），53→**58/58**。注意：原生 ✕
+  **只在聚焦时**才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`；ref DSH +
+  headless Edge 这个组合里即便把 `appearance` 全部还原也复现不出原生那颗（逐像素比过），故
+  「修复前」的样子用裸页探针取证，e2e 只钉「规则在 + 只有一颗 + 能清」。
 
 ## 1.1.5
 

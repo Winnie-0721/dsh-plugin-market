@@ -300,6 +300,88 @@ try {
   )
   console.log(`  · 截图：${join(shotDir, 'market-discover.png')}`)
 
+  console.log('\n[3a] 搜索框只保留一个清除键（用户报的「两个清除键」）')
+  // 复现状态必须是「聚焦 + 有值」：Chromium 只在这个状态下给 input[type=search] 画原生 ✕
+  // （按 accent-color 上色，所以是蓝的），与我们 .dshpm-search 里那颗并排。原生那颗不在 DOM 里、
+  // 数不出来，所以三头并进：生效的样式表要有关掉它的规则 + 我们那颗只有一颗 + 截图留证。
+  const cancelRules = await evaluate(
+    client,
+    `(() => {
+       const out = [];
+       for (const sheet of Array.from(document.styleSheets)) {
+         let rules; try { rules = sheet.cssRules } catch (e) { continue }
+         for (const rule of Array.from(rules || [])) {
+           if (rule.selectorText && rule.selectorText.includes('::-webkit-search-cancel-button')) {
+             out.push({ selector: rule.selectorText, css: rule.style.cssText });
+           }
+         }
+       }
+       return out;
+     })()`,
+  )
+  // 宿主自己的搜索框（._3Y3Nma_search 之类）也有关掉原生 ✕ 的规则，所以必须挑出**我们这条**，
+  // 否则宿主的规则会替我们「蒙混过关」——第一版断言就是这么误判通过/失败的。
+  const ours = Array.isArray(cancelRules) ? cancelRules.find((rule) => String(rule.selector).includes('.dshpm-input')) : null
+  expect(
+    '生效的样式表里有一条针对搜索框、关掉原生 search 取消按钮的规则（否则聚焦时会画出第二个 ✕）',
+    !!ours && /appearance\s*:\s*none/i.test(String(ours.css)) && /display\s*:\s*none/i.test(String(ours.css)),
+    JSON.stringify(cancelRules),
+  )
+  const typed = await evaluate(
+    client,
+    `(() => {
+       const input = document.querySelector('.dshpm-input');
+       if (!input) return { ok: false, why: '.dshpm-input 不存在' };
+       input.focus();
+       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+       setter.call(input, '1');
+       input.dispatchEvent(new Event('input', { bubbles: true }));
+       const r = input.getBoundingClientRect();
+       return { ok: true, focused: document.activeElement === input, value: input.value,
+                rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+     })()`,
+  )
+  expect(
+    '搜索框聚焦并输入关键字（正是用户截图里冒出第二个 ✕ 的那个状态）',
+    !!typed?.ok && typed?.focused === true && typed?.value === '1',
+    JSON.stringify(typed),
+  )
+  console.log(`  · 搜索框位置（供截图裁剪核对）：${JSON.stringify(typed?.rect)}`)
+  await waitFor(client, `document.querySelectorAll('.dshpm-search .dshpm-iconBtn').length === 1`, 5000, '输入后清除键出现')
+  const clearCount = await evaluate(client, `document.querySelectorAll('.dshpm-search .dshpm-iconBtn').length`)
+  expect('聚焦且有值时，搜索框里的清除按钮只有一颗', Number(clearCount) === 1, `实际：${clearCount}`)
+  // 关键：原生 ✕ **只在聚焦时**才画（失焦的截图会「假装修好了」，第一版就是这么被坑的），
+  // 所以截图前重新聚焦，并把 activeElement / appearance / 边框色打出来留痕。
+  const refocus = `(() => {
+      const input = document.querySelector('.dshpm-input');
+      if (!input) return { active: false, why: 'no input' };
+      input.focus();
+      const box = input.closest('.dshpm-search');
+      const cs = getComputedStyle(input);
+      return { active: document.activeElement === input, value: input.value,
+               appearance: cs.appearance || cs.webkitAppearance, border: box ? getComputedStyle(box).borderColor : null };
+    })()`
+  const focusBefore = await evaluate(client, refocus)
+  expect('截图前焦点确实在搜索框上（否则原生 ✕ 根本不会画，断言就成了摆设）', focusBefore?.active === true, JSON.stringify(focusBefore))
+  console.log(`  · 截图前的焦点状态：${JSON.stringify(focusBefore)}`)
+  await screenshot(client, join(shotDir, 'market-search-clear.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-search-clear.png')}`)
+  // 为什么没有「临时撤销修复 → 拍修复前的样子」的对照图：在 ref DSH + headless Edge 这个组合里，
+  // 原生 ✕ 就是画不出来——聚焦、有值、连 input 的 appearance 都还原过，拍出来和修复后完全一样
+  // （逐像素比过）。修复前的样子是用裸页复现的：同一段 input[type=search]、聚焦 + accent-color，
+  // 无规则时是「蓝/深色 ✕ + 灰 ×」两颗，加上 appearance 或 display 其一就只剩一颗——正是用户截图
+  // 里那个状态。用户的真实 DSH 确实画了两颗（其桌面 profile 直接 link 本仓库），所以规则必须在；
+  // 这里钉住的是：规则生效在样式表里 + 我们那颗只有一颗 + 截图留证。
+  // 清除键要真能清：点击走 onQueryClear（resetFilters），输入框与按钮一起复位。
+  await evaluate(client, `(() => { const b = document.querySelector('.dshpm-search .dshpm-iconBtn'); if (b) b.click(); return true; })()`)
+  await waitFor(
+    client,
+    `(() => { const i = document.querySelector('.dshpm-input'); return !!i && i.value === '' && document.querySelectorAll('.dshpm-search .dshpm-iconBtn').length === 0; })()`,
+    5000,
+    '点我们的清除键后输入框清空、按钮消失',
+  )
+  expect('点我们那颗清除键：输入框与按钮一起复位（原生行为没有接管）', true)
+
   console.log('\n[3b] 已安装页的列表动效')
   await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
   await waitFor(client, `document.querySelector('.dshpm-row') !== null`, 15000, '已安装页的第一行')

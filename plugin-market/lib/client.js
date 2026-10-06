@@ -1015,6 +1015,10 @@ window.__ModuleLoader__.load({
 .dshpm-search:focus-within { border-color:var(--dsw-alias-brand-primary,#4d6bfe); }
 .dshpm-searchIcon { flex:none; display:inline-flex; color:var(--dsw-alias-label-secondary,#6b6b6b); }
 .dshpm-input { flex:1 1 auto; min-width:0; border:none; outline:none; background:transparent; color:inherit; font:inherit; font-size:.9em; }
+/* 搜索框只留我们自己那颗清除键：input[type=search] 聚焦且有值时 Chromium 会再画一颗原生 ✕
+   （按 accent-color 上色），与 .dshpm-search 里那颗并排——用户截图里的「两个清除键」。
+   实测（headless Edge 聚焦态截图对比）：appearance 与 display 任一都能让它消失，两个都写最稳。 */
+.dshpm-input::-webkit-search-cancel-button { -webkit-appearance:none; appearance:none; display:none; }
 .dshpm-select { border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:inherit; font:inherit; font-size:.85em; padding:5px 6px; }
 .dshpm-iconBtn { flex:none; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; padding:0; border:none; border-radius:var(--dsw-radius-md,8px); background:transparent; color:var(--dsw-alias-label-secondary,#6b6b6b); cursor:pointer; }
 .dshpm-iconBtn:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); }

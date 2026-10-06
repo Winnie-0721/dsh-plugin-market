@@ -257,6 +257,86 @@ try {
     JSON.stringify(toastBox),
   )
 
+  // 用户报「这三个切换页面高度不对齐」：三个页签各自的内容起点/高度不一样，切一下就跳。
+  // 修法是统一外壳（.dshpm-page）+ 固定页签按钮高度；这里量真实的几何，而不是看代码里有没有写类名。
+  console.log('\n[2c] 三个页签共用一套布局（用户报的「高度不对齐」）')
+  // 先让发现页进入正常数据态：骨架屏/加载态不是要比的东西，三页都要拿「有内容」的那一版量。
+  // （[3] 本来也要等卡片，这里不额外拖时间。）
+  await waitFor(client, `document.querySelector('.dshpm-card') !== null`, 30000, '发现页卡片（对齐测量前）')
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  const tabHeights = await evaluate(
+    client,
+    `Array.from(document.querySelectorAll('.dshpm-tab')).map(b => Math.round(b.getBoundingClientRect().height * 100) / 100)`,
+  )
+  expect(
+    '三个页签按钮等高（角标不影响页签栏高度，后续加页面同理）',
+    Array.isArray(tabHeights) && tabHeights.length === 3 && Math.max(...tabHeights) - Math.min(...tabHeights) <= 0.5,
+    JSON.stringify(tabHeights),
+  )
+  const tabIds = await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).map(b => b.getAttribute('data-tab'))`)
+  expect(
+    '页签由注册表生成并带 data-tab（新增页面只改 MARKET_TABS）',
+    JSON.stringify(tabIds) === JSON.stringify(['discover', 'installed', 'updates']),
+    JSON.stringify(tabIds),
+  )
+  // 每一页量同一组量：页签底边 → 页面顶边（节距）、页面顶边 → 该页**第一行内容**的顶边。
+  // 三个页面的这两个值必须完全一致，否则切页签就会看到内容上下跳（用户截图里的问题）。
+  const measurePane = `(() => {
+    const page = document.querySelector('.dshpm-page');
+    const tabs = document.querySelector('.dshpm-tabs');
+    if (!page || !tabs) return null;
+    const pr = page.getBoundingClientRect();
+    const tr = tabs.getBoundingClientRect();
+    const content = page.querySelector('.dshpm-toolbar, .dshpm-summary, .dshpm-drawerHead');
+    const cr = content ? content.getBoundingClientRect() : null;
+    return {
+      id: page.getAttribute('data-page'),
+      gap: Math.round(pr.top - tr.bottom),
+      pageTop: Math.round(pr.top),
+      firstTop: cr ? Math.round(cr.top) : null,
+      firstClass: content ? content.className : null,
+      height: Math.round(pr.height),
+      pageGap: getComputedStyle(page).gap,
+    };
+  })()`
+  const panes = [await evaluate(client, measurePane)]
+  for (const [label, id] of [['已安装', 'installed'], ['可更新', 'updates']]) {
+    await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /${label}/.test(b.textContent)).click(); true`)
+    await waitFor(client, `document.querySelector('.dshpm-page[data-page="${id}"]') !== null`, 8000, `切到「${label}」页`)
+    // 页面切换带入场动画（dshpm-rise 从 translateY(7px) 起）。量几何前等它落位，
+    // 否则量到的是动画中间帧的 7px 偏移，会把「对齐」误判成不齐。
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    panes.push(await evaluate(client, measurePane))
+  }
+  // 页签底边到页面顶边：三页都是同一个节距（外壳与面板根共用 12px）。
+  expect(
+    '页签底边到页面顶边的节距三页相同（都是 12px）',
+    panes.every((p) => p && p.gap === 12 && p.pageGap === '12px'),
+    JSON.stringify(panes),
+  )
+  // 三页的**第一行内容**顶边完全一致——这是「对齐」的直接证据。
+  const firstTops = panes.map((p) => p?.firstTop)
+  expect(
+    '三个页面的第一行内容顶边完全一致（切页签内容不上下跳）',
+    firstTops.every((top) => typeof top === 'number') && Math.max(...firstTops) - Math.min(...firstTops) <= 1,
+    JSON.stringify({ firstTops, classes: panes.map((p) => p?.firstClass) }),
+  )
+  // 内容比视口短时页面要撑满剩余高度：已安装（3 行）与可更新（2 行）两页等高。
+  expect(
+    '内容不足一屏时页面撑满剩余高度（已安装与可更新两页等高）',
+    typeof panes[1]?.height === 'number' && Math.abs(panes[1].height - panes[2].height) <= 1,
+    JSON.stringify(panes.map((p) => p?.height)),
+  )
+  // 拍一张「切页签后仍在同一位置」的对照图（矮视口下最明显），并切回发现页交给 [3] 继续用。
+  const layoutShot = await evaluate(client, `document.querySelector('.dshpm-page').getBoundingClientRect().top`)
+  expect('切到第三个页签后页面顶边仍在视区内（无需滚动）', Number(layoutShot) > 0 && Number(layoutShot) < 980, `top=${layoutShot}`)
+  await screenshot(client, join(shotDir, 'market-tab-alignment.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-tab-alignment.png')}`)
+  await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /发现|Discover/.test(b.textContent)).click(); true`)
+  await waitFor(client, `document.querySelector('.dshpm-page[data-page="discover"]') !== null`, 8000, '切回发现页')
+  // 页签底线也是 0.26s 过渡：[3] 紧接着就要量它的 scaleX，这里先让它走完，别量到中间帧。
+  await new Promise((resolve) => setTimeout(resolve, 450))
+
   console.log('\n[3] 动效（真实计算样式）')
   // 必须先等卡片真的出现：目录是一次网络往返，刚打开面板时还是骨架屏。
   await waitFor(client, `document.querySelector('.dshpm-card') !== null`, 30000, '发现页的第一张卡片')

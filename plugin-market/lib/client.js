@@ -1006,8 +1006,10 @@ window.__ModuleLoader__.load({
 .dshpm-title { margin:0; font-size:1.1em; font-weight:600; }
 .dshpm-subtitle { margin-top:2px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.85em; }
 .dshpm-headerActions { display:flex; align-items:center; gap:8px; flex:none; }
-.dshpm-tabs { display:flex; gap:4px; border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08)); }
-.dshpm-tab { border:none; background:transparent; color:var(--dsw-alias-label-secondary,#6b6b6b); font:inherit; font-size:.92em; padding:6px 10px; cursor:pointer; border-bottom:2px solid transparent; }
+/* 页签栏高度是**固定**的：按钮统一 min-height/行高与内边距，带角标（可更新页）和不带角标的
+   页签一样高——后续新增页面加角标、加图标都不会把这一行撑高，三个页面永远从同一处开始。 */
+.dshpm-tabs { display:flex; align-items:stretch; gap:4px; border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08)); }
+.dshpm-tab { display:inline-flex; align-items:center; gap:4px; box-sizing:border-box; min-height:32px; border:none; background:transparent; color:var(--dsw-alias-label-secondary,#6b6b6b); font:inherit; font-size:.92em; line-height:20px; padding:6px 10px; cursor:pointer; border-bottom:2px solid transparent; }
 .dshpm-tab[data-active="true"] { color:var(--dsw-alias-label-primary,#1a1a1a); border-bottom-color:var(--dsw-alias-brand-primary,#4d6bfe); }
 .dshpm-tab:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:2px; }
 .dshpm-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -1093,7 +1095,15 @@ window.__ModuleLoader__.load({
 .dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-md,10px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
 .dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; }
 .dshpm-pagerInfo { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; }
-.dshpm-installed { display:flex; flex-direction:column; gap:8px; }
+.dshpm-installed { display:flex; flex-direction:column; gap:12px; }
+/* 页签内容的统一外壳（用户报「三个切换页面高度不对齐」）：三个页面共用同一套间距与起点，
+   切页签时页面高度一致、内容从同一处开始，不再一跳一跳。
+   页面级间距统一成一个单位 12px：外壳 gap、.dshpm-root 的 gap、各页内容容器的 gap 都是 12
+   （卡片/列表行**内部**仍是 8，那是块内间距，不是页面节距）。新增页面见 MARKET_TABS 与
+   MARKET_PANES：渲染处查表后自动套上这个外壳，不需要再写一遍布局。
+   flex:1 0 auto —— 覆盖上面「.dshpm-root > *」那条的 0 0 auto：内容短时页面撑满可视区（几页等高），
+   内容长时按内容高度、由面板根自己滚动。收缩权仍是 0，所以任何区块都不会被压扁（§12.12）。 */
+.dshpm-root > .dshpm-page { display:flex; flex-direction:column; gap:12px; box-sizing:border-box; flex:1 0 auto; width:100%; }
 .dshpm-row { display:flex; flex-direction:column; gap:8px; box-sizing:border-box; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-rowHead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .dshpm-rowMain { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 220px; }
@@ -1121,7 +1131,11 @@ window.__ModuleLoader__.load({
 /* ── 可更新插件面板：就地展开，不遮挡列表、不制造第二个滚动容器 ── */
 /* 可更新页是**整页页签**，不再是会折叠的抽屉：所以这里不写 max-height / overflow:hidden——
    那两样是为了「收起时高度归 0」，留着反而会把很长的更新列表裁掉（列表高 > 1600px 时）。 */
-.dshpm-updatesPanel { display:flex; flex-direction:column; gap:10px; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-updatesPanel { display:flex; flex-direction:column; gap:12px; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
+/* 但作为**整页内容**（第三个页签）时它不应该是「页里的另一张卡片」：卡片自带的内边距会把这一页的
+   第一行文字往下推 12px，于是三个页签切来切去看上去就不齐（用户报的「高度不对齐」）。页面节距一律
+   交给统一外壳 .dshpm-page 负责，这里只保留结构。基类规则留着，便于将来别处复用这张卡片。 */
+.dshpm-updatesPage { padding:0; border:none; background:transparent; }
 .dshpm-drawerHead { display:flex; align-items:flex-start; gap:8px; }
 /* 可更新页页头右侧的两个按钮（检查更新状态机 / 插件市场更新），窄屏下换行到标题下面。 */
 .dshpm-updatesActions { flex:none; display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto; }
@@ -3059,6 +3073,94 @@ window.__ModuleLoader__.load({
             ? t("notice.selfCurrent", { version: selfInfo && selfInfo.latest ? selfInfo.latest : version })
             : t("action.checkSelf");
       var selfBusy = selfPhase === "checking" || selfPhase === "installing";
+
+      // ── 页签注册表：页签栏与页面渲染**都**从这里读，顺序与 id 只有这一处真相 ──
+      // 新增一个页面 = 在 MARKET_TABS 加一行（顺序即成页签顺序）+ 在 MARKET_PANES 加一份渲染函数。
+      // 页签按钮、计数角标、页面外壳（.dshpm-page：统一的间距与高度）都自动套上，渲染循环不用改。
+      // badge: 取计数的函数，返回 0/undefined 时不画角标——页签高度由 CSS 的 min-height 固定，
+      // 所以「有没有角标」不会影响任何一页的起始位置。
+      var MARKET_TABS = [
+        { id: "discover", label: t("tab.discover"), badge: null, onClick: function () { setTab("discover"); } },
+        { id: "installed", label: t("tab.installed"), badge: null, onClick: function () { setTab("installed"); } },
+        { id: "updates", label: t("tab.updates"), badge: function () { return updateCount; }, onClick: goUpdates }
+      ];
+      var MARKET_PANES = {
+        discover: function () {
+          return el(DiscoverPane, {
+            state: discover,
+            categories: categoriesById,
+            queryInput: queryInput,
+            sort: sort,
+            category: category,
+            expanded: expanded,
+            copied: copied,
+            readOnly: readOnly,
+            busyKey: busyKey,
+            busyKind: job ? job.kind : null,
+            onQueryInput: handleQueryInput,
+            onQuerySubmit: function () { commitQueryInput(true); },
+            onQueryClear: function () { resetFilters(); },
+            onSort: function (value) { setSort(value); setPage(1); },
+            onCategory: function (value) { setCategory(value); setPage(1); },
+            onPage: function (value) { setPage(value < 1 ? 1 : value); },
+            onResetFilters: resetFilters,
+            onInstall: installItem,
+            onToggleDetails: toggleDetails,
+            onCopy: copyCommand,
+            onRetry: function () { bumpTick(); }
+          });
+        },
+        installed: function () {
+          return el(InstalledPane, {
+            state: installed,
+            expanded: expanded,
+            confirming: confirming,
+            readOnly: readOnly,
+            busyKey: busyKey,
+            onDiscover: function () { setTab("discover"); },
+            onToggleBundle: toggleBundle,
+            onUpdateBundle: updateBundle,
+            onAskRemove: setConfirming,
+            onRemoveBundle: removeBundle,
+            onToggleDetails: toggleDetails,
+            onToggleEntry: toggleEntry,
+            onRetry: function () { bumpTick(); }
+          });
+        },
+        updates: function () {
+          return el(UpdatesPane, {
+            state: installed,
+            bundles: updateBundles,
+            count: updateCount,
+            installedCount: allBundles.length,
+            catalogUpdated: catalogMeta && catalogMeta.updated ? catalogMeta.updated : null,
+            results: updateResults,
+            busyKey: busyKey,
+            readOnly: readOnly,
+            batch: batch,
+            // 头部搬来的自更新按钮：状态机在模块级，这里只给它读写入口。
+            self: {
+              phase: selfPhase,
+              label: selfLabel,
+              title: selfTitle,
+              busy: selfBusy,
+              available: selfAvailable,
+              onCheck: checkSelfUpdate,
+              onApply: applySelfUpdate
+            },
+            onUpdate: updateBundle,
+            onUpdateAll: updateAll,
+            // 合并后的单按钮状态机：idle → 检查更新 → checked（一键更新 / 重新检查）。
+            checkPhase: checkPhase,
+            onCheckUpdates: checkUpdates,
+            onReload: function () { loadInstalled({ announce: true }); },
+            onRefreshCatalog: refreshCatalog
+          });
+        }
+      };
+      // 当前页：未知 id 退回第一页（受控 prop 不可能凭空变成别的值，这里只是防御）。
+      var activePane = MARKET_PANES[tab] || MARKET_PANES[MARKET_TABS[0].id];
+
       return el("div", {
         className: "dshpm-root",
         "data-busy": job ? "true" : "false"
@@ -3138,101 +3240,28 @@ window.__ModuleLoader__.load({
               el("button", { type: "button", className: "dshpm-btn", disabled: refreshing, onClick: refreshCatalog }, t("catalog.stale.refresh"))))
           : null,
         // 三个页签：发现 / 已安装 / **可更新**（用户圈的位置——已安装右边再开一个）。
+        // 整个页签栏由 MARKET_TABS 循环生成：顺序 = 注册表顺序，角标按需画——加页面只改注册表。
         // 「可更新」上的角标与头部按钮、侧边栏入口共用同一份计数。
         el("div", { className: "dshpm-tabs", role: "tablist" },
-          el("button", {
-            type: "button",
-            role: "tab",
-            className: "dshpm-tab",
-            "data-active": tab === "discover" ? "true" : "false",
-            "aria-selected": tab === "discover" ? "true" : "false",
-            onClick: function () { setTab("discover"); }
-          }, t("tab.discover")),
-          el("button", {
-            type: "button",
-            role: "tab",
-            className: "dshpm-tab",
-            "data-active": tab === "installed" ? "true" : "false",
-            "aria-selected": tab === "installed" ? "true" : "false",
-            onClick: function () { setTab("installed"); }
-          }, t("tab.installed")),
-          el("button", {
-            type: "button",
-            role: "tab",
-            className: "dshpm-tab",
-            "data-active": tab === "updates" ? "true" : "false",
-            "aria-selected": tab === "updates" ? "true" : "false",
-            onClick: goUpdates
-          }, t("tab.updates"),
-            updateCount > 0 ? el("span", { className: "dshpm-count" }, String(updateCount)) : null)),
-        tab === "discover"
-          ? el(DiscoverPane, {
-            state: discover,
-            categories: categoriesById,
-            queryInput: queryInput,
-            sort: sort,
-            category: category,
-            expanded: expanded,
-            copied: copied,
-            readOnly: readOnly,
-            busyKey: busyKey,
-            busyKind: job ? job.kind : null,
-            onQueryInput: handleQueryInput,
-            onQuerySubmit: function () { commitQueryInput(true); },
-            onQueryClear: function () { resetFilters(); },
-            onSort: function (value) { setSort(value); setPage(1); },
-            onCategory: function (value) { setCategory(value); setPage(1); },
-            onPage: function (value) { setPage(value < 1 ? 1 : value); },
-            onResetFilters: resetFilters,
-            onInstall: installItem,
-            onToggleDetails: toggleDetails,
-            onCopy: copyCommand,
-            onRetry: function () { bumpTick(); }
-          })
-          : tab === "installed"
-            ? el(InstalledPane, {
-              state: installed,
-              expanded: expanded,
-              confirming: confirming,
-              readOnly: readOnly,
-              busyKey: busyKey,
-              onDiscover: function () { setTab("discover"); },
-              onToggleBundle: toggleBundle,
-              onUpdateBundle: updateBundle,
-              onAskRemove: setConfirming,
-              onRemoveBundle: removeBundle,
-              onToggleDetails: toggleDetails,
-              onToggleEntry: toggleEntry,
-              onRetry: function () { bumpTick(); }
-            })
-            : el(UpdatesPane, {
-              state: installed,
-              bundles: updateBundles,
-              count: updateCount,
-              installedCount: allBundles.length,
-              catalogUpdated: catalogMeta && catalogMeta.updated ? catalogMeta.updated : null,
-              results: updateResults,
-              busyKey: busyKey,
-              readOnly: readOnly,
-              batch: batch,
-              // 头部搬来的自更新按钮：状态机在模块级，这里只给它读写入口。
-              self: {
-                phase: selfPhase,
-                label: selfLabel,
-                title: selfTitle,
-                busy: selfBusy,
-                available: selfAvailable,
-                onCheck: checkSelfUpdate,
-                onApply: applySelfUpdate
-              },
-              onUpdate: updateBundle,
-              onUpdateAll: updateAll,
-              // 合并后的单按钮状态机：idle → 检查更新 → checked（一键更新 / 重新检查）。
-              checkPhase: checkPhase,
-              onCheckUpdates: checkUpdates,
-              onReload: function () { loadInstalled({ announce: true }); },
-              onRefreshCatalog: refreshCatalog
-            })
+          MARKET_TABS.map(function (entry) {
+            var entryCount = entry.badge ? entry.badge() : 0;
+            return el("button", {
+              key: entry.id,
+              type: "button",
+              role: "tab",
+              className: "dshpm-tab",
+              "data-tab": entry.id,
+              "data-active": tab === entry.id ? "true" : "false",
+              "aria-selected": tab === entry.id ? "true" : "false",
+              // 「可更新」的入口还要重读一次列表并给回执（goUpdates）；其余页签纯切换。
+              // 入口行为也写在注册表里，正文不再出现 tab 分支。
+              onClick: entry.onClick
+            }, entry.label,
+              entryCount > 0 ? el("span", { className: "dshpm-count" }, String(entryCount)) : null);
+          })),
+        // 页面内容：同一时刻只渲染当前页（切走即卸载），并且统一套一层 .dshpm-page 外壳——
+        // 三页共享同一套间距与高度，新增页面也自动对齐。
+        el("div", { className: "dshpm-page", "data-page": tab, role: "tabpanel" }, activePane())
       );
     }
 

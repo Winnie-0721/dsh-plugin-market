@@ -318,17 +318,45 @@ check('回执气泡有退场：先 data-open=false 沉下去，200ms 后才卸�
   assert.match(css, /backdrop-filter:blur/, '气泡加了毛玻璃质感')
 })
 check('第三个页签「可更新」：排在已安装右边、带计数角标、切过去渲染整页内容', () => {
-  const discoverAt = source.indexOf('t("tab.discover")')
-  const installedAt = source.indexOf('t("tab.installed")')
-  const updatesAt = source.indexOf('t("tab.updates")')
+  // 页签栏与页面都由注册表生成（MARKET_TABS / MARKET_PANES）：顺序 = 数组顺序，
+  // 加页面只改这两处。所以这里钉的是「注册表里的顺序」，而不是三段硬编码的 JSX。
+  const tabsAt = source.indexOf('var MARKET_TABS = [')
+  const panesAt = source.indexOf('var MARKET_PANES = {')
+  assert.ok(tabsAt > 0, '必须有页签注册表 MARKET_TABS（新增页面只改这里）')
+  assert.ok(panesAt > tabsAt, '必须有页面注册表 MARKET_PANES，且排在页签注册表之后')
+  const tabsBlock = source.slice(tabsAt, panesAt)
+  const discoverAt = tabsBlock.indexOf('t("tab.discover")')
+  const installedAt = tabsBlock.indexOf('t("tab.installed")')
+  const updatesAt = tabsBlock.indexOf('t("tab.updates")')
   assert.ok(discoverAt > 0 && installedAt > discoverAt, '页签顺序：发现 → 已安装')
   assert.ok(updatesAt > installedAt, '页签顺序：已安装 → 可更新（用户圈的位置）')
+  assert.match(tabsBlock, /id: "updates", label: t\("tab\.updates"\), badge: function \(\) \{ return updateCount; \}, onClick: goUpdates \}/,
+    '「可更新」的角标计数与入口（goUpdates）都从注册表里声明')
+  // 页面渲染也查表：UpdatesPane 在注册表之后、且由 MARKET_PANES 里的函数渲染。
   assert.match(source, /el\(UpdatesPane/, '第三个页签要渲染自己的页面组件')
-  assert.ok(source.indexOf('el(UpdatesPane') > updatesAt, '页面组件在页签之后渲染（同一份 tab switch）')
+  assert.ok(source.indexOf('el(UpdatesPane') > panesAt, '页面组件由 MARKET_PANES 渲染，不在正文里写死分支')
+  assert.equal(source.includes('tab === "installed"'), false, '页面切换不许再用嵌套三元写死（加页面会越写越乱）')
+  for (const id of ['discover', 'installed', 'updates']) {
+    assert.match(source, new RegExp(`\\n\\s+${id}: function \\(\\) \\{`), `MARKET_PANES 要有 ${id} 的渲染函数`)
+  }
   // 抽屉必须退场：页签取代了它，不能两套并存
   assert.equal(source.includes('UpdatesDrawer'), false, '抽屉组件应已移除（由页签取代）')
   assert.equal(source.includes('scrollIntoView'), false, '不再需要滚动定位：内容现在整页出现')
-  assert.match(source, /updateCount > 0 \? el\("span", \{ className: "dshpm-count" \}/, '页签要带可更新计数角标')
+  assert.match(source, /entryCount > 0 \? el\("span", \{ className: "dshpm-count" \}/, '页签要带可更新计数角标')
+})
+check('三个页签页面统一布局：共用一个外壳 + 固定页签高度（用户报「高度不对齐」）', () => {
+  // 用户截图：三个页签各自的页面内容起点/高度不一样，切一下就跳。修法是给页面加统一外壳，
+  // 并把页签按钮的高度固定（有没有角标都一样高）——这样后续新增页面天然对齐。
+  assert.match(css, /\.dshpm-root > \.dshpm-page\s*\{[^}]*display:flex[^}]*flex-direction:column[^}]*gap:12px/,
+    '页面外壳 .dshpm-page 要统一纵向间距')
+  assert.match(css, /\.dshpm-root > \.dshpm-page\s*\{[^}]*flex:1 0 auto/, '页面外壳要撑满剩余高度（内容短时三页等高），且不参与收缩')
+  assert.match(css, /\.dshpm-tab\s*\{[^}]*min-height:\d+px/, '页签按钮高度要固定，加不加角标都一样高')
+  assert.match(source, /el\("div", \{ className: "dshpm-page", "data-page": tab, role: "tabpanel" \}, activePane\(\)\)/,
+    '渲染处必须把当前页套进统一外壳（新增页面自动继承）')
+  // 页面级节距只有一个单位：外壳、根容器、两个页面内容容器的 gap 都是 12px。
+  assert.match(css, /\.dshpm-root \{[^}]*gap:12px/, '面板根节距 12px')
+  assert.match(css, /\.dshpm-installed \{ display:flex; flex-direction:column; gap:12px; \}/, '已安装/发现页内容容器节距 12px')
+  assert.match(css, /\.dshpm-updatesPanel \{[^}]*gap:12px/, '可更新页内容容器节距 12px')
 })
 check('搜索框只有一个清除键：样式表关掉 Chromium 原生的 ::-webkit-search-cancel-button', () => {
   // 用户截图（2026-10-06）：搜索框聚焦且有值时出现两个清除键——我们 .dshpm-search 里那颗，

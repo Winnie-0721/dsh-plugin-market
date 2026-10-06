@@ -516,9 +516,9 @@ E7-fetch status=200 耗时=527ms                                       ← 真�
 | 验证 | 结果 | 证据 |
 |---|---|---|
 | 契约验收（冻结的 53 条） | **53 PASS / 0 FAIL** | `verify-20261004-181336`（v1.1.1 后） |
-| 真实浏览器渲染与动效（24 条） | **24/24** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
+| 真实浏览器渲染与动效（64 条，v1.1.6） | **64/64** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
 | 自更新通道离线回归（37 条） | **37/37** | `verify/self-update.test.mjs` |
-| 文案与动效不变量（13 条） | **13/13** | `verify/client-copy.test.mjs` |
+| 文案与动效不变量（25 条，v1.1.6） | **25/25** | `verify/client-copy.test.mjs` |
 | 自更新端到端（真实 CDN + 真实安装，6 条） | **6/6** | `verify/self-update-live.ps1` |
 | 样式生命周期回归（5 条，v1.0.1 起） | **5/5** | `verify/style-heal.test.mjs` |
 
@@ -590,11 +590,15 @@ L5  scratch profile 的依赖变成指向下载物的 file:（pnpm 真的装了�
 
 ### 12.7 界面证据
 
-`verify/logs/ui/` 下的四张图（`market-updates-open.png`、`market-header-zoom.png`、
-`market-header-closed.png`、`market-reduced-motion.png`）来自真实浏览器；
-`plugin-market/assets/market-updates.png` 与 `market-header-actions.png` 是其中两张的压缩版，
-随包发布。第一张里可以看到：头部三个按钮（含角标 2）、提示条与其倒计时线、就地展开的
-可更新列表（两条，各带自己的「更新到 x.y.z」，没有批量按钮）、以及侧边栏入口上的角标。
+`verify/logs/ui/` 下的图来自真实浏览器（当前一轮：`market-discover.png`、`market-tab-installed.png`、
+`market-updates-open.png`、`market-tab-alignment.png`、`market-header-zoom.png`、
+`market-search-clear.png`、`market-reduced-motion.png`、`market-short-viewport.png`、
+`market-updates-short-viewport.png`）。发布用的三张进 `docs/assets/`：
+`market-discover.png`（发现页：三个页签 + 搜索 + 分类 + 真实卡片）、
+`market-updates.png`（可更新页）、`market-tab-alignment.png`（v1.1.6 新增：切到第三个页签后
+内容仍从页签正下方同一处开始，一眼能看出三页对齐）。
+> 此前这里写的 `market-header-closed.png` **从未生成过**（档过的头部截图只有
+> `market-header-zoom.png` 一张），v1.1.6 顺手改掉这个不存在的文件名。
 
 > **后记（2026-10-06 仓库清理）**：`plugin-market/assets/` 下的两张图（连同早已无引用的
 > `market-entry.png` / `market-page.png`）已从仓库与 npm 包移除——包内 README 自 1.1.6 起
@@ -717,3 +721,52 @@ v1.1.0 为底部倒计时线加的）、以及一屏放不下的内容。headles
 
 这条与 §12.4 的第 3 条（动画 `fill-mode` 钉死 `transform`）是同一类问题的两个面：
 **CSS 的隐式规则会静默吞掉看起来无关的改动**，所以每一条都写成了可执行的不变量，而不是留在注释里。
+
+### 12.13 用户报的「三个切换页面高度不对齐」（v1.1.6）
+
+**现象**（用户截图 + 文字）：发现 / 已安装 / 可更新 三个页签，"切换页面高度不对齐"，要求
+"设计成统一的，方便后续添加页面"。
+
+**先量，再改**。用户截图（390×177 缩略）逐行取暗像素游程：三个页签的文字都在 y112–132，
+发现页的底线在 y142–144（页签栏本身是齐的）；再量 e2e 的三张真机截图（1560×980 / 1530×885），
+页签栏以下第一条内容行：发现页是搜索工具条，已安装页是汇总行，可更新页是页头标题——
+但可更新页的文字被**推下去 12px**，正是 `.dshpm-updatesPanel` 的 `padding:12px 14px`。
+
+| 页面 | 外层容器 | 页面级节距 | 作为整页时的问题 |
+|---|---|---|---|
+| 发现 | `.dshpm-installed` | `gap:8px` | 与另外两页不一致 |
+| 已安装 | `.dshpm-installed` | `gap:8px` | 同上 |
+| 可更新 | `.dshpm-updatesPanel .dshpm-updatesPage` | `gap:10px` + `padding:12px 14px` + 边框 | 内边距把整页内容压下去 12px；还是"页里的另一张卡片" |
+
+**根因**：三页各写各的外壳，节距有 8 有 10，而可更新页当年是**抽屉里的一张卡片**，
+带自己的内边距与边框——改成整页页签后那圈内边距没去掉，于是三页的起点与节距各不相同。
+
+**修法**（三层，见 `docs/API-CONTRACT.md` §4）：
+1. 统一外壳 `.dshpm-page`（`gap:12px; flex:1 0 auto`），渲染处把当前页套进去；
+   `.dshpm-updatesPage` 作为整页时去掉内边距与边框；页面级节距统一成**一个单位 12px**
+   （卡片/列表行**内部**仍是 8px 的块内间距）。
+2. 页签按钮高度固定（`inline-flex` + `min-height:32px`）：有没有角标都一样高，
+   后续新增页面加角标/图标也不会把页签栏撑高。
+3. 页签栏与页面改由 `MARKET_TABS` / `MARKET_PANES` 两张注册表驱动，正文里那串嵌套三元
+   （`tab === "discover" ? … : tab === "installed" ? … : …`）消失——**新增一个页面 = 各加一项**。
+
+**`.dshpm-page` 的 `flex:1 0 auto` 覆盖了 `.dshpm-root > *` 的 `0 0 auto`，为什么不违反 §12.12**：
+收缩权仍是 `0`（`flex-shrink: 0`），只是允许**增长**填满剩余高度——内容不足一屏时三页等高
+（这正是"高度对齐"要的效果），内容超长时高度由内容决定、仍由面板根自己滚动。
+e2e `[8]` 的"任何直接子项不得被压扁 + 根自己滚动"两条断言依旧全绿，且没有引入第二个滚动容器。
+
+**回归**：`client-copy.test.mjs` 改钉注册表并新增 1 条布局不变量（24→**25/25**）；
+`market-ui.e2e.mjs` 新增 `[2c]` 用**真实几何**取证（58→**64/64**）：
+
+| 量法 | 实测 |
+|---|---|
+| 三个 `.dshpm-tab` 的 `getBoundingClientRect().height` | 32 / 32 / 32 |
+| 页签底边 → `.dshpm-page` 顶边 | 12 / 12 / 12 |
+| `.dshpm-page` 顶边 → 该页**第一行内容**顶边 | 120 / 120 / 120 |
+| 内容不足一屏时的页面高度（已安装 / 可更新） | 相等（差 ≤ 1px） |
+
+**又踩了一次"过渡期间不能采样"**（与 §12.3 最后一条同源）：首轮 64 条里红了 2 条——
+`firstTops` 量到 `120/120/127`、页签底线量到 `matrix(0.3607,…)`。原因不是布局没对齐，而是
+页面入场动画 `dshpm-rise` 自 `translateY(7px)` 起、页签底线有 0.26s 的 `scaleX` 过渡，
+断言正好落在中间帧上。给测量前加 450ms 落位等待后全绿。
+**教训沿用**：凡是量几何，先确认动画已经结束；否则验的是动画，不是布局。

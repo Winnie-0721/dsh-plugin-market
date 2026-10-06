@@ -142,6 +142,15 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
   可更新页的「插件市场更新」按钮上；没更新则不改按钮——首次进入仍是「插件市场更新」，「再次检查」
   只属于手动点过的那次），启动后**每 1 小时**查一次**插件**更新（侧边栏与页签角标跟着刷新；
   只有「多出新更新」且市场页开着时才补一条回执，不打扰）。
+- **三个页签页面统一间距与高度，加页面只改一处**（v1.1.6，用户报「高度不对齐」并要求
+  「设计成统一的，方便后续添加页面」）：三页共用一层外壳 `.dshpm-page`，页面级节距统一成
+  **一个单位 12px**；页签按钮高度由 CSS 固定（`min-height:32px`），带角标与不带角标一样高；
+  页签栏与页面由 `MARKET_TABS` / `MARKET_PANES` 两张注册表驱动——新增页面 = 各加一项。
+  根因是可更新页当年是一张**卡片**（带 12px 内边距 + 边框），作为整页时那圈内边距把内容压下去，
+  加上各页容器节距有 8 也有 10，切页签就能看到内容上下跳。修法见
+  [API-CONTRACT §4](API-CONTRACT.md)；真实几何由 e2e `[2c]` 取证（三页第一行内容顶边完全一致、
+  已安装与可更新两页等高）。约束不变：内容超长时仍由面板根自己滚动，没有第二个滚动容器、
+  没有任何区块参与收缩。
 - **动效服务于状态，不服务于炫技**（v1.1.0）：进场错峰、hover 抬升、按钮按下回弹、
   页签底线滑动、回执气泡（toast）贴底弹入 + 倒计时线 + **退场下沉**、可更新页整页切换。三条硬约束写在
   [API-CONTRACT §4](API-CONTRACT.md)（基础态不写 `opacity:0`、只动 transform/opacity/max-height、
@@ -242,7 +251,10 @@ REPORT 的「工具缺陷与修正」一节——验收报告承认自己的测�
 + 注入 EPERM 的失败行必须显示占用短句，汇总改验「成功 1、失败 1」）→ **42/42**；
 + 按钮状态机 + restart-required 计数那轮新增 3 条（初始是「检查更新」、点后变「一键更新（2）」，
 两颗按钮都带 `--primary`、页脚 `drawerFoot` 必须为 0），并把第一条的注入结果改成 `restart-required`
-（计为成功、行内显示重启提示）→ **45/45**），截图落在 `verify/logs/ui/`
+（计为成功、行内显示重启提示）→ **45/45**；搜索框单清除键那轮新增 5 条 → **58/58**；
+三个页签统一布局这轮新增 6 条（`[2c]`：页签等高、注册表顺序、节距 12px、
+**三页第一行内容顶边一致**、两页等高、页面顶边在视区内，截图 `market-tab-alignment.png`）→ **64/64**），
+截图落在 `verify/logs/ui/`
 （`market-updates-open.png`、`market-header-zoom.png`、`market-tab-installed.png`、
 `market-reduced-motion.png`、`market-short-viewport.png`、`market-updates-short-viewport.png`）。
 顺带记一个踩点：headless Chromium **默认就是 `prefers-reduced-motion: reduce`**，

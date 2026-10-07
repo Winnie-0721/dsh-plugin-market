@@ -235,6 +235,19 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
   升入动画用 `backwards`），并且 `prefers-reduced-motion: reduce` 下**全部关闭而内容照旧完整可见**——
   真实浏览器里 A/B 验过，不是只看代码。
 
+- **安装失败时把「下一步」说清楚：连不上 npm 源就直说去配镜像**（v1.2.0，用户实测反馈）：
+  用户报「装了俩个插件都没成功」，查真实日志发现**是两个完全不同的原因**——一个是被运行中的
+  DSH 占着文件（`ERR_PNPM_EPERM`，报错目录甚至是另一个插件，整个事务回滚），另一个是**连不上
+  npm 源**（34 次请求全是 `registry.npmjs.org`、0 次镜像；本机实测 npmjs.org 15s 超时、npmmirror
+  366ms）。这里暴露了**插件自身的一个盲区**：抓目录走镜像，但真正安装交给宿主 pnpm、用 pnpm
+  自己的 registry——**两条通道不同**，于是「能浏览、能点安装、一下载就失败」成了最难解释的现象，
+  而界面只写「宿主执行这个操作时报错。看宿主日志」。现在按**具体**网络签名（`ECONNRESET`/
+  `UND_ERR`/`Request took Nms`/`ERR_PNPM_FETCH*` 等，刻意不含裸词 `network`/`registry`，避免把
+  版本不兼容也改写掉）识别出来，并给出「在该 profile 目录建 `.npmrc` 写
+  `registry=https://registry.npmmirror.com`」——**这条建议核实过**：宿主 pnpm 的 `cwd` 就是
+  profile 目录、`extendEnv: false`，所以 `.npmrc` 确实会被读到。新增
+  `verify/error-classify.test.mjs`（18 条）**把函数取出来喂真实日志原文**，变异 6/6 全捕获。
+  见 [REPORT §12.21](REPORT.md)。
 - **独立审计揪出 6 个真实缺陷，其中最严重的一条会指错人**（v1.2.0）：`buildMatchIndex` 的
   `putBareName` 用**原始** repo 名当键，而查表一律走会小写化的 `lookupKey`。真实目录 4412 条里
   88 个仓库名含大写，实测 **0 个命中自己、5 个标到另一个 owner 的同名小写仓库**

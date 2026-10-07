@@ -2,6 +2,33 @@
 
 ## 1.2.0
 
+- **安装失败不再只说「看宿主日志」：连不上 npm 源时直接告诉你配镜像**（用户报「我在插件市场
+  装了俩个插件都没能成功 你排除一下问题」）。排查用户真实 profile 的 pnpm 日志发现，**两个
+  失败是两种完全不同的原因**：① `@linxin666/dsh-remote-web-ui` 是 `ERR_PNPM_EPERM`——报错
+  目录甚至是**另一个插件**（`dsh-our-free-model`），运行中的 DSH 持有它的句柄，pnpm `scandir`
+  被拒、整个事务回滚（这类错误市场本来就认得对）；② `dsh-mobile` 是**连不上 npm 源**——日志里
+  几十条 `ECONNRESET`、`Request took 72331ms`，34 次请求**全是 registry.npmjs.org、0 次镜像**，
+  而本机实测 npmjs.org 15s 超时、npmmirror 366ms。
+  **这里暴露了插件自身的一个盲区**：抓目录走镜像，但真正安装交给宿主 pnpm、用 pnpm 自己的
+  registry——两条通道不同，于是「能浏览、能点安装、一下载就失败」成了最难解释的现象，而界面
+  只写「宿主执行这个操作时报错。看宿主日志里的 pnpm 输出」，用户不可能从中推断出「去配镜像」。
+  本次只改**错误呈现**，不动任何安装行为：
+  1. 新增 `registryUnreachableDetail`：只认**具体**网络签名（`ECONNRESET`/`ETIMEDOUT`/`UND_ERR`/
+     `Request took Nms`/`ERR_PNPM_FETCH*` 等）——刻意**不**把裸词 `network`/`registry` 放进匹配集，
+     否则「版本不兼容」「包不存在」也会被改写文案，那是换一种撒谎。
+  2. 命中时切到 `err.registry-unreachable.*`，给出可照做的下一步：在该 profile 目录建 `.npmrc`
+     写 `registry=https://registry.npmmirror.com`，完全退出 DSH 后重试。**这条建议是核实过的**：
+     从 asar 抽出 `dsh-plugin-manager` 确认 pnpm 的 `cwd` 就是 profile 目录、且 `extendEnv: false`
+     （env 被清洗），所以 profile 下的 `.npmrc` 确实会被读到。
+  3. **占用优先于网络**（诊断里可能混着 registry 字样）；两处行内短句原本各写一遍同样的三元
+     表达式，抽成共用 `shortFailureText`——否则又是一次「两处规则漂移」（本仓库栽过）。
+  4. 详情行现在也露出网络诊断原文，此前只显示宿主的通用句。
+  回归：新增门禁套件 `verify/error-classify.test.mjs`（**18 条**）——把真 bundle 里的识别函数
+  **取出来执行**，喂**从用户那份真实 pnpm 日志逐字抄下的原文**，并显式覆盖「不许误伤」；
+  **变异测试 6/6 全捕获**，变异后按字节还原。**变异纠正了我一次**：第一版「行内短句不报镜像」
+  没被捕获——暴露的是我的测试漏了 `shortFailureText`，补上后 6/6。
+  **本次不递增版本、不打包、不发布。**
+
 - **修 6 个真实缺陷：最严重的一条会把别人的插件标成「已安装 / 可更新」**（独立审计发现，
   我逐条独立复现）。这一轮先说结论：`buildMatchIndex` 的 `putBareName` 用**原始** repo 名当
   `nameKeys` 的键，而查表一律走 `lookupKey`（会小写化）。真实目录 4412 条里有 **88 个**仓库名

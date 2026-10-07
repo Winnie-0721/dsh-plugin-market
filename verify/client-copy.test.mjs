@@ -95,10 +95,42 @@ check('更新失败的「文件被占用」类错误有可操作回执（照 dsh
   assert.match(source, /EPERM\|EACCES\|EBUSY\|operation not permitted\|Access is denied/, '识别模式要覆盖 pnpm 的 EPERM 与 Windows 拒绝访问')
   // 2) 三处渲染都接上：错误气泡三段式、可更新行内短句、已安装行错误
   assert.match(source, /locked \? "err\.file-locked"/, 'errorCopy 命中时要切到 file-locked 文案')
-  assert.match(source, /fileLockedDetail\(error\) \? t\("err\.file-locked\.row"\)/, '可更新行内失败要显示占用短句')
-  assert.match(source, /fileLockedDetail\(bundle\.error\)/, '已安装行错误也要走占用识别')
-  // 3) 详情行要露出 diagnostic 原文（此前 EPERM 从未被渲染）
-  assert.match(source, /message: locked \|\| message/, '命中时详情行用诊断原文')
+  // 两处行内短句现在共用 shortFailureText（此前各写一遍同样的三元表达式，改一处就会漂移）
+  assert.match(source, /function shortFailureText\(error\)/, '要有共用的行内短句函数')
+  assert.match(source, /if \(fileLockedDetail\(error\) !== ""\) return t\("err\.file-locked\.row"\);/, '占用类要给可照做的短句')
+  assert.equal(/fileLockedDetail\(error\) \? t\("err\.file-locked\.row"\)/.test(source), false, '行内不许再各写一遍三元表达式')
+  assert.match(source, /t\("installed\.rowError", \{ message: shortFailureText\(bundle\.error\)/, '已安装行错误走同一个短句函数')
+  assert.match(source, /text: shortFailureText\(error\)/, '可更新行内失败走同一个短句函数')
+  // 3) 详情行要露出诊断原文（此前 EPERM 与网络失败都只显示宿主通用句）
+  assert.match(source, /message: locked \|\| unreachable \|\| message/, '命中时详情行用诊断原文（占用与网络两种都算）')
+})
+check('连不上 npm 源要给出「配镜像」的可操作回执（浏览走镜像、安装走 pnpm 的 registry）', () => {
+  // 真实案例：用户报「装了俩个插件都没成功」。其中一个的 pnpm 日志里 34 次请求全是
+  // registry.npmjs.org、0 次镜像，ECONNRESET / Request took 72331ms 刷满整页；
+  // 而界面只写「宿主执行这个操作时报错。看宿主日志里的 pnpm 输出」——用户不可能从
+  // 那句话推断出「去配个镜像」。这两条通道不同正是「能浏览、能点、一下载就失败」的原因。
+  assert.match(source, /function registryUnreachableDetail\(error\)/, '要有 npm 源不可达识别函数')
+  // 只认具体网络签名：裸 network/registry 会把「版本不兼容」「包不存在」也改写文案
+  const fn = source.slice(source.indexOf('function registryUnreachableDetail'), source.indexOf('function registryUnreachableDetail') + 1400)
+  assert.match(fn, /ECONNRESET\|ETIMEDOUT/, '要覆盖 ECONNRESET/ETIMEDOUT')
+  assert.match(fn, /UND_ERR/, '要覆盖 pnpm 的 UND_ERR_* 系列')
+  assert.match(fn, /Request took \\d\+ms/, '要覆盖 pnpm 的 Request took Nms')
+  assert.match(fn, /ERR_PNPM_FETCH/, '要覆盖 pnpm 的 fetch 错误码')
+  assert.equal(/\[.*\bnetwork\b.*\]/.test(fn.replace(/ECONNRESET[^/]*/, '')), false, '不许把裸 network 词放进匹配集')
+  // 占用的判定优先：诊断里也可能混着 registry 字样，不能被抢走
+  assert.match(fn, /if \(fileLockedDetail\(error\) !== ""\) return "";/, '占用优先于网络')
+  // errorCopy 要切到新文案，且排除了已知码的通用文案
+  assert.match(source, /: unreachable !== "" \? "err\.registry-unreachable"/, 'errorCopy 命中时切到 registry-unreachable 文案')
+  // 两种语言都要有，且建议必须是「在 profile 目录建 .npmrc」（已核实 pnpm 的 cwd 就是 profile 目录）
+  assert.match(zhBlock, /"err\.registry-unreachable\.next": "[^"]*\.npmrc/, '中文建议要给出 .npmrc')
+  assert.match(zhBlock, /registry=https:\/\/registry\.npmmirror\.com/, '中文建议要给出可用的镜像地址')
+  assert.match(enBlock, /"err\.registry-unreachable\.next": "[^"]*\.npmrc/, '英文建议也要给出 .npmrc')
+  assert.match(enBlock, /registry=https:\/\/registry\.npmmirror\.com/, '英文建议也要给出镜像地址')
+  assert.match(zhBlock, /"err\.registry-unreachable\.row"/, '行内短句键存在')
+  assert.match(enBlock, /"err\.registry-unreachable\.row"/, '行内短句键存在（en）')
+  // 文案里不许出现渲染给用户的字面占位符（宿主只暴露 profile 名字，不给目录）
+  assert.equal(source.includes('{profileDir}'), false, '不许有渲染不出来的占位符')
+  assert.match(zhBlock, /DSH_HOME\/profiles\/<profile>/, '中文要给出可自行代入的路径形式')
 })
 check('回执文案精简（用户反馈：toast 尽量短）', () => {
   assert.match(zhBlock, /"notice\.refreshOk": "已刷新 \{count\} 个插件"/, '刷新回执只留计数')

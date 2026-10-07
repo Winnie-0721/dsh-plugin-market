@@ -574,3 +574,19 @@ window.__ModuleLoader__.load({
     带 `error` 而没给 `application` ⇒ 回落 `failed` 且 `ok:false`。
     这三条规则在 `self-update.js`、`sendChangeResult`、`/toggle` 三处必须**完全一致**——
     审计发现前两处漂移会让**一次失败的自更新 HTTP 200 + 绿色「更新成功」**。
+19. **错误归类行为回归**（`verify/error-classify.test.mjs` 18 条，v1.2.0 新增）：
+    **不是源码形状断言**——把真 bundle 里的 `fileLockedDetail` / `registryUnreachableDetail` /
+    `shortFailureText` 抠出来**在同一作用域求值**（后者内部调用前两者，分开求值会得到未定义），
+    再喂**从用户真实 pnpm 日志逐字抄下来的原文**。钉的是两类原因不许互相抢：
+    ① **连不上 npm 源**（`ECONNRESET` / `ETIMEDOUT` / `ENOTFOUND` / `EAI_AGAIN` / `ECONNREFUSED` /
+    `UND_ERR` / `socket hang up` / `Request took Nms` / `ERR_PNPM_FETCH*` / `ERR_PNPM_META_FETCH*`）
+    命中并把错误气泡切到 `err.registry-unreachable.*`（下一步给「在 profile 目录建 `.npmrc` 写
+    `registry=https://registry.npmmirror.com`」）、行内短句说「配镜像后重试」、详情行露出诊断原文；
+    ② **文件被占用**（`EPERM` / `EACCES` / `EBUSY` / 拒绝访问）命中 `err.file-locked.*`，且**优先于**
+    网络判定（诊断里可能混着 registry 字样）；
+    ③ **不许误伤**：版本不兼容、包名不存在、中文「网络」二字、以及**只提到 `registry.npmjs.org`
+    字样本身**都**不得**命中——所以匹配集里刻意没有裸词 `network`/`registry`，否则等于换一种撒谎。
+    **变异测试 6/6 全捕获**（删签名 / 放裸词进匹配集 / 去掉占用优先闸门 / errorCopy 不切文案 /
+    行内不报镜像 / 详情行不露诊断），变异后按字节还原。
+    一条教训：**「变异没被捕获」先怀疑测试，而不是急着加断言**——第一版「行内短句不报镜像」
+    没被捕获，查下来是我根本没测 `shortFailureText`，补上行为断言后才 6/6。

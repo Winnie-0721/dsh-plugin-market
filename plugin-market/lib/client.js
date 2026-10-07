@@ -149,6 +149,10 @@ window.__ModuleLoader__.load({
         "err.file-locked.why": "运行中的 DSH 占着这个插件的文件，pnpm 换不了目录（EPERM / 拒绝访问）。",
         "err.file-locked.next": "完全退出 DSH（含托盘），重新打开后再点更新；若仍失败，说明该插件目录已损坏，先卸载再安装。",
         "err.file-locked.row": "文件被 DSH 占用，退出后重试",
+        "err.registry-unreachable.title": "连不上 npm 源，下载被中断",
+        "err.registry-unreachable.why": "pnpm 在拉包时连不上它配置的 npm 源（registry.npmjs.org 在国内经常超时或被重置）。浏览目录走的是镜像，所以「能看能点、一下载就失败」正是这个现象——两件事走的不是同一条通道。",
+        "err.registry-unreachable.next": "给这个 profile 配一个可用的镜像：在 profile 目录（DSH_HOME/profiles/<profile>，Windows 上通常是 %USERPROFILE%\\.dsh\\profiles\\<profile>）新建 .npmrc，写一行 registry=https://registry.npmmirror.com；然后完全退出 DSH（含托盘）再重试。",
+        "err.registry-unreachable.row": "npm 源连不上，配镜像后重试",
         "err.network.title": "无法连接宿主的市场接口",
         "err.network.why": "浏览器到本地宿主的请求失败，宿主可能已退出或连接被拦截。",
         "err.network.next": "确认 DSH 窗口仍在运行，然后点「重试」。",
@@ -420,6 +424,10 @@ window.__ModuleLoader__.load({
         "err.file-locked.why": "The running DSH holds this plugin's files open, so pnpm cannot replace the directory (EPERM / access denied).",
         "err.file-locked.next": "Quit DSH completely (including the tray), reopen it and update again; if it still fails, the plugin directory is damaged — uninstall and reinstall it.",
         "err.file-locked.row": "In use by DSH — quit and retry",
+        "err.registry-unreachable.title": "Cannot reach the npm registry",
+        "err.registry-unreachable.why": "pnpm could not reach the npm registry it is configured with while downloading (registry.npmjs.org frequently times out or is reset from some networks). The catalog is fetched through a mirror, which is why browsing and clicking work but the download fails — they do not use the same channel.",
+        "err.registry-unreachable.next": "Configure a working mirror for this profile: create .npmrc in the profile directory (DSH_HOME/profiles/<profile>, typically %USERPROFILE%\\.dsh\\profiles\\<profile> on Windows) containing registry=https://registry.npmmirror.com, then quit DSH completely (including the tray) and retry.",
+        "err.registry-unreachable.row": "npm registry unreachable — configure a mirror",
         "err.network.title": "Cannot reach the host market endpoint",
         "err.network.why": "The request from the browser to the local host failed; the host may have exited or the connection is blocked.",
         "err.network.next": "Make sure the DSH window is still running, then retry.",
@@ -863,6 +871,48 @@ window.__ModuleLoader__.load({
       return "";
     }
 
+    /**
+     * 识别「连不上 npm 源」类失败（pnpm 的网络错误）。
+     *
+     * 为什么必须有：市场的**目录抓取走镜像**（catalog-npm.js 镜像优先，实测 366ms），
+     * 而真正安装是交给宿主 pnpm 的，用的是 pnpm 自己的 registry（默认 registry.npmjs.org）。
+     * 两条通道不同，所以会出现最难解释的一种现象：**能浏览、能点安装，一下载就失败**。
+     * 真实案例（用户报「装了俩个插件都没成功」）：pnpm 日志里 34 次请求全是
+     * registry.npmjs.org、0 次镜像，ECONNRESET / Request took 72331ms 刷满整页，
+     * 最后卡在 color-name 的「retry in 1 minute」——而界面上只有一句
+     * 「宿主执行这个操作时报错。看宿主日志里的 pnpm 输出」。用户不可能从这句话里
+     * 推断出「去配个镜像」。
+     *
+     * 只认网络类签名，**不**认 EPERM（那是另一个原因，有自己的文案）。
+     * @returns 命中时返回诊断原文，未命中返回空串。
+     */
+    function registryUnreachableDetail(error) {
+      if (!error) return "";
+      // 只认**具体**的网络签名，不认裸词 `network`/`registry`：
+      // 裸词会让「版本不兼容」「包不存在」这类完全不同的失败也被改写文案，那就成了另一种撒谎。
+      var pattern = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|UND_ERR|socket hang up|Request took \d+ms|fetch failed|ERR_PNPM_FETCH|ERR_PNPM_META_FETCH/i;
+      var diagnostic = error.diagnostic ? String(error.diagnostic) : "";
+      var message = error.message ? String(error.message) : "";
+      // 文件占用优先：那种诊断里也可能混着 registry 字样，不能被这条抢走。
+      if (fileLockedDetail(error) !== "") return "";
+      if (diagnostic && pattern.test(diagnostic)) return diagnostic;
+      if (message && pattern.test(message)) return message;
+      return "";
+    }
+
+    /**
+     * 行内/短回执用的一句话失败说明：三段式放不下，只给一句能照做的短话。
+     * 抽成一个函数是因为**两个调用点原本各写了一遍同样的三元表达式**——那种重复一旦
+     * 只改一处，就又是一次「两处规则漂移」（本文件里已经栽过同样的跟头）。
+     * 占用的判定优先于网络判定（更具体）。
+     */
+    function shortFailureText(error) {
+      if (fileLockedDetail(error) !== "") return t("err.file-locked.row");
+      if (registryUnreachableDetail(error) !== "") return t("err.registry-unreachable.row");
+      if (error && error.message) return String(error.message);
+      return "";
+    }
+
     /** 目录过期横幅里的「原因」：服务端给的可能是错误码字符串、错误对象或什么都没有。 */
 function staleReason(staleSource) {
   var raw = staleSource && staleSource.error;
@@ -888,7 +938,13 @@ function errorCopy(error) {
       var code = error && error.code ? String(error.code) : "unknown";
       var known = !!ERROR_PREFIXES[code];
       var locked = fileLockedDetail(error);
-      var prefix = locked ? "err.file-locked" : known ? "err." + code : "err.unknown";
+      // 连不上 npm 源：**优先于** `known`。宿主把它归成 operation-error（因为 pnpm 非 0 退出），
+      // 而 operation-error 的通用文案是「看宿主日志里的 pnpm 输出」——对用户没有可操作性。
+      // 这个判定也刻意排在 locked 之后（locked 更具体，且诊断里可能混着 registry 字样）。
+      var unreachable = locked ? "" : registryUnreachableDetail(error);
+      var prefix = locked ? "err.file-locked"
+        : unreachable !== "" ? "err.registry-unreachable"
+        : known ? "err." + code : "err.unknown";
       var status = error && error.status !== undefined ? error.status : "";
       var message = error && error.message ? String(error.message) : "";
       var copy = {
@@ -898,7 +954,10 @@ function errorCopy(error) {
         // 「HTTP {status}」这段字面量原样渲染给用户。
         why: t(prefix + ".why", { status: status }),
         next: t(prefix + ".next"),
-        message: locked || message,
+        // 详情行露出**诊断原文**：占用路径一直这么做，网络路径同样需要——
+        // 否则用户看到的是宿主的通用句「宿主执行这个操作时报错。」，而不是
+        // 「GET https://registry.npmjs.org/... ECONNRESET」这种能直接拿去搜的线索。
+        message: locked || unreachable || message,
         hint: error && error.hint ? String(error.hint) : ""
       };
       if (!locked && !known && message) copy.why = message;
@@ -2136,7 +2195,7 @@ function errorCopy(error) {
               entries.length ? " · " + t("installed.plugins") + " " + entries.length : "",
               hostReason ? " · " + hostReason : ""),
             bundle.error
-              ? el("div", { className: "dshpm-rowError" }, t("installed.rowError", { message: fileLockedDetail(bundle.error) ? t("err.file-locked.row") : (bundle.error.message || bundle.error.code || "") }))
+              ? el("div", { className: "dshpm-rowError" }, t("installed.rowError", { message: shortFailureText(bundle.error) || (bundle.error.code || "") }))
               : null),
           el("div", { className: "dshpm-rowActions" },
             el(Switch, {
@@ -3083,7 +3142,7 @@ function errorCopy(error) {
           clearJob(jobKey);
           if (!silent) setNotice({ kind: "error", error: error });
           // 被占用的失败给一句能照做的短话（行内放不下三段式），而不是宿主的通用句。
-          report({ ok: false, text: fileLockedDetail(error) ? t("err.file-locked.row") : (error && error.message ? String(error.message) : t("updates.failed", { name: label })) });
+          report({ ok: false, text: shortFailureText(error) || t("updates.failed", { name: label }) });
         });
       }
 

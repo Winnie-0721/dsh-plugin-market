@@ -1086,6 +1086,57 @@ nanshan1995/DSH-Plugin-Market     ->  被标成已安装: kimiya1010/dsh-plugin-
   都不改变行为，本轮不动；其中死 CSS 里有两条被 `client-copy.test.mjs` **要求保留**，
   说明「看着没用」不等于能删。
 
+### 12.21 用户实测失败排查：两个插件、两个不同原因（v1.2.0 同期）
+
+用户报「我在插件市场装了俩个插件都没能成功 你排除一下问题」。查的是**他真实 profile 的
+宿主日志**（`~/.dsh/profiles/desktop/.plugin-manager/logs/operation-*/pnpm.log`）。**两个失败
+原因完全不同**——这正是「看起来同一件事、其实两回事」的典型：
+
+**插件一 `@linxin666/dsh-remote-web-ui`：文件被占用。** `operation-U78OT0`：
+`[ERR_PNPM_EPERM] [importPackage ...\node_modules\dsh-our-free-model] EPERM: operation not
+permitted, scandir`。注意报错目录**不是要装的那个包**，而是另一个插件——DSH 正在运行
+（实测 6 个 `DeepSeek Harness.exe` 进程），它持有那个目录的句柄，pnpm 去 `scandir` 被拒，
+**整个事务回滚**。市场对这类错误的识别本来就是对的（`fileLockedDetail` 命中 `ERR_PNPM_EPERM`）。
+
+**插件二 `dsh-mobile`：连不上 npm 源。** `operation-GopJYb` 里刷了几十条 `ECONNRESET`、
+`Request took 72331ms`，最后卡在 `color-name` 的「Will retry in 1 minute」——日志到此为止，
+**没有 `Done in`**。我实测这台机器：`registry.npmjs.org` **15s 超时不通**、
+`registry.npmmirror.com` **HTTP 200 / 366ms**。而日志里 **34 次请求全是 registry.npmjs.org、
+0 次镜像**。
+
+**这里有一条我自己的设计盲区（本轮修掉）**：抓目录走镜像（`catalog-npm.js` 镜像优先），
+但**真正安装是交给宿主 pnpm 的**，用 pnpm 自己的 registry。两条通道不同 →
+用户会看到最难解释的一种现象：**能浏览、能点安装、一下载就失败**。
+
+**修了什么**（`plugin-market/lib/client.js`，只动错误呈现，不动任何安装行为）：
+新增 `registryUnreachableDetail`（只认**具体**网络签名：`ECONNRESET`/`ETIMEDOUT`/
+`UND_ERR`/`Request took Nms`/`ERR_PNPM_FETCH*` 等），命中时 errorCopy 切到
+`err.registry-unreachable.*`，**给出「在该 profile 目录建 .npmrc 写 registry=镜像」**；
+**占用优先于网络**（诊断里可能混着 registry 字样）；两处行内短句原本各写一遍同样的三元
+表达式，抽成共用的 `shortFailureText`（否则又是一次「两处规则漂移」）；详情行现在也露出
+网络诊断原文（此前只显示宿主通用句「宿主执行这个操作时报错。看宿主日志里的 pnpm 输出」）。
+
+**这条建议是核实过的，不是猜的**：从 asar 里抽出 `@deepseek-ai/dsh-plugin-manager` 确认
+pnpm 的 `cwd` **就是 profile 目录**、且 `extendEnv: false`（env 被清洗），所以 profile 下的
+`.npmrc` 确实会被读到。
+
+**我在这轮自己差点犯的错**：第一版文案我写了 `{profileDir}` 占位符——但宿主只暴露 profile
+**名字**、不暴露目录，那个占位符会**原样渲染给用户**。这正是我在修的那类「给用户看没用的
+东西」，在写的时候就撞上一次，已改成 `DSH_HOME/profiles/<profile>` 这种可自行代入的形式。
+
+**证据强度**：新增门禁套件 `verify/error-classify.test.mjs`（**18 条**）——它把真 bundle 里的
+识别函数**取出来执行**，喂**从那份真实 pnpm 日志里逐字抄下来的原文**。刻意不写纯形状断言：
+这一轮（和上一轮）反复证明「正则匹配到了」≠「行为对」。变异测试 **6/6 全捕获**（删签名 /
+放裸词 network|registry 进匹配集 / 去掉占用优先闸门 / errorCopy 不切文案 / 行内不报镜像 /
+详情行不露诊断），变异后按字节还原。**变异也纠正了我一次**：第一版 5 个变异里「行内短句
+不报镜像」没被捕获——那暴露的是**我的测试漏了 `shortFailureText`**，补上行为断言后 6/6。
+
+**顺带清掉了残留**：`dsh-mobile`（66.2MB）与 `@linxin666/`（2.1MB）都是**无主残留**
+（`package.json`/`lockfile`/`cordis.patch.yml` 三处均无记录、`.pnpm` 虚拟仓里也无记录），
+删除前已备份三个清单文件。`dsh-mobile` 的状态尤其坑：文件都在 `node_modules`、
+**但不在任何清单里**，所以「看着装上了、永远不会被加载」——这正是用户说的「没能成功」。
+
+
 
 
 

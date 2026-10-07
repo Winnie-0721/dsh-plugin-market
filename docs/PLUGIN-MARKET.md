@@ -205,6 +205,18 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
   更隐蔽的：**「同一个包正在装」的重复点击守卫必须回调调用方**（并把这类记为 `skipped`），
   否则一键更新的顺序循环会在那一步断掉、按钮永久禁用（这个死锁是修 bug 时引入的，
   由对抗性复核用复刻控制流的脚本抓出，真实用户路径是「已安装」页那颗按钮）。
+- **装完之后回读一次，不再把「宿主说成功」当成「真的生效」（v1.2.0）**：`application` 说的是宿主
+  **执行**了什么，不是**结果**——`applied` 完全可能对应「写进了 `node_modules`，但 profile 的
+  bundle 列表里从来没有它」（界面绿色「已安装」、插件永远不出现），更新时也可能「目录说 0.63.0、
+  磁盘上还是 0.62.3」（界面照样写「已更新」）。现在 install 之后**前后各读一次 bundle 列表**，
+  用**差集**认出这次装上的那个（所以不假设「包名 == bundle 名」），回一个
+  `activation: { state: live | restart | inert | broken | disabled | unknown, installed, versionMatches, reasons }`，
+  客户端按它分六种说法，版本对不上时明确改口。三个取舍：`restart-required` **优先于** `live`
+  （宿主原话是还没生效）；`inert`/`broken` **不算成功**（会进「一键更新」的成功计数，谎报成功比不说更糟）；
+  `unknown` 是**一等结果**（读不到就说读不到，带 `reasons`），且 **`no-baseline` 与 `live` 可以并存**
+  ——认不出「谁装上的」，却认得出「它在列表里」，把已知的「它在跑」降级成 `unknown` 是另一种不诚实。
+  回归：`host-contract.test.mjs` 第 9 组（真调判定函数）；**这 8 处语义逐个做过变异测试，8/8 被抓到**
+  （「测试通过」本身被验证过一次）。契约见 [API-CONTRACT §2.4](API-CONTRACT.md)。
 - **动效服务于状态，不服务于炫技**（v1.1.0）：进场错峰、hover 抬升、按钮按下回弹、
   页签底线滑动、回执气泡（toast）贴底弹入 + 倒计时线 + **退场下沉**、可更新页整页切换。三条硬约束写在
   [API-CONTRACT §4](API-CONTRACT.md)（基础态不写 `opacity:0`、只动 transform/opacity/max-height、

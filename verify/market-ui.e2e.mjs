@@ -76,6 +76,8 @@ const INJECTED_INSTALLED = {
 const browser = await launchBrowser({ width: 1560, height: 980 })
 const { client } = browser
 let consoleErrors = []
+/** [9] 专用开关：打开后 /install 返回带 activation 的「版本对不上」响应。 */
+let manualUpdateProbe = false
 try {
   await client.send('Page.enable')
   await client.send('Runtime.enable')
@@ -103,8 +105,24 @@ try {
     const posted = String(params.request.postData || '')
     let payload = INJECTED_INSTALLED
     let delay = 0
-    if (isSelfCheck) {
-      // 右键点击要走确定性路径：CDN 慢、宿主 10 分钟缓存都会让断言变成赌运气。
+    if (isInstall && manualUpdateProbe) {
+      // [9] 专用：装完**回读发现磁盘版本与目录不符**（v1.1.7 的 activation）。
+      // 用显式开关切换，而不是靠 postData 猜——批量那一段必须保持原样，
+      // 否则它会从 restart-required 变成 applied，连累重启横幅与「成功 1、失败 1」两条断言。
+      payload = {
+        ok: true,
+        changed: true,
+        application: 'applied',
+        activation: {
+          state: 'live',
+          expected: '1.2.0',
+          installed: '1.0.0',
+          enabled: true,
+          versionMatches: false,
+          reasons: ['version-mismatch'],
+        },
+      }
+    } else if (isSelfCheck) {      // 右键点击要走确定性路径：CDN 慢、宿主 10 分钟缓存都会让断言变成赌运气。
       // 这里恒定回「没有更新」→ 按钮必须走「正在更新… → 再次检查」。
       payload = {
         ok: true,
@@ -710,6 +728,33 @@ try {
   expect('面板根自己滚动（不是靠压扁子项来容纳内容）', squeezed?.rootScrolls === true, JSON.stringify(squeezed))
   await screenshot(client, join(shotDir, 'market-short-viewport.png'))
   console.log(`  · 截图：${join(shotDir, 'market-short-viewport.png')}`)
+
+  // ── [9] 装后激活校验的真实界面表现（v1.1.7）────────────────────────────────
+  // 上面的断言都在验「有没有」；这一组验的是**说的是不是真话**：
+  // 宿主报 applied，但回读发现磁盘版本（1.0.0）与目录版本（1.2.0）不符时，
+  // 界面**必须改口**——不能再写「已安装并已在运行」，那正是「说更新了、其实没更新」。
+  console.log('\n[9] 装后激活校验：版本对不上时必须改口（v1.1.7）')
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1560, height: 980, deviceScaleFactor: 1, mobile: false })
+  manualUpdateProbe = true
+  await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
+  await waitFor(client, `document.querySelector('.dshpm-row .dshpm-rowActions button') !== null`, 8000, '已安装页的第一行（激活探针）')
+  // 关掉可能还挂着的旧回执，否则新回执会被 dismiss 逻辑吞掉。
+  await waitFor(client, `document.querySelector('.dshpm-notice') === null`, 12000, '旧回执已收起')
+  await evaluate(
+    client,
+    `(() => { const b = Array.from(document.querySelectorAll('.dshpm-row .dshpm-rowActions button')).find(x => /更新到|Updating to/.test(x.textContent)); if (b) b.click(); return true; })()`,
+  )
+  await waitFor(client, `(() => { const n = document.querySelector('.dshpm-notice'); if (!n) return false; return /实际是|actually/.test(n.innerText); })()`, 15000, '激活回读给出的「版本不符」回执')
+  const mismatchNotice = await evaluate(client, `(() => { const n = document.querySelector('.dshpm-notice'); return n ? { text: n.innerText.replace(/\\s+/g, ' ').trim(), kind: n.getAttribute('data-kind') } : null; })()`)
+  expect(
+    '宿主报 applied 但回读版本不符时改口：显示「实际是 v1.0.0（目录里写的是 v1.2.0）」而不是「已在运行」',
+    !!mismatchNotice && /1\.0\.0/.test(String(mismatchNotice.text)) && /1\.2\.0/.test(String(mismatchNotice.text)) && !/并已在运行/.test(String(mismatchNotice.text)),
+    JSON.stringify(mismatchNotice),
+  )
+  expect('版本不符按 warn 呈现（不是绿色成功）', mismatchNotice?.kind === 'warn', JSON.stringify(mismatchNotice))
+  await screenshot(client, join(shotDir, 'market-activation-mismatch.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-activation-mismatch.png')}`)
+  manualUpdateProbe = false
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

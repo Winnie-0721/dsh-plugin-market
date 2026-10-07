@@ -516,11 +516,11 @@ E7-fetch status=200 耗时=527ms                                       ← 真�
 | 验证 | 结果 | 证据 |
 |---|---|---|
 | 契约验收（冻结的 53 条） | **53 PASS / 0 FAIL** | `verify-20261004-181336`（v1.1.1 后） |
-| 真实浏览器渲染与动效（65 条，v1.1.6） | **65/65** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
+| 真实浏览器渲染与动效（67 条，v1.2.0） | **67/67** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
 | 自更新通道离线回归（43 条，v1.1.6） | **43/43** | `verify/self-update.test.mjs` |
-| 文案与动效不变量（30 条，v1.1.6） | **30/30** | `verify/client-copy.test.mjs` |
+| 文案与动效不变量（31 条，v1.2.0） | **31/31** | `verify/client-copy.test.mjs` |
 | 目录身份层与内容校验（36 条，v1.1.6 新增） | **36/36** | `verify/catalog-identity.test.mjs` |
-| host 契约回归（18 条，v1.1.6 新增） | **18/18** | `verify/host-contract.test.mjs` |
+| host 契约回归（27 条，v1.2.0） | **27/27** | `verify/host-contract.test.mjs` |
 | 自更新端到端（真实 CDN + 真实安装，6 条） | **6/6** | `verify/self-update-live.ps1` |
 | 样式生命周期回归（5 条，v1.0.1 起） | **5/5** | `verify/style-heal.test.mjs` |
 
@@ -884,4 +884,43 @@ e2e `[8]` 的"任何直接子项不得被压扁 + 根自己滚动"两条断言�
 
 **本轮最终状态**：门禁全绿；`catalog-identity` **36/36**、`host-contract` **18/18**、
 `client-copy` **30/30**、`self-update` **43/43**、真实浏览器 **65/65**。
+
+### 12.17 装后激活校验 + 版本回读（v1.2.0，用户指定「先做 2」）
+
+来源是 `docs/ROADMAP.md` 的功能方向研究：第 2 项「让『装』和『更新』不说谎」。
+问题定性：`application` 说的是宿主**执行**了什么，不是**结果**——`applied` 完全可能对应
+「写进了 `node_modules`，但 profile 的 bundle 列表里从来没有它」；更新时目录说 `0.63.0`、
+磁盘上还是 `0.62.3`，旧版界面照样写「已更新」。
+
+**做法**：install 前后各读一次 bundle 列表，用**差集**（而不是猜包名）认出这次装上的那个，
+回一个 `activation: { state, expected, installed, enabled, versionMatches, reasons }`。
+
+**三个关键取舍**（都是「宁可说不知道，也不猜」的具体化）：
+
+1. **`restart-required` 优先于 `live`**：宿主的原话就是还没生效，不因为条目在列表里就改口。
+2. **`inert` / `broken` 不算成功**（客户端 `applied:false`）：它们会进「一键更新」的成功计数，
+   谎报成功比不说更糟。
+3. **`unknown` 是一等结果**，但 **`no-baseline` 与 `live` 可以并存**：认不出「谁装上的」，
+   却认得出「它在列表里」，后者才是 `live`/`inert` 的判据；把已知的「它在跑」降级成 `unknown`
+   是另一种不诚实。这条是写测试时被自己**逼问**出来的——最初的实现里「没有基线」直接返回
+   `unknown`，而测试用例恰好覆盖了「没有基线但列表里有它」，于是「预设的答案」和「诚实的答案」
+   当场分了岔。
+
+**验证**（三层，逐层加力）：
+
+| 层 | 内容 | 结果 |
+|---|---|---|
+| 行为回归 | `host-contract` 第 9 组：真调 `verifyActivation` 验六态 + 三种 `unknown` 理由 + 四个「不该谈激活」的入口 | 18→**27/27** |
+| 文案回归 | `client-copy`：六路文案、版本不符必须改口、`inert`/`broken` 不算成功、无 `activation` 时行为不变 | 30→**31/31** |
+| 真实浏览器 | e2e `[9]`：注入「`applied` 但回读版本不符」，断言回执**真的改口**成「实际是 v1.0.0（目录里写的是 v1.2.0）」且按 `warn` 呈现 | 65→**67/67** |
+
+**变异测试**（这一轮的额外一步）：§12.16 已经证明「源码形状断言可以骗过自己」，
+所以这次不只跑测试，还**把每处语义破坏一次**（8 处：去掉版本比对、把 `inert` 改回算成功、
+无 `activation` 时不再保持原文案、`restart-required` 报成 `live`、找不到时报 `live`、
+`failed`/`pending` 也给状态、装完不回读、版本比较恒真），**要求对应断言必须失败**：
+**8/8 全被抓到**。探针跑完即删、不入库（与 §12.16 第 3 条同一做法）。
+
+**新截图**：`verify/logs/ui/market-activation-mismatch.png`（人工看过：橙色左侧边条 +
+「已安装 @fixture/needs-update，但它实际是 v1.0.0（目录里写的是 v1.2.0）——可能源同步滞后，
+重启后再确认。」）。断言绿而截图丑的情况这里不存在——两者都看了。
 

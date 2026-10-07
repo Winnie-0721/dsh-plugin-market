@@ -273,9 +273,152 @@ function warningsOf(value) {
   return Array.isArray(value.warnings) ? value.warnings.filter((entry) => typeof entry === 'string') : []
 }
 
+/** 装/更新之后能直接回读的 bundle 快照：以小写名字为键，避免大小写差异被当成两个包。 */
+function bundleSnapshot(bundles) {
+  const map = new Map()
+  for (const raw of Array.isArray(bundles) ? bundles : []) {
+    const name = optionalText(raw?.name)
+    if (name === null) continue
+    map.set(name.toLowerCase(), {
+      name,
+      version: optionalText(raw?.version),
+      enabled: raw?.enabled === true,
+      failed: raw?.error !== null && raw?.error !== undefined
+    })
+  }
+  return map
+}
+
+function normalizeVersion(value) {
+  const text = optionalText(value)
+  return text === null ? null : text.replace(/^v/i, '').toLowerCase()
+}
+
+/**
+ * 装完之后**回读**宿主状态，回答一个 `application` 回答不了的问题：
+ * 「东西真的落地了吗、落地的哪个版本、它在跑吗」。
+ *
+ * 为什么必须回读：`ChangeResult.application` 说的是宿主**执行**了什么，不是**结果**。
+ * `applied` 完全可能对应「写进了 node_modules，但 profile 的 bundle 列表里从来没有它」——
+ * 用户看到绿色「已安装」，插件却永远不出现。参考实现把这个拆成
+ * live | restart | inert | broken，这里对齐，并额外做**版本回读**：目录说 0.63.0、
+ * 磁盘上还是 0.62.3 时，界面不能再写「已更新」。
+ *
+ * 判定手段是**前后对比**而不是猜名字：装之前记一份 bundle 名字表，装之后记一份，
+ * 新出现的那个就是这次装上的。这样不必假设「包名 == bundle 名」（两者并不总相等），
+ * 也不会因为一个仓库里包名不同就误报 inert。`candidates` 只用于「没有新名字出现」时
+ * 判断这次到底是**更新了已有条目**（候选名本来就在表里）还是**什么都没落地**。
+ *
+ * 状态语义（`null` 表示这次操作不该谈激活，例如 failed / cancelled / 还在等批准构建脚本）：
+ *   - `live`      已落地、已启用、宿主没报错；
+ *   - `restart`   已落地，但宿主说重启后才生效（**不**等于已生效）；
+ *   - `inert`     宿主说成功，但列表里既没有新条目、候选名也不在——很可能是个普通 npm 包，
+ *                 不是 bundle；这是以前完全看不见的一类；
+ *   - `broken`    条目在列表里但自身带 error；
+ *   - `disabled`  条目在列表里但处于停用状态；
+ *   - `unknown`   读不回列表（没有 listBundles、调用抛错）或新条目不止一个分不清是哪个——
+ *                 **宁可说不知道，也不猜一个状态出来**。
+ *
+ * 导出只为让回归测试能真调它（源码形状断言测不出这些分支）。
+ */
+export function verifyActivation(options = {}) {
+  const application = optionalText(options.application) ?? 'failed'
+  // 只有「宿主声称成功」的两种 application 才谈得上激活；失败/取消/覆盖都不该给状态。
+  if (application !== 'applied' && application !== 'restart-required') return null
+  // 还在等用户批准构建脚本时，宿主根本没装，回读必然「没落地」——那不是 inert。
+  if (options.pending === true) return null
+
+  const before = options.before instanceof Map ? options.before : null
+  const after = options.after instanceof Map ? options.after : null
+  const expected = optionalText(options.expectedVersion)
+  const reasons = []
+  const result = { state: 'unknown', expected, installed: null, enabled: null, versionMatches: null, reasons }
+
+  if (after === null) {
+    reasons.push('read-back-unavailable')
+    return result
+  }
+
+  const candidates = (Array.isArray(options.candidates) ? options.candidates : [])
+    .map((entry) => optionalText(entry))
+    .filter((entry) => entry !== null)
+    .map((entry) => entry.toLowerCase())
+
+  let hit = null
+  let ambiguous = false
+  if (before !== null) {
+    const appeared = [...after.keys()].filter((key) => !before.has(key))
+    if (appeared.length === 1) {
+      hit = after.get(appeared[0])
+    } else if (appeared.length > 1) {
+      // 一次装出多个 bundle（或本来就有点别的变动）：只在候选名里能唯一确定时才认。
+      const matched = appeared.filter((key) => candidates.includes(key))
+      if (matched.length === 1) hit = after.get(matched[0])
+      else ambiguous = true
+    }
+  } else {
+    // 没有装前的快照：**认不出「谁是这个操作装上的」，但认得出「这个包在不在列表里」**。
+    // 后者才是 live/inert 的判据，所以照常判定，只在 reasons 里记下「归因未经证明」——
+    // 而不是因为归因不了就把已知的「它在跑」降级成 unknown。
+    reasons.push('no-baseline')
+  }
+  if (hit === null && !ambiguous) {
+    const present = candidates.filter((key) => after.has(key))
+    if (present.length === 1) hit = after.get(present[0])
+    else if (present.length > 1) ambiguous = true
+  }
+
+  if (hit === null) {
+    if (ambiguous) {
+      reasons.push('ambiguous-bundle')
+      return result
+    }
+    if (before === null) {
+      // 没有基线**且**列表里也找不到它：既可能是没落地，也可能是包名与 bundle 名毫无关系。
+      // 分不清，如实说不知道。
+      return result
+    }
+    result.state = 'inert'
+    reasons.push('not-in-bundle-list')
+    return result
+  }
+
+  result.installed = hit.version
+  result.enabled = hit.enabled
+  result.versionMatches =
+    expected === null || hit.version === null ? null : normalizeVersion(expected) === normalizeVersion(hit.version)
+
+  if (hit.failed === true) {
+    result.state = 'broken'
+    reasons.push('bundle-reported-error')
+    return result
+  }
+  if (hit.enabled !== true) {
+    result.state = 'disabled'
+    reasons.push('bundle-disabled')
+    return result
+  }
+  // restart-required 优先于 live：宿主的原话就是「还没生效」，不能因为条目在列表里就改口。
+  result.state = application === 'restart-required' ? 'restart' : 'live'
+  if (result.versionMatches === false) reasons.push('version-mismatch')
+  return result
+}
+
+/** 读一份 bundle 快照；能力缺失或调用失败都返回 null（调用方据此报 unknown，不编状态）。 */
+async function captureBundles(manager) {
+  if (!hasMethod(manager, 'listBundles')) return null
+  try {
+    const bundles = await manager.listBundles()
+    return bundleSnapshot(bundles)
+  } catch (error) {
+    console.warn(`[${PLUGIN_NAME}] 回读已安装列表失败，本次操作不报激活状态：${describe(error)}`)
+    return null
+  }
+}
+
 /** 契约 §2.4 / §2.5 的响应；宿主错误码原样透传（契约要求「透传 error.code」）。
  *  导出只为让回归测试能真调它读响应体（源码形状断言测不出 `ok` 的推导行为）。 */
-export function sendChangeResult(res, result, stage) {
+export function sendChangeResult(res, result, stage, activation) {
   const value = result !== null && typeof result === 'object' ? result : {}
   const error = projectChangeError(value.error)
   const application = optionalText(value.application) ?? 'failed'
@@ -298,6 +441,9 @@ export function sendChangeResult(res, result, stage) {
       ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
       : []
   }
+  // 激活状态是可选的：读不回列表时给 `unknown`（带 reasons），**不给 null 也不给 live**——
+  // null 会让客户端以为「这条不用谈激活」，live 就成了无凭据的保证。
+  if (activation !== undefined && activation !== null) payload.activation = activation
   const output = value.packageResult?.output
   if (typeof output === 'string' && output !== '') payload.output = tail(output, 2000)
   sendJson(res, 200, payload)
@@ -580,6 +726,10 @@ function createHandlers(ctx, catalog, selfUpdate) {
         if (approved.length > 0) options.approvedBuilds = approved
       }
 
+      // 装之前先记一份 bundle 名字表：装完之后靠**前后差集**认出这次装上的到底是哪个 bundle，
+      // 而不是假设「包名 == bundle 名」（两者并不总相等）。读不到就退化成 unknown，不猜。
+      const before = await captureBundles(manager)
+
       let result
       try {
         result = await manager.installBundle(spec, Object.keys(options).length > 0 ? options : undefined)
@@ -597,7 +747,20 @@ function createHandlers(ctx, catalog, selfUpdate) {
         })
         return
       }
-      sendChangeResult(res, result, 'install')
+
+      const shape = result !== null && typeof result === 'object' ? result : {}
+      const after = await captureBundles(manager)
+      const activation = verifyActivation({
+        application: optionalText(shape.application) ?? 'failed',
+        pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
+        before,
+        after,
+        // 目录条目的真实身份可能和 bundle 名不同：三个都作为候选交给判定。
+        candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName],
+        // 版本回读的期望值取自**目录**（用户点的就是那个版本），不是宿主回显。
+        expectedVersion: hit?.version
+      })
+      sendChangeResult(res, result, 'install', activation)
     },
 
     /** 契约 §2.5 */

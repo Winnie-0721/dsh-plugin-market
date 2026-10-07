@@ -257,6 +257,15 @@ window.__ModuleLoader__.load({
         "notice.updateAllDone": "更新完成：成功 {ok}、失败 {fail}。",
         "notice.updateAllNone": "没有需要更新的插件。",
         "notice.installBusy": "{name} 正在装/更新，已跳过。",
+        // 激活校验（v1.1.7）：宿主装完会回读一次列表，这里如实转述「东西到底落地了没」。
+        // 以前一律写「已安装 {name}」——而宿主说 applied 也可能是「装进了 node_modules，
+        // 但 profile 的 bundle 列表里从来没有它」，用户看到绿色回执、插件却永远不出现。
+        "notice.installLive": "已安装 {name}，并已在运行。",
+        "notice.installLiveMismatch": "已安装 {name}，但它实际是 v{installed}（目录里写的是 v{expected}）——可能源同步滞后，重启后再确认。",
+        "notice.installInert": "装完了，但 {name} 没有出现在插件的装载列表里：它可能不是一个 bundle 包（只是普通 npm 包装上了）。",
+        "notice.installBroken": "{name} 装上了，但宿主报告它装载失败。展开它看服务端说明，或先停用再排查。",
+        "notice.installDisabled": "{name} 装上了，但处于停用状态；在「已安装」页把它启用。",
+        "notice.installUnknown": "已安装 {name}，但这次没能回读装载状态，无法确认它是否已经在跑。",
         "notice.updatesNone": "全部都是最新版本。",
         "notice.selfFound": "插件市场有新版本 v{version}：点「更新到 {version}」安装。",
         "notice.selfCurrent": "插件市场已是最新（v{version}）。",
@@ -510,6 +519,12 @@ window.__ModuleLoader__.load({
         "notice.updateAllDone": "Done: {ok} succeeded, {fail} failed.",
         "notice.updateAllNone": "Nothing to update.",
         "notice.installBusy": "{name} is already installing/updating; skipped.",
+        "notice.installLive": "Installed {name}, and it is running.",
+        "notice.installLiveMismatch": "Installed {name}, but what landed is v{installed} (the catalog said v{expected}) — the source may be lagging; recheck after a restart.",
+        "notice.installInert": "The install finished, but {name} never appeared in the plugin load list: it may not be a bundle package (a plain npm package got installed).",
+        "notice.installBroken": "{name} was installed, but the host reports it failed to load. Expand it for the server detail, or disable it and investigate first.",
+        "notice.installDisabled": "{name} was installed but is disabled; enable it on the “Installed” tab.",
+        "notice.installUnknown": "Installed {name}, but the load state could not be read back, so it is unconfirmed whether it is running.",
         "notice.updatesNone": "All plugins are up to date.",
         "notice.selfFound": "Plugin market v{version} is available: click “Update to {version}”.",
         "notice.selfCurrent": "The plugin market is up to date (v{version}).",
@@ -2140,6 +2155,34 @@ function errorCopy(error) {
      * 与气泡的严重级别（success/warn/info）解耦。restart-required 是「装好了，重启 DSH
      * 才换到新代码」：文件已就位，算成功；以前按 kind!=='success' 计失败，于是带重启的
      * 更新永远汇成「成功 0、失败 2」，看起来像更新坏了。 */
+    /**
+     * 激活状态 → 文案（v1.1.7）。**这是「不说谎」的落点**：以前只要宿主回 applied 就写
+     * 「已安装 {name}」，而 applied 也可能意味着「装进了 node_modules，但 profile 的 bundle
+     * 列表里从来没有它」——用户看到绿色回执，插件却永远不出现。
+     *
+     * 返回 null 表示这次不谈激活（卸载、没有 activation 字段、或状态是 unknown 但用户
+     * 已经在别的文案里得到答复），调用方保持原样。
+     */
+    function activationNotice(activation, name) {
+      if (!activation || typeof activation.state !== "string") return null;
+      var state = activation.state;
+      var installed = activation.installed ? String(activation.installed) : "";
+      var expected = activation.expected ? String(activation.expected) : "";
+      if (state === "live") {
+        // 版本回读对不上：目录说 0.63.0、磁盘上还是 0.62.3，不能照样写「已更新到 0.63.0」。
+        if (activation.versionMatches === false && installed) {
+          return { kind: "warn", applied: true, text: t("notice.installLiveMismatch", { name: name, installed: installed, expected: expected }) };
+        }
+        return { kind: "success", applied: true, text: t("notice.installLive", { name: name }) };
+      }
+      if (state === "inert") return { kind: "warn", applied: false, text: t("notice.installInert", { name: name }) };
+      if (state === "broken") return { kind: "error", applied: false, text: t("notice.installBroken", { name: name }) };
+      if (state === "disabled") return { kind: "warn", applied: true, text: t("notice.installDisabled", { name: name }) };
+      if (state === "unknown") return { kind: "info", applied: true, text: t("notice.installUnknown", { name: name }) };
+      // restart 交给原来那条「重启 DSH 后生效」的文案，那里已经有重启横幅配合。
+      return null;
+    }
+
     function noticeFromResult(payload, kind, name) {
       var application = payload && payload.application ? String(payload.application) : "applied";
       var changed = !payload || payload.changed !== false;
@@ -2156,6 +2199,14 @@ function errorCopy(error) {
       } else {
         base = { kind: "success", applied: true, text: kind === "remove" ? t("notice.removeApplied", { name: name }) : t("notice.installApplied", { name: name }) };
       }
+      // 激活回读**覆盖**默认那句「已安装」：默认那句是在没证据的情况下说的，
+      // 现在有证据了（或有「读不到」的证据），就该按证据说。
+      // 唯一例外：`changed === false`（宿主说这次什么都没改）时保留「没有产生变更」——
+      // 那句本身是重要信息，用「并已在运行」盖掉就等于把「你的更新其实没落地」瞒下来了。
+      // 但**版本对不上**时必须盖：那正是「说更新了、磁盘还是旧版」的那一类。
+      var detailed = activationNotice(payload && payload.activation, name);
+      var mismatch = !!(payload && payload.activation && payload.activation.versionMatches === false);
+      if (detailed !== null && (changed !== false || mismatch)) base = detailed;
       if (warnings) base.text = base.text + " · " + t("notice.installWarnings", { warnings: warnings });
       return base;
     }

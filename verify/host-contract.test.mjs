@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { sendError, sendJson, createRouteTable } from '../plugin-market/lib/http.js'
-import { sendChangeResult, findCatalogItem } from '../plugin-market/lib/index.js'
+import { sendChangeResult, findCatalogItem, verifyActivation } from '../plugin-market/lib/index.js'
 import { buildHelperCommand, buildRestartPayload, spawnRestartHelper } from '../plugin-market/lib/restart.js'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -227,6 +227,148 @@ check('同一路径再注册会覆盖（所以 GET/POST 必须合并成一个 ha
 })
 check('/self-update 在 index.js 里只注册一次且含 GET/POST', () => {
   assert.match(indexSource, /\.on\(`\$\{ROUTE_PREFIX\}\/self-update`, \['GET', 'POST'\]/)
+})
+
+console.log('\n[9] 装后激活校验：回读宿主状态，不说谎（行为测试，真调 verifyActivation）')
+/** 造一份 bundle 快照 Map（和小写键的实现一致）。 */
+function snap(list) {
+  const map = new Map()
+  for (const b of list) {
+    map.set(b.name.toLowerCase(), {
+      name: b.name,
+      version: b.version ?? null,
+      enabled: b.enabled !== false,
+      failed: b.failed === true
+    })
+  }
+  return map
+}
+check('新条目出现且启用 ⇒ live；版本一致时 versionMatches 为 true', () => {
+  const out = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([{ name: 'dsh-foo', version: '0.63.0' }]),
+    candidates: ['dsh-foo'],
+    expectedVersion: '0.63.0'
+  })
+  assert.equal(out.state, 'live')
+  assert.equal(out.installed, '0.63.0')
+  assert.equal(out.versionMatches, true)
+  assert.equal(out.enabled, true)
+})
+check('application=restart-required 时不许报 live（宿主原话是还没生效）', () => {
+  // 错过的样子：只看「条目在列表里」就报 live——重启前新代码并没有生效。
+  const out = verifyActivation({
+    application: 'restart-required',
+    before: snap([]),
+    after: snap([{ name: 'dsh-foo', version: '1.2.0' }]),
+    candidates: ['dsh-foo'],
+    expectedVersion: '1.2.0'
+  })
+  assert.equal(out.state, 'restart')
+})
+check('**磁盘版本与目录版本不一致时 versionMatches=false**（界面不能写「已更新」）', () => {
+  // 错过的样子：pnpm 说成功、目录说有 0.63.0，磁盘上还是 0.62.3，界面照样报成功。
+  const out = verifyActivation({
+    application: 'applied',
+    before: snap([{ name: 'dsh-foo', version: '0.62.3' }]),
+    after: snap([{ name: 'dsh-foo', version: '0.62.3' }]),
+    candidates: ['dsh-foo'],
+    expectedVersion: '0.63.0'
+  })
+  assert.equal(out.state, 'live')
+  assert.equal(out.versionMatches, false)
+  assert.equal(out.installed, '0.62.3')
+  assert.ok(out.reasons.includes('version-mismatch'))
+})
+check('宿主报成功但列表里没有它 ⇒ inert（以前完全看不见的一类）', () => {
+  const out = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([]),
+    candidates: ['dsh-not-a-bundle'],
+    expectedVersion: '1.0.0'
+  })
+  assert.equal(out.state, 'inert')
+  assert.ok(out.reasons.includes('not-in-bundle-list'))
+})
+check('条目在列表里但自身带 error ⇒ broken；停用 ⇒ disabled', () => {
+  const broken = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([{ name: 'dsh-foo', failed: true }]),
+    candidates: ['dsh-foo']
+  })
+  assert.equal(broken.state, 'broken')
+  const disabled = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([{ name: 'dsh-foo', enabled: false }]),
+    candidates: ['dsh-foo']
+  })
+  assert.equal(disabled.state, 'disabled')
+})
+check('读不回列表 / 没有基线且找不到它的名字 / 新条目多个分不清 ⇒ unknown，不猜一个状态出来', () => {
+  const noRead = verifyActivation({ application: 'applied', before: snap([]), after: null, candidates: ['x'] })
+  assert.equal(noRead.state, 'unknown')
+  assert.ok(noRead.reasons.includes('read-back-unavailable'))
+  // 没有基线（读不到装前快照）时：**认不出归因，但列表里有它就照样报 live**，
+  // 同时用 `no-baseline` 记下「这不是这次操作装上的证据」。把已知的「它在跑」降级成
+  // unknown 反而是另一种不诚实。
+  const noBaselineButPresent = verifyActivation({
+    application: 'applied',
+    after: snap([{ name: 'x' }]),
+    candidates: ['x']
+  })
+  assert.equal(noBaselineButPresent.state, 'live')
+  assert.ok(noBaselineButPresent.reasons.includes('no-baseline'))
+  // 没有基线**且**列表里也找不到它：既可能是没落地、也可能是包名与 bundle 名毫无关系 → 不猜。
+  const noBaselineNotFound = verifyActivation({
+    application: 'applied',
+    after: snap([{ name: 'other' }]),
+    candidates: ['x']
+  })
+  assert.equal(noBaselineNotFound.state, 'unknown')
+  // 一次多出两个 bundle 且候选名匹配不上任何唯一一个：不挑一个报 live。
+  const ambiguous = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([{ name: 'a' }, { name: 'b' }]),
+    candidates: ['c']
+  })
+  assert.equal(ambiguous.state, 'unknown')
+  assert.ok(ambiguous.reasons.includes('ambiguous-bundle'))
+})
+check('失败 / 取消 / 还在等批准构建脚本时不给激活状态（不该谈 inert）', () => {
+  // 这是最容易误报的一种：宿主回 failed 或 pendingBuilds，回读必然「没落地」，
+  // 不看这两个条件就会把一次「等用户批准」说成 inert（插件有问题）。
+  const base = { before: snap([]), after: snap([]), candidates: ['x'] }
+  assert.equal(verifyActivation({ ...base, application: 'failed' }), null)
+  assert.equal(verifyActivation({ ...base, application: 'cancelled' }), null)
+  assert.equal(verifyActivation({ ...base, application: 'overridden' }), null)
+  assert.equal(verifyActivation({ ...base, application: 'applied', pending: true }), null)
+})
+check('激活状态进入了 install 的响应体（真调 sendChangeResult 读 body）', () => {
+  const res = capture()
+  const activation = verifyActivation({
+    application: 'restart-required',
+    before: snap([]),
+    after: snap([{ name: 'dsh-foo', version: '1.0.0' }]),
+    candidates: ['dsh-foo'],
+    expectedVersion: '1.0.0'
+  })
+  sendChangeResult(res, { changed: true, application: 'restart-required' }, 'install', activation)
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.activation.state, 'restart')
+  // 不传 activation 时字段**不出现**（老客户端的响应形状不变）。
+  const res2 = capture()
+  sendChangeResult(res2, { changed: true, application: 'applied' }, 'install')
+  assert.equal('activation' in JSON.parse(res2.body), false, '没传时不得凭空造一个 activation')
+})
+check('install 路由真的做了前后快照并传给 sendChangeResult（源码形状）', () => {
+  assert.match(indexSource, /const before = await captureBundles\(manager\)/, '装之前要有基线')
+  assert.match(indexSource, /const after = await captureBundles\(manager\)/, '装之后要回读')
+  assert.match(indexSource, /sendChangeResult\(res, result, 'install', activation\)/, '要把 activation 传进去')
 })
 
 console.log('')

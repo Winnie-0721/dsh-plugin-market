@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.2.0
+
+- **装后激活校验 + 版本回读：让「装」和「更新」不再说谎**（用户要求「先做 2」——来自
+  `docs/ROADMAP.md` 的功能方向研究第二项）。
+  以前 `POST /install` 把宿主的 `application` **原样透传**就完事了，而 `application` 说的是
+  宿主**执行**了什么，不是**结果**。于是 `applied` 完全可能对应「写进了 `node_modules`，但
+  profile 的 bundle 列表里从来没有它」——界面渲染绿色「已安装」，插件却永远不出现；更新时
+  目录说 `0.63.0`、磁盘上还是 `0.62.3`，界面照样写「已更新」。
+  1. **新增 `activation` 字段**（仅 install 路由，可选、缺省时不出现，老客户端不受影响）：
+     `{ state, expected, installed, enabled, versionMatches, reasons }`，`state` ∈
+     `live | restart | inert | broken | disabled | unknown`。判定手段是**前后差集**而不是猜名字：
+     `installBundle` 之前记一份 bundle 名字表、之后再记一份，新出现的那个就是这次装上的——
+     所以不假设「包名 == bundle 名」（两者并不总相等）。候选名只在「没有新名字出现」时用于
+     区分「更新了已有条目」与「什么都没落地」。
+  2. **`restart-required` 优先于 `live`**：宿主的原话就是还没生效，不因为条目在列表里就改口。
+     **`inert` / `broken` 不算成功**（客户端 `applied:false`）——它们会进「一键更新」的成功计数，
+     谎报成功比不说更糟。
+  3. **版本回读**：`expected` 取自**目录**（用户点的就是那个版本）、`installed` 是回读到的真实版本；
+     对不上时 `versionMatches:false`，客户端换一句「实际是 v{installed}（目录里写的是 v{expected}）」。
+  4. **`unknown` 是一等结果，不是兜底**：读不回列表、没有基线且列表里也找不到它、一次多出多个
+     bundle 分不清——都不猜，并带上 `reasons` 说明为什么不知道。特别地，**`no-baseline` 与 `live`
+     可以并存**：认不出「谁装上的」，但认得出「它在列表里」，后者才是 `live/inert` 的判据；
+     把已知的「它在跑」降级成 `unknown` 是另一种不诚实。
+  5. **不该谈激活的时刻不给状态**：`application` 是 `failed`/`cancelled`/`overridden`，或
+     `pendingBuilds` 非空（还在等用户批准构建脚本——回读必然「没落地」，不看得 `pending` 就会把
+     「等批准」说成插件有问题）。
+  6. **客户端文案分六路**：`已安装并已在运行` / `实际是 v…（目录写的是 v…）` / `没出现在装载列表里
+     （可能不是 bundle）` / `宿主报告装载失败` / `装上了但处于停用` / `没能回读装载状态`。
+     `changed === false`（宿主说这次什么都没改）时**保留**「没有产生变更」——那句本身是重要信息，
+     用「并已在运行」盖掉就等于把「你的更新其实没落地」瞒下来；唯一例外是版本对不上时必须盖。
+  回归：`host-contract.test.mjs` 18→**27 条**（第 9 组真调 `verifyActivation` 的 8 条 + 1 条源码形状），
+  `client-copy.test.mjs` 30→**31 条**。**这 8 处语义逐个做过变异测试**（把每处语义破坏一次，
+  对应断言必须失败）：**8/8 全被抓到**——「测试通过」本身被验证过，不是写了就算。
+  契约见 [API-CONTRACT §2.4](../docs/API-CONTRACT.md)；方向研究见 [ROADMAP](../docs/ROADMAP.md)。
+
 ## 1.1.6
 
 - **核心逻辑审计修复：身份匹配、内容校验、错误归类三类真实缺陷**（用户要求「检查核心代码

@@ -428,6 +428,34 @@ check('分页超出末页时收敛：不会出现「第 5/2 页」+ 空网格', 
 })
 
 
+check('装后激活校验：回读状态决定文案，不再一律写「已安装」（v1.1.7）', () => {
+  // 错过的样子：宿主回 applied 就写「已安装 {name}」。而 applied 也可能意味着
+  // 「装进了 node_modules，但 profile 的 bundle 列表里从来没有它」——绿色回执 + 插件不出现。
+  assert.match(source, /function activationNotice\(activation, name\)/, '要有集中的激活状态→文案函数')
+  for (const key of ['notice.installLive', 'notice.installInert', 'notice.installBroken', 'notice.installDisabled', 'notice.installUnknown']) {
+    // 收尾引号必须有：`t("notice.installLive"` 会被 `t("notice.installLiveMismatch"` 前缀满足，
+    // 那正是「一条走兜底路径也能满足的断言」——测了等于没测。
+    assert.match(source, new RegExp(`t\\("${key.replace('.', '\\.')}",`), `要渲染 ${key}`)
+  }
+  // 六种状态各自的分支都在（restart 交给原来的重启文案，所以这里没有 restart 分支）。
+  assert.match(source, /if \(state === "live"\)/, 'live 分支')
+  assert.match(source, /if \(state === "inert"\)/, 'inert 分支')
+  assert.match(source, /if \(state === "broken"\)/, 'broken 分支')
+  assert.match(source, /if \(state === "disabled"\)/, 'disabled 分支')
+  assert.match(source, /if \(state === "unknown"\)/, 'unknown 分支')
+  // **版本回读对不上时必须改口**：目录说 0.63.0、磁盘还是 0.62.3，不能写「已更新」。
+  assert.match(source, /activation\.versionMatches === false && installed/, '版本不一致要单独给文案')
+  assert.match(source, /"notice\.installLiveMismatch"/, '要有版本不一致的文案')
+  // inert / broken 不能计成功：它们会进「一键更新」的 ok 计数，谎报成功比不说更糟。
+  assert.match(source, /if \(state === "inert"\) return \{ kind: "warn", applied: false/, 'inert 不算成功')
+  assert.match(source, /if \(state === "broken"\) return \{ kind: "error", applied: false/, 'broken 不算成功')
+  // changed === false（宿主说这次什么都没改）时保留「没有产生变更」，除非版本对不上。
+  assert.match(source, /if \(detailed !== null && \(changed !== false \|\| mismatch\)\) base = detailed;/, '没变更时不要被「并已在运行」盖掉')
+  // activation 缺省时行为完全不变（老宿主/老响应形状不能受影响）。
+  assert.match(source, /if \(!activation \|\| typeof activation\.state !== "string"\) return null;/, '没有 activation 时返回 null，保持原文案')
+})
+
+
 console.log('')
 if (failures.length > 0) {
   console.log(`客户端文案与动效不变量：${passed}/${passed + failures.length} 通过，${failures.length} 失败`)

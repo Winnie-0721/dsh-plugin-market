@@ -186,6 +186,35 @@ Query 参数（全部可选，未知参数忽略）：
     客户端要按 `application` 渲染「已取消」，`ok=false` 会让它直接抛错、那条文案永远不可达。
 - 按 `name` 安装时（`{name}` 或 `{spec}` 均未给出唯一身份），若该 `name` 在目录里对应**多个条目**，返回 `400 bad-request` 并说明「市场不猜」——真实目录 195 个重名（`dsh-memory` 对应 10 条 5 个不同 spec），原先「第一个匹配就装」会装上别人的包。调用方应改用 `id`（`owner/name`）或 `spec`。
 - `pendingBuilds`：来自 `ChangeResult.pendingBuilds`；非空表示需要用户批准构建脚本后带着 `approvedBuilds` 重新提交。
+- **`activation`（v1.1.7，仅 `install` 路由）**：装完之后**回读**宿主状态的结果，回答 `application` 回答不了的问题——「东西真的落地了吗、落地的是哪个版本、它在跑吗」。
+  ```json
+  { "state": "live|restart|inert|broken|disabled|unknown", "expected": "0.63.0",
+    "installed": "0.63.0", "enabled": true, "versionMatches": true, "reasons": [] }
+  ```
+  为什么要有它：`application` 说的是宿主**执行**了什么，不是**结果**。`applied` 完全可能对应
+  「写进了 `node_modules`，但 profile 的 bundle 列表里从来没有它」——旧版界面照样渲染绿色
+  「已安装」，插件却永远不出现。参考实现把这个拆成 `live | restart | inert | broken`，本字段对齐并
+  额外做**版本回读**。
+  - **判定手段是前后差集，不是猜名字**：`installBundle` 之前记一份 bundle 名字表（小写为键），之后
+    再记一份，新出现的那个就是这次装上的。所以不假设「包名 == bundle 名」（两者并不总相等），也不会
+    因为一个仓库里包名不同就误报 `inert`。候选名（`npm` / `name` / `id` / 请求里的 spec 与 name）
+    只在「没有新名字出现」时用于判断这次是更新已有条目还是什么都没落地。
+  - `expected` 取自**目录**（用户点的就是那个版本），不是宿主回显；`installed` 是回读到的真实版本；
+    `versionMatches` 为 `false` 即「目录说 0.63.0、磁盘上还是 0.62.3」，**客户端必须改口**，不能再写
+    「已更新」。
+  - `restart-required` 优先于 `live`：宿主的原话就是还没生效，不因为条目在列表里就改口。
+  - **`inert` / `broken` 不算成功**（客户端 `applied:false`）：它们会进「一键更新」的成功计数，
+    谎报成功比不说更糟。
+  - `unknown` + `reasons` 是**一等结果**，不是兜底：读不回列表（`read-back-unavailable`）、
+    没有基线且列表里也找不到它（`no-baseline`）、一次多出多个 bundle 分不清（`ambiguous-bundle`）时
+    都不猜。特别注意 `no-baseline` 与 `live` 可以并存——**认不出「谁装上的」，但认得出「它在列表里」**，
+    后者才是 `live/inert` 的判据；把已知的「它在跑」降级成 `unknown` 是另一种不诚实。
+  - **不该谈激活的时刻返回字段缺省**（不是 `null` 也不是 `live`）：`application` 是 `failed`/`cancelled`/
+    `overridden`，或 `pendingBuilds` 非空（还在等用户批准构建脚本，回读必然「没落地」，不看得
+    `pending` 就会把「等批准」说成 `inert`）。
+  - 向后兼容：不传时字段**不出现**，老客户端/老响应形状不受影响；客户端在无该字段时行为与从前完全一致。
+  - 回归：`verify/host-contract.test.mjs` 的真调行为断言（8 条）；对应文案与「不算成功」的语义在
+    `verify/client-copy.test.mjs`。这 8 处语义**逐个做过变异测试**（每处破坏都必须被测试抓到，实际 8/8 全被抓到）。
 - `output`：`packageResult.output` 截断到末尾 2000 字符（可选）。
 - 宿主缺 `pluginManager` ⇒ `502 manager-unavailable`。
 - 安装进行中重复提交同名 spec：透传宿主的 `changed:false` 与 `error.code='operation-error'`。
@@ -469,7 +498,7 @@ window.__ModuleLoader__.load({
    - 端到端（`verify/self-update-live.ps1`）：临时把当前版本降到低于最新标签 → 真的下载 → 校验 →
      `pnpm add` 装进 scratch profile（依赖变为 `file:` 指向下载物）→ 结束时按字节还原本地 `package.json`。
 10. **同一路径的 GET 与 POST 必须只有一个路由登记项**：路由表以 path 为键，登记两次会互相覆盖，`GET /self-update` 会变成 405。改这里要重跑 §5 第 9 条的 GET 断言。
-11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，65 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧初始是「检查更新」与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）；点「检查更新」后同一颗按钮变成「一键更新（2）」；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
+11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，67 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧初始是「检查更新」与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）；点「检查更新」后同一颗按钮变成「一键更新（2）」；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
 12. **文案与动效不变量**（`verify/client-copy.test.mjs`）：zh/en 键集完全一致；代码里用到的每个 `t("字面量键")` 都在两种语言里存在；没有僵尸文案键；被引用的 `@keyframes` 都有定义；没有任何升入动画用 `forwards`/`both`；顶部黑条进度条（`.dshpm-progress`）不存在；更新失败的 `EPERM`/拒绝访问必须被 `fileLockedDetail` 识别并切到 `err.file-locked.*`（三处接入：错误气泡、可更新行内、已安装行错误）；回执文案保持精简形态（`已刷新 {count} 个插件` 等）；「检查更新」合并状态机存在（`checkPhase`/`onCheckUpdates`/页脚 `drawerFoot` 已删、插件市场更新按钮同为 primary）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。
 13. **安装 spec 钉版本**（`verify/install-spec.test.mjs`）：`pinnedNpmSpec` 在装之前被调用、只认「spec === 目录里的裸 npm 名 + 版本像 semver」、钉出 `name@version`；行为上，`POST /install {name}` 与 `{spec:裸名}` 都让假 `installBundle` 收到 `dsh-context@0.63.0`，GitHub 条目的 spec 保持 URL 原样。
 14. **重启助手**（`verify/restart-helper.test.mjs`，离线、不碰真实 DSH）：启动规格必须 `detached` + `windowsHide` + `ELECTRON_RUN_AS_NODE=1`，helper 脚本缺失或参数不合法在 spawn 之前就拒绝；幂等（第二次请求回 `already` 且不再 spawn）；真助手两向——父 pid 已死则拉起且拉起前 env 里 `ELECTRON_RUN_AS_NODE` 已删（子进程必须 `detached` 才能在创建者退出后活着，Windows 实测），父 pid 活着则等满期限放弃、绝不拉起。客户端接线在第 12 条里盯：`POST /restart` 被真的调用、`restart-failed` 进错误码表、各写操作点亮横幅、探活「先见过死」才 `location.reload()`、60s 超时如实提示。
@@ -486,7 +515,8 @@ window.__ModuleLoader__.load({
     多词是「与」、`jose` 能搜到 `José`；四种排序对正序/倒序输入结果一致且不改动入参数组；
     `paginate` 超出末页收敛到末页。
     真实快照（`_ref/data/plugins.json`）存在时额外跑规模复核；不存在也能单独通过。
-16. **host 契约回归**（`verify/host-contract.test.mjs` 18 条，v1.1.6 新增）：`sendError` 必须把
+16. **host 契约回归**（`verify/host-contract.test.mjs` 27 条，v1.1.6 新增 18 条 + v1.1.7 新增 9 条）：
+    `sendError` 必须把
     `overrides.diagnostic` 写进响应体（无则不凭空造字段）；`sendChangeResult` 的 `ok` 用**真调
     handler 读响应体**的方式验六种 `application`/`error` 组合（`failed` ⇒ `false`；
     **`cancelled` 恒为 `true`**，否则客户端抛错、文案不可达）；`findCatalogItem` 同样**真调**——
@@ -496,3 +526,10 @@ window.__ModuleLoader__.load({
     提早返回、且该路径不置 `requested`；宿主的 `MANAGEMENT_MESSAGE/HINT` 是 `Map`（原型键不能
     穿过去）；`/catalog` 带 `error` 字段、`page` 带 `requestedPage`；`/self-update` 仍是单条
     `['GET','POST']` 登记。
+    **v1.1.7 新增第 9 组（装后激活校验，8+1 条）**：真调 `verifyActivation` 验
+    `live`（含版本一致）/ `restart`（不许因为条目在列表里就报 `live`）/ 版本不一致时
+    `versionMatches:false` / `inert` / `broken` / `disabled` / `unknown`（含三种 `reasons` 与
+    「无基线但列表里有它 ⇒ 仍报 live 且带 `no-baseline`」这条）；`failed`/`cancelled`/`overridden`/
+    `pendingBuilds` 非空时返回 `null`；`activation` 真进入 `sendChangeResult` 的响应体、
+    不传时字段不出现；外加一条源码形状断言确认 `install` 路由真的做了前后快照。
+    这 8 处语义**逐个做过变异测试**（把每处语义破坏一次，对应断言必须失败）：8/8 全被抓到。

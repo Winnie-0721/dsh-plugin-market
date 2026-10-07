@@ -156,36 +156,49 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 2. `npm view deepseek-harness-market version` 返回 404（名字仍可用）；
 3. `npm publish --access public`（公开包需要显式指定 access）。
 
-> **⚠ v1.1.6 的 npm 自动发布失败——真因是 `npm@latest` 装不上，与 Trusted Publisher 无关（2026-10-07 实测）。**
-> v1.1.6 的 `pack` job（门禁 → 打包 → 建 Release 并传附件）**成功**，但 `pack-release.yml` 里
-> `publish-npm` job 的 `Publish to npm` 步骤**失败**，npm 上仍然只有 1.1.3 / 1.1.4 / 1.1.5。
+> **⚠ npm 发布需要「暂存 + 人工批准」两步——我在 v1.1.6 上连猜错三次才查清，如实记在这里。**
 >
-> **我先后给过两个错结论，都记在这里以正视听**：① 「npmjs.com 上没配 Trusted publisher」——
-> 错，包设置页里**有**一条；② 「登记的 workflow 是 `publish-npm.yml`、与 `pack-release.yml`
-> 对不上」——**也错**。真因在 CI 日志里（用本机 git 凭据读到了 job 日志，其余猜测全部作废）：
+> v1.1.6 的 `pack` job（门禁 → 打包 → 建 Release + 传附件）**成功**；`publish-npm` 先后失败了
+> **两次**，中间夹着我两个错结论：
 >
-> ```
-> npm error code EBADENGINE
-> npm error Not compatible with your version of node/npm: npm@12.2.0
-> npm error Required: {"node":"^22.22.2 || ^24.15.0 || >=26.0.0"}
-> npm error Actual:   {"npm":"10.9.2","node":"v22.14.0"}
-> ```
+> | 我当时的说法 | 判定 |
+> |---|---|
+> | 「npmjs.com 上没配 Trusted publisher」 | **错**——包设置页里有 |
+> | 「登记的 workflow 文件名不匹配」 | **错**——不是这个问题 |
 >
-> 两个 workflow 都写着 `npm install -g npm@latest`，而 **npm 12 起要求 node ≥22.22.2**，
-> 本仓库钉的却是 **node 22.14.0** → 这一步直接 EBADENGINE 退出，**`npm publish` 根本没执行**，
-> OIDC 连试都没试到。这是个「上游发了大版本、把我们的 `@latest` 变成不可满足」的漂移，
-> 与凭据配置无关。
+> 真因是**两个**，都来自 CI 日志（用本机 git 凭据读 Actions job logs 接口拿到，
+> 在此之前全是推断，所以连错两次）：
 >
-> **修法**（已改在两个 workflow 里）：把 `npm@latest` 换成 **`npm@^11.5.1`** ——
-> 既满足 OIDC 的 ≥11.5.1，又只需 node ≥22.9.0，与 node 22.14.0 相容。
-> 若将来要上 npm 12，必须**同时**把 `node-version` 提到 22.22.2+ 或 24.15+。
+> 1. **`npm@latest` 装不上**：npm 12 起要求 `node ^22.22.2 || ^24.15.0 || >=26`，
+>    而两个 workflow 都钉 `node 22.14.0` → `npm install -g npm@latest`
+>    直接 `EBADENGINE` 退出，`npm publish` 根本没跑到。
+>    **改法**：钉 `npm@^11.5.1`（会解析到最新 11.x：既有 `stage` 子命令，又与 node 22.14.0 相容）。
+>    将来要上 npm 12，必须**同时**把 `node-version` 提到 22.22.2+ 或 24.15+。
+> 2. **本包只被授予「暂存发布」**：包设置页 Trusted Publisher 卡片上写着
+>    **Permissions: `npm stage publish`、`npm dist-tag`**，**没有 `npm publish`** → 普通
+>    `npm publish` 被拒：`403 OIDC permission denied for this action`。
+>    **改法**：改用 **`npm stage publish --access public`**（不是放松 npm 那边的权限——
+>    暂存发布是**更严格**的模式：把 2FA 人工确认推迟到最后一步）。
 >
-> **补发**：GitHub → Actions → **Publish to npm** → *Run workflow*（该文件的 `workflow_dispatch`，
-> 检出默认分支、`package.json` 已是 1.1.6）。这也是包设置页那句
-> 「Pending validation…Publish once before Oct 7, 2026, 6:06 PM UTC」转正的时机。
+> **所以发布现在是两步**（这也是 npm 对高安全包推荐的做法）：
+>
+> 1. CI 自动完成**暂存**：`npm stage publish` 成功后会打出
+>    `deepseek-harness-market@<version> (staged with id <uuid>)`，并附 **Sigstore 签名溯源**
+>    （`Provenance statement published to transparency log`）。
+> 2. **人工批准**（需 2FA，只能由账号持有者做）：
+>    ```powershell
+>    npm stage list                    # 看 stage id
+>    npm stage approve <stage-id>      # 输入 2FA 一次性验证码
+>    ```
+>    也可在 npmjs.com 该包页面点 Approve。**没批准之前版本不会公开**，
+>    `npm view deepseek-harness-market version` 仍是上一个版本。
+>
+> v1.1.6 当前状态：**已暂存，等待批准**
+> （stage id `0c2767bb-1d36-4f5e-8033-d9bf9ccc9dfa`，日志见 run 37587492890）。
 >
 > **Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
-> 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的。
+> 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的——**npm 那条路慢一步不影响用户安装**。
+
 
 
 

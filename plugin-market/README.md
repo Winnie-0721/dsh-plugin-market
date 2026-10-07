@@ -28,6 +28,10 @@
 
 ## Why it exists
 
+**One-line positioning: this is a DeepSeek Harness plugin market that works like a phone app store** —
+browse, inspect, install, update, enable/disable and uninstall, all inside the sidebar, using the same
+mental model you already have from installing apps on your phone. Everything below is that positioning made concrete:
+
 - **A big catalog that loads fast.** The community-curated [awesome-dsh-plugin](https://awesome-dsh-plugin.com/plugins.json) catalog with 4400+ entries (updated daily); it reads **npm mirror first with the official URL as fallback**, and fetching, caching, retries and degradation all happen in the host process — the browser only talks to our own endpoints, so the list is always instant.
 - **Every update step is visible.** The left button is one merged state machine: “Check for updates → Update all (N) / Check again”; each row updates to x.y.z on its own; every result stays on its own row and a run ends with one **honest** summary (restart-pending counts as success, failure reasons are written verbatim on that row — no sugar-coating).
 - **The market updates itself.** It checks for a new build once at startup; when one exists the button goes straight to “Update to x.y.z”. All four states are covered: Update the market → Updating… → Update succeeded → Check again; downloads pass three checks (path shape + `sha256` + artifact self-verification), and after installing it **never pretends it already took effect** — it offers a one-click “Restart DSH” (a detached waiter that relaunches only after the old process is really dead, and the page only reloads after observing the host die once).

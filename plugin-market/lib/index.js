@@ -313,8 +313,9 @@ export function sendChangeResult(res, result, stage) {
  *
  * 以前是「第一个匹配就装」，用户请求一个重名插件会随机装上别人的包——市场类应用
  * 绝不会这样处理歧义。
+ * 导出只为让回归测试能真调它（源码形状断言测不出「重名时到底返回哪个」）。
  */
-function findCatalogItem(items, name) {
+export function findCatalogItem(items, name) {
   if (name === null) return { item: null, ambiguous: false }
   const byIdentity = items.find(
     (item) => sameKey(item.id, name) || sameKey(item.npm, name) || sameKey(item.url, name)

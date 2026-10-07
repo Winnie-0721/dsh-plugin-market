@@ -516,11 +516,11 @@ E7-fetch status=200 耗时=527ms                                       ← 真�
 | 验证 | 结果 | 证据 |
 |---|---|---|
 | 契约验收（冻结的 53 条） | **53 PASS / 0 FAIL** | `verify-20261004-181336`（v1.1.1 后） |
-| 真实浏览器渲染与动效（64 条，v1.1.6） | **64/64** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
-| 自更新通道离线回归（37 条） | **37/37** | `verify/self-update.test.mjs` |
+| 真实浏览器渲染与动效（65 条，v1.1.6） | **65/65** | `verify/ui-check.ps1`，截图 `verify/logs/ui/` |
+| 自更新通道离线回归（43 条，v1.1.6） | **43/43** | `verify/self-update.test.mjs` |
 | 文案与动效不变量（30 条，v1.1.6） | **30/30** | `verify/client-copy.test.mjs` |
 | 目录身份层与内容校验（36 条，v1.1.6 新增） | **36/36** | `verify/catalog-identity.test.mjs` |
-| host 契约回归（16 条，v1.1.6 新增） | **16/16** | `verify/host-contract.test.mjs` |
+| host 契约回归（18 条，v1.1.6 新增） | **18/18** | `verify/host-contract.test.mjs` |
 | 自更新端到端（真实 CDN + 真实安装，6 条） | **6/6** | `verify/self-update-live.ps1` |
 | 样式生命周期回归（5 条，v1.0.1 起） | **5/5** | `verify/style-heal.test.mjs` |
 
@@ -852,4 +852,36 @@ e2e `[8]` 的"任何直接子项不得被压扁 + 根自己滚动"两条断言�
    而症状是「界面卡住」而不是「报错」，测试通常抓不到。
 2. **删掉一段兜底逻辑前，先用真实数据量「删掉会损失什么」**。这轮两处过度修复（url、scope）
    都是「症状确实修好了」，但代价是 1431 条合法匹配和一类常见搜索操作——**症状消失 ≠ 修复正确**。
+
+### 12.16 补测：把「全绿」里仍然存在的空洞补上（v1.1.6）
+
+§12.15 之后门禁与 e2e 全绿，但复核断言质量时发现**「绿」并不均匀**：`verify/` 里的断言分两种
+价值——
+
+| 类型 | 能抓住回归吗 | 反例 |
+|---|---|---|
+| **真调行为**（起假 res / 假 manager 真调 handler 读响应体） | 能 | `sendError` 的 diagnostic 透传 |
+| **源码形状**（`assert.match(source, /…/)`） | **不能**，只要那个字符串还在就绿 | 把 `ok: error === null && application !== 'failed'` 改成等价的 `application !== 'failed' && error === null` 就会**假红**；而真正的行为（`cancelled` + `error` → `ok`）它根本测不到 |
+
+按这个标准回头审计，补了三处：
+
+1. **「一键更新永久卡死」的入口补了真实浏览器回归**（e2e 64→**65**）：
+   批量进行中切到「已安装」页，断言那颗更新按钮**确实禁用**。复核脚本当初认定「真实用户可达」
+   的依据正是这一页缺 `batchRunning`——现在由真实浏览器兜住，不只靠源码里 grep 到字符串。
+   （顺带确认：「可更新」页的行内按钮原本就有 `batchRunning`，所以那一个入口当时就是关着的。）
+2. **`findCatalogItem` 从源码形状改为真调**（host-contract 16→**18**）：身份层
+   （`id`/`npm`/`url`）命中即确定；显示名层唯一才确定、**重名报歧义且 `item === null`**
+   （绝不返回其中任意一个）。这是「会装错包」那一类里唯一还只剩形状断言的地方。
+3. **线上通道体检**（临时探针，跑完即删、不入库）：GitHub Releases API 确认**每个版本的附件都带
+   `digest`（sha256）**、`@v1.1.5/releases/index.json` 仍 200 而 `@main/…` 是 404、
+   真实 `check()` 以 `current=1.1.5` 跑通（`ok:true`、`channel:github-release`、attempts 如实记录
+   三条源的失败）。它回答的是**加固类改动特有的风险**：「更严格」很容易变成「永久不可用」——
+   `dist.integrity` 改必填、`unverified` 改硬失败都属于这一类，必须对着**真实环境**验一次，
+   不能只靠 mock 全绿。
+
+**第 3 条补上一条硬规矩**：加固（mandatory / 硬失败 / 收紧容差）落地前，必须对真实源跑一次
+「正常路径仍然通」；否则就是把「防坏数据」变成了「防正常数据」。
+
+**本轮最终状态**：门禁全绿；`catalog-identity` **36/36**、`host-contract` **18/18**、
+`client-copy` **30/30**、`self-update` **43/43**、真实浏览器 **65/65**。
 

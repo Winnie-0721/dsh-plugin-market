@@ -582,6 +582,23 @@ try {
   await waitFor(client, `document.querySelector('.dshpm-updatesActions button[aria-busy="true"]') !== null`, 8000, '批量进行中（按钮 aria-busy）')
   const progressDuring = await evaluate(client, `document.querySelectorAll('.dshpm-progress').length`)
   expect('写操作进行中顶部没有黑条进度条（用户点名删掉的那条）', Number(progressDuring) === 0, `进度条元素 ${progressDuring}`)
+
+  // 批量进行中，切到「已安装」页确认那颗更新按钮也是禁用的。
+  // 这是「一键更新永久卡死」的**入口**：从前这一页的按钮不像「可更新」页那样受 batchRunning 约束，
+  // 用户能从这一页插进一个正被批量处理的包，让批量那一步撞上守卫。现在两页口径一致。
+  await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
+  await waitFor(client, `document.querySelector('.dshpm-row .dshpm-rowActions button') !== null`, 8000, '批量进行中切到已安装页')
+  const installedBtnsDuringBatch = await evaluate(
+    client,
+    `Array.from(document.querySelectorAll('.dshpm-row .dshpm-rowActions button')).filter(b => /更新到|Updating to/.test(b.textContent)).map(b => ({ text: b.textContent.trim(), disabled: b.disabled }))`,
+  )
+  expect(
+    '批量进行中「已安装」页的更新按钮被禁用（否则用户能从这一页插进正在批量处理的包）',
+    Array.isArray(installedBtnsDuringBatch) && installedBtnsDuringBatch.length > 0 && installedBtnsDuringBatch.every((b) => b.disabled === true),
+    JSON.stringify(installedBtnsDuringBatch),
+  )
+  await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /可更新|Updates/.test(b.textContent)).click(); true`)
+  await waitFor(client, `document.querySelector('.dshpm-updatesPanel') !== null`, 8000, '切回可更新页')
   await waitFor(client, `(() => { const n = document.querySelector('.dshpm-notice'); if (!n) return false; const txt = n.innerText.replace(/\\s+/g, ' '); return /更新完成：成功 1、失败 1/.test(txt); })()`, 20000, '一键更新给出汇总回执')
   expect('汇总回执如实反映批量结果（成功 1、失败 1）', true)
   const rowResults = await evaluate(

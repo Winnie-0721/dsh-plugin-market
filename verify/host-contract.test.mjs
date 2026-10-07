@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { sendError, sendJson, createRouteTable } from '../plugin-market/lib/http.js'
-import { sendChangeResult } from '../plugin-market/lib/index.js'
+import { sendChangeResult, findCatalogItem } from '../plugin-market/lib/index.js'
 import { buildHelperCommand, buildRestartPayload, spawnRestartHelper } from '../plugin-market/lib/restart.js'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -110,13 +110,37 @@ check('ok 在 application:"failed" 时为 false，且 cancelled 带 error 时仍
   }
 })
 
-console.log('\n[3] 重名插件：不猜，报歧义')
-check('findCatalogItem 分身份层与显示名层（源码不变量）', () => {
-  // 错过的样子：id/npm/url/name 混在一个 Array.find 里 → 第一个匹配就装。
-  assert.match(indexSource, /function findCatalogItem\(items, name\)/, '必须仍是这个函数')
-  assert.match(indexSource, /byIdentity/, '身份层单独查')
-  assert.match(indexSource, /byName\.length > 1/, '显示名多个候选要判歧义')
-  assert.match(indexSource, /ambiguous: true/, '歧义要有显式标记')
+console.log('\n[3] 重名插件：不猜，报歧义（行为测试，真调 findCatalogItem）')
+check('身份字段命中即确定（id / npm / url 都是唯一身份）', () => {
+  const items = [
+    { id: 'aaa/dup', name: 'dup', owner: 'aaa', npm: 'dup-npm', url: 'https://github.com/aaa/dup' },
+    { id: 'bbb/dup', name: 'dup', owner: 'bbb', npm: null, url: 'https://github.com/bbb/dup' },
+  ]
+  assert.equal(findCatalogItem(items, 'aaa/dup').item?.id, 'aaa/dup', 'id 精确命中')
+  assert.equal(findCatalogItem(items, 'dup-npm').item?.id, 'aaa/dup', 'npm 精确命中')
+  assert.equal(findCatalogItem(items, 'https://github.com/bbb/dup').item?.id, 'bbb/dup', 'url 精确命中')
+  for (const key of ['aaa/dup', 'dup-npm', 'https://github.com/bbb/dup']) {
+    assert.equal(findCatalogItem(items, key).ambiguous, false, `${key} 不该判歧义`)
+  }
+})
+check('显示名唯一才确定；**重名时报歧义且不返回任何条目**', () => {
+  // 错过的样子：id/npm/url/name 混在一个 `Array.find` 里 → 第一个匹配就装。
+  // 真实目录 195 个重名（`dsh-memory` 对应 10 条 5 个不同 spec），用户请求重名插件会装上别人的包。
+  const items = [
+    { id: 'aaa/dup', name: 'dup', owner: 'aaa', npm: null, url: 'https://github.com/aaa/dup' },
+    { id: 'bbb/dup', name: 'dup', owner: 'bbb', npm: null, url: 'https://github.com/bbb/dup' },
+  ]
+  const hit = findCatalogItem(items, 'dup')
+  assert.equal(hit.ambiguous, true, '重名必须报歧义')
+  assert.equal(hit.item, null, '歧义时绝不能返回其中任意一个')
+  const single = findCatalogItem([items[0]], 'dup')
+  assert.equal(single.ambiguous, false, '只有一条时不算歧义')
+  assert.equal(single.item?.id, 'aaa/dup')
+})
+check('找不到 / null 输入都如实返回「没有」而不是猜一个', () => {
+  const items = [{ id: 'aaa/x', name: 'x', owner: 'aaa', npm: null, url: 'https://github.com/aaa/x' }]
+  assert.deepEqual(findCatalogItem(items, 'nope'), { item: null, ambiguous: false })
+  assert.deepEqual(findCatalogItem(items, null), { item: null, ambiguous: false })
 })
 check('install 路由遇到歧义回 400 bad-request，而不是随便装一个', () => {
   assert.match(indexSource, /found\.ambiguous/, 'install 路由必须检查歧义')

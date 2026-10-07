@@ -156,6 +156,21 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 2. `npm view deepseek-harness-market version` 返回 404（名字仍可用）；
 3. `npm publish --access public`（公开包需要显式指定 access）。
 
+> **⚠ OIDC 首次实战失败（v1.1.6，2026-10-07 实测）——需要人工去 npmjs.com 配一次。**
+> v1.1.6 的 `pack` job（门禁 → 打包 → 建 Release 并传附件）**成功**，但 `publish-npm`
+> 的 `Publish to npm` 步骤**失败**，npm 上仍然只有 1.1.3 / 1.1.4 / 1.1.5。
+> 时间线说明这不是代码回归：`abb9c78`（2026-10-06 02:39）才把凭据迁到 OIDC，
+> 而 1.1.4 / 1.1.5 是由**旧的 token 方式**发的（两次 `Publish to npm` 成功记录都在迁移之前）；
+> 迁移之后 `pack-release.yml` 那次是 `skipped`（该版本已在 npm）。**所以 v1.1.6 是 OIDC
+> 路径的第一次真正执行，即失败**——最可能就是 npmjs.com 上还没给本包添加 Trusted publisher。
+> 处理：在 npmjs.com → 本包 → Settings → Trusted Publisher 添加
+> repository=`Winnie-0721/dsh-plugin-market`、workflow=`pack-release.yml`（以及
+> `publish-npm.yml`，两条通道都要加），然后 `gh workflow run "Publish to npm"` 补发。
+> 备选：给发布步骤加回 `env: NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`。
+> **注意 Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
+> 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的。
+
+
 ### 4.3 真要发 npm 时的检查单
 
 ```powershell
@@ -193,6 +208,17 @@ GitHub Release 附件下载）。这条决定连带改了检查与下载的分�
   并如实记档，检查退化成「更新通道没有回应 + 提示用命令行手动升级」，**不会谎称已是最新**。
 - **≤v1.1.5 的老版本**：三个列表源与标签探测照常工作（那些标签里仍有 `releases/` 清单），
   上面两张表的实测数字就是那个时期的。
+- **⚠ `v1.1.5` 是一个不一致的过渡标签（实测确认，只影响这一版）**：它是「本地打包的 tgz 已提交进
+  `releases/`、CI 又用 Actions 重打一份上传成 Release 附件」的交接点，两份是**两次不同的构建**，
+  字节不同（仓库内 465679 B / `b5e5ecaf…`，Release 附件 465733 B / `537c9f02…`）。
+  实测对照（2026-10-07）：`v1.1.3`、`v1.1.4` 的 CDN 副本与附件**逐字节一致**，只有 `v1.1.5` 不一致。
+  后果：自更新在 v1.1.5 上会**下载失败或哈希不符**（第 1 源用附件 `digest` 当清单、第 3 条路才是附件，
+  而 CDN 那条路先返回了另一份字节）。这是**加固前的历史遗留**，不是加固引入的
+  （引入「用附件 `digest` 当清单」的是 `39dfc9d`，早于本次会话 11 个提交）。
+  **v1.1.6 起在结构上不可能再发生**：仓库里已没有 `releases/`，CDN 两条路必然 404 快速失败，
+  字节只能来自附件，清单与字节天然同源。因此 `verify/self-update-live.ps1` 在 v1.1.5 上会失败、
+  在 v1.1.6 及以后应全绿——**用它验收时请先把本机版本降到 1.0.9（脚本本来就这么做），
+  让它去装最新标签**，而不是拿它去装这个已知不一致的 v1.1.5。
 - **下载**仍是三条路依次试：`@<tag>/releases/<file>.tgz` → `@main/releases/<file>.tgz`
   → **GitHub Release 附件**；新版本前两条必然 404（快速失败），实际由附件供给。
   **内容由 `sha256` 与产物自证负责**，从哪条路取都不影响安全性（三道校验见 [API-CONTRACT §2.9](API-CONTRACT.md)）。

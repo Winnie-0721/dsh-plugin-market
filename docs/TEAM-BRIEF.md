@@ -11,7 +11,9 @@
 
 参考代码（只读，不要改）：
 - dsh-market 原版：`E:\Code\dsh-plugin-market\_ref\dsh-market`
-- DeepSeek Harness 官方源码：`E:\Code\dsh-plugin-market\_ref\deepseek-harness`
+- DeepSeek Harness 官方源码：~~`E:\Code\dsh-plugin-market\_ref\deepseek-harness`~~
+  —— **已于 2026-10-07 工作区清理时删除（省 152MB）**。需要翻官方实现时按需重新克隆，
+  不要再假设该路径存在。
 - 一个已安装、可运行的第三方插件范例（host+client 双半、纯 JS）：
   `C:\Users\28062\.dsh\profiles\desktop\node_modules\@feiyang666\dsh-usage-plugin\`
   （`lib/index.js` = host，`lib/client.js` = client bundle，`cordis.patch.yml` = bundle 补丁层）

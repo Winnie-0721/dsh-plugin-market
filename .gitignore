@@ -6,7 +6,9 @@ _ref/
 _verify/
 verify/logs/
 
-# 本机运行产物
+# 本机运行产物：第三方插件 @feiyang666/dsh-usage-plugin 每次启动都会往**工作目录根**
+# 写这个文件（2026-10-07 实测：删掉后重跑宿主又出现）。它不属于本仓库内容，
+# 所以继续忽略——不要因为它「看着像可以清理的残留」就把这条删掉，删了工作区会一直是脏的。
 dsh-usage-boot.log
 
 # 发布产物（-CiPack 在 GitHub Actions 的工作区里生成，作为 Release 附件分发，用完即弃）

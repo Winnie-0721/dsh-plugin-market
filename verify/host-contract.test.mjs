@@ -339,6 +339,38 @@ check('读不回列表 / 没有基线且找不到它的名字 / 新条目多个�
   assert.equal(ambiguous.state, 'unknown')
   assert.ok(ambiguous.reasons.includes('ambiguous-bundle'))
 })
+check('**同一个候选名重复出现不算歧义**（更新已装插件时 100% 命中这条：拿回 live 而不是 unknown）', () => {
+  // 真实调用点 install()：candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]。
+  // 客户端「更新」发的是 submitInstall({ name: bundle.name, spec: bundle.name })，
+  // 而目录里 npm / name / id 常常等于或包含同一个包名 → 同一个字符串在数组里出现 3~5 次。
+  // 更新**已装**插件时 before 里已有它（appeared 为空），于是走到 present 分支；
+  // 以前 present.length 数的是**出现次数**而不是**不同名字的个数**，重复候选被当成
+  // 「有多个候选都在列表里」→ reasons 里写 ambiguous-bundle、state 变 unknown，
+  // 客户端就把一次成功的更新渲染成「已安装，但这次没能回读装载状态」。
+  // 实测真实目录（4412 条）：2288 个有 npm 的条目 **全部** 会误报，版本对不上时真正
+  // 该报的「版本没落地」告警也被这条误报盖掉（versionMatches=false 的升级分支走不到）。
+  const out = verifyActivation({
+    application: 'applied',
+    before: snap([{ name: 'dsh-kaomoji', version: '0.1.4' }]),
+    after: snap([{ name: 'dsh-kaomoji', version: '0.1.5' }]),
+    // 同一个名字出现多次（npm / name / requestedSpec / requestedName 撞在一起）+ 一个不同的 id
+    candidates: ['dsh-kaomoji', 'dsh-kaomoji', 'TianJie52009/dsh-kaomoji', 'dsh-kaomoji', 'dsh-kaomoji'],
+    expectedVersion: '0.1.5'
+  })
+  assert.equal(out.state, 'live', '重复的候选名不该让状态降级成 unknown')
+  assert.equal(out.installed, '0.1.5')
+  assert.equal(out.versionMatches, true)
+  assert.ok(!out.reasons.includes('ambiguous-bundle'), '不得报 ambiguous-bundle')
+  // 反向保证：**不同**名字同时命中两个不同 bundle 时，仍然必须拒绝猜。
+  const realAmbiguous = verifyActivation({
+    application: 'applied',
+    before: snap([]),
+    after: snap([{ name: 'dsh-a' }, { name: 'dsh-b' }]),
+    candidates: ['dsh-a', 'dsh-b']
+  })
+  assert.equal(realAmbiguous.state, 'unknown', '两个不同名字各自命中一个 bundle 才算真歧义')
+  assert.ok(realAmbiguous.reasons.includes('ambiguous-bundle'))
+})
 check('失败 / 取消 / 还在等批准构建脚本时不给激活状态（不该谈 inert）', () => {
   // 这是最容易误报的一种：宿主回 failed 或 pendingBuilds，回读必然「没落地」，
   // 不看这两个条件就会把一次「等用户批准」说成 inert（插件有问题）。

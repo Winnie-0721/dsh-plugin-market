@@ -209,6 +209,17 @@ Query 参数（全部可选，未知参数忽略）：
     没有基线且列表里也找不到它（`no-baseline`）、一次多出多个 bundle 分不清（`ambiguous-bundle`）时
     都不猜。特别注意 `no-baseline` 与 `live` 可以并存——**认不出「谁装上的」，但认得出「它在列表里」**，
     后者才是 `live/inert` 的判据；把已知的「它在跑」降级成 `unknown` 是另一种不诚实。
+  - **候选名必须先按「不同名字的个数」去重，再判歧义**（v1.2.0 修的 bug）。`candidates` 里的几个
+    字段经常是同一个字符串：`install` 路由传 `[hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]`，
+    而客户端「更新」发的是 `{ name: bundle.name, spec: bundle.name }`，于是 npm / name / requestedSpec /
+    requestedName 撞成同一个值。更新一个**已装**插件时 `before` 里已有它（`appeared` 为空），会走到
+    「候选命中」分支——若那里数的是**出现次数**，`present.length > 1` 就被误判成「多个候选都命中」，
+    一律报 `ambiguous-bundle`、状态降级为 `unknown`。真实目录（4412 条）实测：**2288 个有 npm 的条目
+    100% 命中**（修后 0%）。后果有两层：① 一次成功的更新被渲染成 `installUnknown`（「没能回读装载状态」）
+    而不是绿色的「已安装并已在运行」；② 更严重的是 **`versionMatches:false` 那条「磁盘上还是旧版、
+    更新没落地」的告警会被整个盖掉**——走不到命中分支就根本不会算版本，用户以为更新成功了。
+    去重后 `present.length` 才代表不同名字的个数；两个**不同**名字各自命中一个 bundle 时**仍然**必须报
+    歧义（回归里有反向断言守着，防止「去重」把真歧义一起抹掉）。
   - **不该谈激活的时刻返回字段缺省**（不是 `null` 也不是 `live`）：`application` 是 `failed`/`cancelled`/
     `overridden`，或 `pendingBuilds` 非空（还在等用户批准构建脚本，回读必然「没落地」，不看得
     `pending` 就会把「等批准」说成 `inert`）。
@@ -547,6 +558,12 @@ window.__ModuleLoader__.load({
     `pendingBuilds` 非空时返回 `null`；`activation` 真进入 `sendChangeResult` 的响应体、
     不传时字段不出现；外加一条源码形状断言确认 `install` 路由真的做了前后快照。
     这 8 处语义**逐个做过变异测试**（把每处语义破坏一次，对应断言必须失败）：8/8 全被抓到。
+    **v1.2.0 加到 9 条**：新增「同一个候选名重复出现不算歧义」——按**真实调用点的候选形状**
+    （`['dsh-kaomoji', 'dsh-kaomoji', 'TianJie52009/dsh-kaomoji', 'dsh-kaomoji', 'dsh-kaomoji']`，
+    模拟 npm / name / requestedSpec / requestedName 撞在一起）断言必须拿回 `live` 而不是 `unknown`，
+    并带反向断言（两个不同名字各自命中一个 bundle ⇒ 仍须 `ambiguous-bundle`）。
+    这一条此前测不出来，是因为既有 7 条相关断言**全都只传单个候选名**、从不传重复项；
+    该断言做了双向变异测试（改回不去重 / 只留第一个候选），2/2 全捕获。
 17. **目录搜索记忆化回归**（`verify/catalog-search-cache.test.mjs` 11 条，v1.2.0 新增）：
     搜索加了两处**跨请求复用**的缓存，而缓存是「写错了也照样能跑」的东西——结果依旧正确、
     测试依旧全绿，只在特定条件下静静给错答案，所以这一套是专门钉它的：
@@ -574,6 +591,17 @@ window.__ModuleLoader__.load({
     带 `error` 而没给 `application` ⇒ 回落 `failed` 且 `ok:false`。
     这三条规则在 `self-update.js`、`sendChangeResult`、`/toggle` 三处必须**完全一致**——
     审计发现前两处漂移会让**一次失败的自更新 HTTP 200 + 绿色「更新成功」**。
+    **v1.2.0 复核后的已知例外（故意保留、未修）**：`self-update.js` 的 `apply()` **不认**
+    `pendingBuilds`——`sendChangeResult` 在 v1.2.0 加了「`pendingBuilds` 非空 ⇒ `ok:true`」
+    （修批准入口的死代码），`apply()` 没有跟着改。**这不是可达缺陷**：市场包
+    `plugin-manager/package.json` 的 `dependencies`/`optionalDependencies` 都是空、也没有
+    `postinstall`/`prepare`，`installBundle(<本地 tgz>)` 不会产生 `pendingBuilds`。
+    **更要紧的是不能只改那一行**：客户端 `applySelfUpdate()` 在 `.then()` 里**无条件**
+    `markSelfDone()` + 绿色 `notice.selfUpdated`（它只看 HTTP `ok`，完全不读
+    `application`/`error`/`pendingBuilds`）。所以单方面把 `apply()` 的 `ok` 放宽成
+    「`pendingBuilds` 非空也算成功」，只会把今天一条**诚实的失败**换成**假绿灯**——
+    比现状更糟。真要支持这条路，必须同时给自更新加激活校验与批准入口（记在
+    `docs/ROADMAP.md`），属于独立改动，不在本轮做。
 19. **错误归类行为回归**（`verify/error-classify.test.mjs` 18 条，v1.2.0 新增）：
     **不是源码形状断言**——把真 bundle 里的 `fileLockedDetail` / `registryUnreachableDetail` /
     `shortFailureText` 抠出来**在同一作用域求值**（后者内部调用前两者，分开求值会得到未定义），

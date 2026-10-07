@@ -1192,6 +1192,74 @@ pnpm 的 `cwd` **就是 profile 目录**、且 `extendEnv: false`（env 被清�
 而是被 kill 的作业留下了 `%TEMP%\dshpm-cdp-*` 临时 profile 与孤儿宿主进程；
 清掉临时目录后立刻恢复（78/78 → 82/82）。**e2e 卡住先清临时态与孤儿进程，再怀疑代码。**
 
+### 12.23 第二轮审查：候选名没去重，更新已装插件的激活状态被误判成 unknown
+
+用户要求「再次审查代码 找出bug并修复」。这一轮的方法与前几轮不同：**先并行派 4 个独立审计**
+（catalog / self-update+restart / client 数据层 / client 渲染层），我自己读 host 的
+路由-安装-激活链路、`http.js`、版本比较。结果是**审计没先报回来，我自己在读 `index.js` 时先撞上了**。
+
+**发现过程**：读 `verifyActivation` 时注意到 `candidates` 只是 `.map().filter().map()`，
+**没有去重**，而下游两处都拿 `.length` 当「几个不同的东西」用：
+
+```js
+const present = candidates.filter((key) => after.has(key))
+if (present.length === 1) hit = after.get(present[0])
+else if (present.length > 1) ambiguous = true      // ← 数的是「出现次数」
+```
+
+**然后去核对真实调用点，而不是自己猜**：`install()` 传
+`candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]`；客户端
+`updateBundle()` 发的是 `submitInstall({ name: bundle.name, spec: bundle.name })`。
+于是 `requestedSpec === requestedName === bundle.name`，而目录里 `npm` 常常就等于
+`bundle.name`——**同一个字符串在数组里出现 3~5 次**。更新**已装**插件时 `before` 里已有它
+（`appeared` 为空），必然走到 present 分支。
+
+**先证实再动手**（在 `%TEMP%` 里跑真 `verifyActivation`，注入真实调用点的候选形状）：
+
+```
+【更新已装插件】candidates 有重复 → {"state":"unknown",...,"reasons":["ambiguous-bundle"]}
+【对照】candidates 去重           → {"state":"live","installed":"0.1.5","versionMatches":true}
+```
+
+**影响面用真实目录（4412 条）量**：2288 个有 npm 的条目 **100% 命中；修后 0%**。
+两个用户可见后果，第二个才要命：
+
+1. 一次成功的更新渲染成 `installUnknown`（蓝 info「没能回读装载状态」）而不是绿色「已在运行」；
+2. **`versionMatches:false` 那条「磁盘上还是旧版、更新没落地」的告警被整个盖掉**——
+   走不到 `hit` 分支就根本不算版本，用户于是**以为更新成功了**。
+   修完后单独验证过：`{"state":"live","installed":"0.1.4","versionMatches":false}` → 告警回来了。
+
+**修法**：候选名先 `new Set()` 去重。**TDD**：先写断言 → 跑 → **看着它失败**
+（`'unknown' !== 'live'`）→ 再改实现 → 28/28 通过。回归里带**反向断言**：
+两个**不同**名字各自命中一个 bundle 时**仍须**报 `ambiguous-bundle`，防止「去重」把真歧义
+一起抹掉。**双向变异 2/2 全捕获**（① 改回不去重 ② 只留第一个候选），变异后按字节还原、
+sha256 一致，`git status` 只有预期的两个文件。
+
+**为什么既有测试全绿也挡不住**：那 7 条相关断言**全都只传单个候选名**，从不传重复项。
+**断言的输入形状与真实调用点不一致时，全绿不代表没问题**——这比 bug 本身更值得记。
+
+**同轮被否掉的两个假设（都做了实验、都不改代码）**：
+- `updateBundle` 发 `spec = bundle.name`，我怀疑宿主的 `/install` 会因「spec 必须命中目录的
+  `spec|npm|url`」而 400 `not-in-catalog`。**用真实目录跑：0/2285 失败**——每个可更新 bundle
+  的名字都命中 npm 索引。**假设否掉，不动代码。**
+- `readJsonBody` 超限分支的注释说「继续把剩下的字节读掉，否则客户端可能收到 ECONNRESET」，
+  但 `finish()` 先置 `settled`、之后每个 `data` 都 `if (settled) return`——注释与代码不符。
+  **起真 http server 发 100 KiB 体实测：6/6 都拿到干净的 400 JSON、0 次 reset。**
+  所以**行为是对的、注释是错的**；不是缺陷，本轮不改（避免无收益改动）。
+
+**另外故意不修的一处**（写下来防止下次「顺手修好」）：`self-update.js` 的 `apply()` 不认
+`pendingBuilds`，与 `sendChangeResult` 的规则漂移。但它**不可达**（市场包
+`dependencies`/`optionalDependencies` 皆空、无 `postinstall`），**而且单方面放宽 `ok` 更糟**：
+客户端 `applySelfUpdate()` 的 `.then()` 里**无条件** `markSelfDone()` + 绿色
+`notice.selfUpdated`，根本不读 `application`/`error`/`pendingBuilds`。只改宿主那一行，
+等于把今天一条**诚实的失败**换成**假绿灯**。要做得连激活校验与批准入口一起加，记为 ROADMAP P1.5。
+
+**验证汇总（本轮）**：门禁 PASS（15 套件，host-contract 27→**28**）；
+真实浏览器 e2e **82/82**；变异 **2/2**。
+（e2e 第一次跑 exit=1 且输出被 wrapper 吞掉；清掉 `%TEMP%\dshpm-cdp-*` 后重跑 **exit=0、82/82**
+——仍是上一条记的那个已知环境抖动，不是代码问题。）
+
+
 
 
 

@@ -2,6 +2,26 @@
 
 ## 1.2.0
 
+- **修「更新已装插件后激活状态被误判成 unknown」**：`verifyActivation` 的候选名没去重，
+  同一个字符串出现多次被当成「多个候选都命中」→ 一律报 `ambiguous-bundle`。
+  真实链路：客户端「更新」发的是 `submitInstall({ name: bundle.name, spec: bundle.name })`，
+  而宿主 `install()` 传的候选是 `[hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]`
+  ——npm / name / requestedSpec / requestedName 本来就是同一个值（`dsh-kaomoji`、
+  `@anonyjcy/dsh-j-space` 这类全都如此）。更新一个**已装**插件时 `before` 里已经有它、
+  `appeared` 为空，于是走到 `present` 分支，而那里数的是**出现次数**而不是**不同名字的个数**。
+  **影响面用真实目录（4412 条）量过：2288 个有 npm 的条目 100% 命中**，修完 0%。
+  两个用户可见后果：① 一次成功的更新被渲染成「已安装 {name}，但这次没能回读装载状态，
+  无法确认它是否已经在跑」（`notice.installUnknown`，蓝色 info）而不是绿色的
+  「已安装 {name}，并已在运行」；② 更严重的是 `versionMatches=false` 那条**「磁盘上还是旧版、
+  更新其实没落地」的告警被这次误报盖掉**——因为走不到 `hit` 分支就根本不会算版本，
+  用户会以为更新成功了。修法是候选名先 `new Set()` 去重，`present.length` 才代表不同名字的个数。
+  回归：`verify/host-contract.test.mjs` 新增一条断言（真调 `verifyActivation`，把真实调用点的
+  候选形状写进去），并带**反向断言**——两个**不同**名字各自命中一个 bundle 时仍然必须报歧义
+  （去重不能把真歧义一起抹掉）。**变异测试 2/2 全捕获**（改回不去重 / 只留第一个候选，
+  两个方向都被抓到），变异后按字节还原、sha256 一致。
+  这一条此前测不出来，是因为既有的 7 条相关断言**全都只传单个候选名**，从不传重复项。
+  **本次不递增版本、不打包、不发布。**
+
 - **修「构建脚本待批准」这条路径：批准入口此前是不可达的死代码**（用户报「还是安装不了」）。
   这是**插件自身的 bug**，也是这轮排查真正的根因。
   真实链路：装 `@linxin666/dsh-remote-web-ui` 时，它的依赖 `cloudflared` 有 `postinstall`

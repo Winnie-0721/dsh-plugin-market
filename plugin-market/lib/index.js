@@ -339,10 +339,23 @@ export function verifyActivation(options = {}) {
     return result
   }
 
-  const candidates = (Array.isArray(options.candidates) ? options.candidates : [])
-    .map((entry) => optionalText(entry))
-    .filter((entry) => entry !== null)
-    .map((entry) => entry.toLowerCase())
+  // 候选名**先去重**再用来判歧义：调用方传进来的这几个字段经常是同一个字符串。
+  // install() 传的是 `[hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]`，而客户端
+  // 「更新」发的是 `{ name: bundle.name, spec: bundle.name }` —— npm / name / requestedSpec /
+  // requestedName 会撞成同一个值（真实目录里 2288 个有 npm 的条目 **全部** 如此）。
+  // 以前这里数的是**出现次数**：更新一个已装插件时 before 里已有它（appeared 为空），
+  // 于是走下面 present 分支，present.length > 1 被当成「多个候选都命中」→ 报
+  // ambiguous-bundle、状态降级成 unknown，客户端把一次成功的更新渲染成
+  // 「已安装，但这次没能回读装载状态」；更糟的是 versionMatches=false 那条「版本没落地」
+  // 的告警也被这次误报盖掉（走不到 hit 分支就不会算版本）。
+  // 去重后 present.length 才是**不同名字的个数**——两个不同名字各自命中一个 bundle 时
+  // 依然算真歧义（下面的反向断言守着这一点）。
+  const candidates = [...new Set(
+    (Array.isArray(options.candidates) ? options.candidates : [])
+      .map((entry) => optionalText(entry))
+      .filter((entry) => entry !== null)
+      .map((entry) => entry.toLowerCase())
+  )]
 
   let hit = null
   let ambiguous = false

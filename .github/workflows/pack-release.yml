@@ -81,11 +81,26 @@ jobs:
         if: steps.guard.outputs.skip == 'false'
         working-directory: plugin-market
         run: |
-          # OIDC 要求 npm ≥ 11.5.1（Node 自带的 10.x 不够新）。
-          # **不要写 `npm@latest`**：npm 12 起要求 node ^22.22.2 || ^24.15.0 || >=26，
-          # 而本 workflow 钉的是 node 22.14.0 → `npm install -g npm@latest` 直接 EBADENGINE
-          # 失败，publish 一步根本没跑到（v1.1.6 实际就是这么挂的）。
-          # 钉在 11.x：满足 OIDC 的 ≥11.5.1，且 node ≥22.9.0 即可。
-          # 哪天要升到 npm 12，必须同时把上面的 node-version 提到 24.15+（或 22.22.2+）。
+          # **用 `npm stage publish`，不是 `npm publish`。**
+          # 本包在 npmjs.com 上的 Trusted Publisher 只授予了 `npm stage publish` 与
+          # `npm dist-tag` 两项权限（包设置页 Trusted Publisher 卡片上写着的），
+          # 没有 `npm publish` → 直接 `npm publish` 会被拒：
+          #   403 Forbidden - PUT https://registry.npmjs.org/... - OIDC permission denied for this action
+          # （v1.1.6 实测就到这一步；这是 npm 允许的「暂存发布」，把 2FA 人工确认推迟到最后一步，
+          #  安全性更高——所以按它来，而不是去放松 npm 那边的权限。）
+          #
+          # 两个坑都记在这里，别再踩：
+          #  1) **不能写 `npm@latest`**：npm 12 起要求 node ^22.22.2 || ^24.15.0 || >=26，
+          #     而本 workflow 钉的是 node 22.14.0 → `npm install -g npm@latest` 会 EBADENGINE
+          #     失败，publish 根本没跑到（v1.1.6 第一次失败就是这个）。
+          #  2) `npm stage` 子命令要较新的 11.x（11.8.0 还没有）。`^11.5.1` 会解析到最新的
+          #     11.x（≥11.21），既有 stage、又与 node 22.14.0 相容。
           npm install -g "npm@^11.5.1"
-          npm publish --access public
+          npm stage publish --access public
+
+      - name: 提示下一步（暂存发布需人工批准）
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          echo "::notice title=npm 暂存发布已提交::这个包用的是 staged publishing，还需人工批准才会公开。"
+          echo "本地批准：npm stage list → npm stage approve <stage-id>（需要 2FA 一次性验证码）"
+          echo "或去 npmjs.com 该包页面点 Approve。"

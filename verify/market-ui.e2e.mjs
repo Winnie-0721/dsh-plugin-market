@@ -78,6 +78,8 @@ const { client } = browser
 let consoleErrors = []
 /** [9] 专用开关：打开后 /install 返回带 activation 的「版本对不上」响应。 */
 let manualUpdateProbe = false
+/** [10] 专用开关：打开后 /install 返回「构建脚本待批准」（pendingBuilds）。 */
+let buildApprovalProbe = false
 try {
   await client.send('Page.enable')
   await client.send('Runtime.enable')
@@ -105,7 +107,20 @@ try {
     const posted = String(params.request.postData || '')
     let payload = INJECTED_INSTALLED
     let delay = 0
-    if (isInstall && manualUpdateProbe) {
+    if (isInstall && buildApprovalProbe) {
+      // [10] 专用：构建脚本待批准（真实案例：装 @linxin666/dsh-remote-web-ui 时它的依赖
+      // cloudflared 有 postinstall，pnpm 11 忽略它并非零退出）。
+      // 宿主把这次 installBundle 折成 { application:'failed', error, pendingBuilds }，
+      // 而**修复前** sendChangeResult 回 ok:false → 客户端 requestJSON 直接抛错 →
+      // 「弹批准框」那段是死代码。这条断言钉的就是「批准入口真的出现过」。
+      payload = {
+        ok: true, // 修复后的服务端行为：待批准 = 可继续，不是失败到底
+        changed: false,
+        application: 'failed',
+        error: { code: 'build-blocked', message: '构建脚本待批准。' },
+        pendingBuilds: ['cloudflared'],
+      }
+    } else if (isInstall && manualUpdateProbe) {
       // [9] 专用：装完**回读发现磁盘版本与目录不符**（v1.1.7 的 activation）。
       // 用显式开关切换，而不是靠 postData 猜——批量那一段必须保持原样，
       // 否则它会从 restart-required 变成 applied，连累重启横幅与「成功 1、失败 1」两条断言。
@@ -846,6 +861,69 @@ try {
   await screenshot(client, join(shotDir, 'market-activation-mismatch.png'))
   console.log(`  · 截图：${join(shotDir, 'market-activation-mismatch.png')}`)
   manualUpdateProbe = false
+
+  // ── [10] 构建脚本待批准：批准入口必须真的出现（本轮修的 bug）──────────────────
+  // 真实案例（用户报「还是安装不了」）：装 @linxin666/dsh-remote-web-ui 时，它的依赖
+  // cloudflared 有 postinstall（下载二进制），pnpm 11 忽略它并以**非零**退出。
+  // 宿主把这次 installBundle 折成 { application:'failed', error, pendingBuilds:['cloudflared'] }
+  // ——「没装成，但只差用户批准一下」。
+  // **修复前**：sendChangeResult 把 application:'failed' 一律报 ok:false，而客户端
+  // requestJSON 在 ok!==true 时**直接抛错**，于是客户端「读 payload.pendingBuilds 弹批准框」
+  // 成了**永远不可达的死代码**——用户只看到一条普通错误，**没有任何批准入口**，
+  // 装多少次都装不上。这条断言钉的就是「那个入口真的出现过」。
+  console.log('\n[10] 构建脚本待批准：必须给出批准入口（ok:false 会让它变成死代码）')
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1560, height: 980, deviceScaleFactor: 1, mobile: false })
+  buildApprovalProbe = true
+  await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
+  await waitFor(client, `document.querySelector('.dshpm-row .dshpm-rowActions button') !== null`, 8000, '已安装页的第一行（批准探针）')
+  // warn 级回执**不会自动收起**（上面 [9] 留下的那条还在），所以这里显式点掉它，
+  // 否则「等旧回执消失」永远等不到。点的是气泡右上那颗关闭键。
+  await evaluate(
+    client,
+    `(() => { const n = document.querySelector('.dshpm-notice'); const b = n && n.querySelector('.dshpm-iconBtn'); if (b) b.click(); return true; })()`,
+  )
+  await waitFor(client, `document.querySelector('.dshpm-notice') === null`, 12000, '旧回执已点掉（批准探针）')
+  await evaluate(
+    client,
+    `(() => { const b = Array.from(document.querySelectorAll('.dshpm-row .dshpm-rowActions button')).find(x => /更新到|Updating to/.test(x.textContent)); if (b) b.click(); return true; })()`,
+  )
+  // 核心断言：批准横幅出现了（修复前这里会永远是 null）。
+  // 注意分工：**toast**（.dshpm-notice）只给一句短话「…需要在下方确认条里批准」，
+  // 而**包名与「允许并安装」按钮**都在 **Banner**（.dshpm-banner）里。
+  // 我第一版去 toast 里找按钮，于是两条断言假失败（第一条已证明横幅出现了）。
+  await waitFor(
+    client,
+    `(() => { const b = document.querySelector('.dshpm-banner'); if (!b) return false; return /构建脚本|install scripts/.test(b.innerText); })()`,
+    15000,
+    '待批准横幅（修复前不可达：ok:false 会让 requestJSON 抛错）',
+  )
+  const approval = await evaluate(
+    client,
+    `(() => {
+       const b = document.querySelector('.dshpm-banner');
+       const n = document.querySelector('.dshpm-notice');
+       if (!b) return null;
+       const btn = Array.from(b.querySelectorAll('button')).find(x => /允许并安装|Allow and install/.test(x.textContent));
+       return {
+         bannerText: b.innerText.replace(/\\s+/g, ' ').trim(),
+         noticeText: n ? n.innerText.replace(/\\s+/g, ' ').trim() : '',
+         hasApprove: !!btn,
+         namesBuild: /cloudflared/.test(b.innerText),
+         kind: b.getAttribute('data-kind'),
+       };
+     })()`,
+  )
+  expect(
+    '宿主报 pendingBuilds 时弹出批准确认条（不是一条普通错误）',
+    !!approval && /构建脚本/.test(String(approval.bannerText)),
+    JSON.stringify(approval),
+  )
+  expect('确认条里点名了要跑的包（cloudflared）', approval?.namesBuild === true, JSON.stringify(approval))
+  expect('有「允许并安装」按钮（没有它用户无法继续）', approval?.hasApprove === true, JSON.stringify(approval))
+  expect('同时给一句 toast 指路（说清在下方确认条里批准）', /下方确认条|confirm/i.test(String(approval?.noticeText)), JSON.stringify(approval))
+  await screenshot(client, join(shotDir, 'market-build-approval.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-build-approval.png')}`)
+  buildApprovalProbe = false
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

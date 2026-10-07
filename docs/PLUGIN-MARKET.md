@@ -235,6 +235,20 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
   升入动画用 `backwards`），并且 `prefers-reduced-motion: reduce` 下**全部关闭而内容照旧完整可见**——
   真实浏览器里 A/B 验过，不是只看代码。
 
+- **修「批准构建脚本」入口不可达：装不上的真根因**（v1.2.0，插件自身 bug）：用户报
+  「还是安装不了」，继续排查后定位到**插件自己**。真实链路：装 `@linxin666/dsh-remote-web-ui`
+  时它的依赖 `cloudflared` 有 `postinstall`（下载二进制），pnpm 11 **默认忽略**未批准的构建
+  脚本并非零退出；宿主把这次操作折成 `{ application:'failed', error, pendingBuilds:['cloudflared'] }`
+  ——含义是「没装成，只差你批准一下」。而我把 `application:'failed'` 一律报 `ok:false`，客户端
+  `requestJSON` 在 `ok !== true` 时**直接抛错**，于是「读 pendingBuilds 弹批准框」那段成了
+  **永远不可达的死代码**：用户只看到一条普通错误、**没有任何批准入口**，装多少次都装不上。
+  一行修复：`pendingBuilds` 非空 ⇒ 放行 `ok:true`（真正的失败仍 `ok:false`）。
+  **定位靠的是实验而不是读遍源码**：① 在 profile 目录手动跑宿主的原命令 → **装成功了**
+  （否掉 pnpm/镜像/包）；② 用宿主自己的 CLI 跑同一条 `pluginManager` → **也失败**，且点名
+  `[ERR_PNPM_IGNORED_BUILDS]`（把「我的请求路径」与「宿主自身路径」分开）。
+  验证：新增 `verify/build-approval.test.mjs`（9 条，真调 `sendChangeResult` 读响应体）+ e2e
+  78 → **82 条**（[10] 段断言批准确认条出现、点名 cloudflared、有「允许并安装」按钮）
+  + 变异 **4/4**。见 [REPORT §12.22](REPORT.md)。
 - **安装失败时把「下一步」说清楚：连不上 npm 源就直说去配镜像**（v1.2.0，用户实测反馈）：
   用户报「装了俩个插件都没成功」，查真实日志发现**是两个完全不同的原因**——一个是被运行中的
   DSH 占着文件（`ERR_PNPM_EPERM`，报错目录甚至是另一个插件，整个事务回滚），另一个是**连不上

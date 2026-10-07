@@ -1136,6 +1136,63 @@ pnpm 的 `cwd` **就是 profile 目录**、且 `extendEnv: false`（env 被清�
 删除前已备份三个清单文件。`dsh-mobile` 的状态尤其坑：文件都在 `node_modules`、
 **但不在任何清单里**，所以「看着装上了、永远不会被加载」——这正是用户说的「没能成功」。
 
+### 12.22 找到「还是安装不了」的真根因：**批准构建脚本的入口是死代码**（插件自身 bug）
+
+§12.21 修的是「错误提示不够可操作」，但那**没解决问题**——用户反馈「还是安装不了」。
+这一节是继续排查，最后定位到**插件自身的 bug**。
+
+**先否掉三个嫌疑（每一步都是实验，不是推理）**：
+
+1. **pnpm / 镜像 / 包坏了？→ 否。** 在 profile 目录手动跑宿主的原命令
+   `pnpm add @linxin666/dsh-remote-web-ui@0.4.5`（`cwd` = profile 目录，`.npmrc` 已配镜像）
+   → **装成功了**（`+ 0.4.5, Packages: +5, done`）。
+2. **只有市场这条路坏？→ 否，是宿主共同路径。** 用宿主自己的 CLI
+   `dsh plugin --profile desktop add …` 跑**同一条 `pluginManager` 代码** → **也失败**。
+   这条差分的价值：**把「插件的请求路径」和「宿主自身的路径」分开**，从而知道
+   不是我的 HTTP 层写错了。
+3. **失败点在哪？→ `[ERR_PNPM_IGNORED_BUILDS]`。** CLI 的输出直接点名：
+   `Ignored build scripts: cloudflared@0.7.3` + `Run "pnpm approve-builds"`。
+   `cloudflared` 的 `postinstall` 要下载二进制，pnpm 11 **默认忽略**它并非零退出。
+
+**真根因（读代码 + 读宿主实现确认）**：宿主把这次 `installBundle` 折成
+`{ application:'failed', error, pendingBuilds:['cloudflared'] }`，语义是
+**「没装成，但只差用户批准一下」**（宿主源码里 `readPendingBuilds` 专门识别
+`allowBuilds: <name>: set this to true or false` 这个 pnpm 写的占位并列出待批准包，
+还配了 `approveBuilds` 写入批准——**批准本来就是预期路径**）。
+
+而我的 `sendChangeResult` 把 `application:'failed'` 一律报 **`ok:false`**，客户端
+`requestJSON` 在 `ok !== true` 时**直接抛错**。于是客户端那段
+「读 `payload.pendingBuilds` → `setPending(...)` 弹批准框」**永远不可达**：
+用户只看到一条普通错误、**没有任何批准入口**，装多少次都装不上。
+
+**修法一行**：`pendingBuilds` 非空时放行 `ok:true`（`cancelled` 的既有放行语义不变），
+并把 `pendingBuilds` 的过滤提成变量复用。**只改错误/结果呈现，不动任何安装行为。**
+
+**验证（三层，缺一不可）**：
+- 新增门禁套件 `verify/build-approval.test.mjs`（**9 条**）：把真 `sendChangeResult`
+  抠出来**真调并读它发出的响应体**——不是源码形状断言。先写测试**看着它失败**
+  （`false !== true`），再改实现让它通过。
+- **真实浏览器 e2e 78 → 82 条**，新增 [10] 直接断言：批准确认条出现过、点了名
+  `cloudflared`、有「允许并安装」按钮、toast 指路。截图 `market-build-approval.png`
+  人工复核过：确认条写明「会在你的机器上运行」+ 两颗按钮，是可读可用的。
+- **变异测试 4/4 全捕获**（回到旧规则 / 无条件放行 / 不透传 pendingBuilds /
+  不过滤脏数据），变异后按字节还原。
+
+**这一轮我自己的两个错，都记下来**：
+1. **我最初的诊断方向偏了**：一轮里花了很多步去读宿主 asar 内部实现（`change()`、
+   `registryPlan`、`runProfilePnpm`…）。真正定位根因的是**差分实验**
+   （手动跑命令 / 用宿主 CLI 跑）**加**读一处关键代码（`requestJSON` 的 `ok!==true` 抛错），
+   而不是把宿主源码读遍。**先做能证伪的实验，再读代码。**
+2. **我的新断言第一版找错了元素**：批准按钮与包名在 `.dshpm-banner`（确认条），
+   我却去 `.dshpm-notice`（toast）里找，导致两条断言**假失败**——而同一轮的第一条
+   断言已经证明横幅出现了。是**输出文件里的原始文本**（toast 自己写着「请在下方确认条里批准」）
+   纠正了我。**断言失败先怀疑断言，别怀疑产品。**
+
+另外记一条环境教训：这一轮 e2e 出现过两次「跑 20 分钟不结束」。查下来**不是代码问题**，
+而是被 kill 的作业留下了 `%TEMP%\dshpm-cdp-*` 临时 profile 与孤儿宿主进程；
+清掉临时目录后立刻恢复（78/78 → 82/82）。**e2e 卡住先清临时态与孤儿进程，再怀疑代码。**
+
+
 
 
 

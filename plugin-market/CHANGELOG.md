@@ -2,6 +2,28 @@
 
 ## 1.2.0
 
+- **修「构建脚本待批准」这条路径：批准入口此前是不可达的死代码**（用户报「还是安装不了」）。
+  这是**插件自身的 bug**，也是这轮排查真正的根因。
+  真实链路：装 `@linxin666/dsh-remote-web-ui` 时，它的依赖 `cloudflared` 有 `postinstall`
+  （下载二进制），而 pnpm 11 **默认忽略**未批准的构建脚本、并以**非零**退出。宿主把这次
+  `installBundle` 折成 `{ application:'failed', error, pendingBuilds:['cloudflared'] }`
+  ——含义是「没装成，但只差你批准一下」，**不是**失败到底。
+  **Bug**：`sendChangeResult` 把 `application:'failed'` 一律报 `ok:false`，而客户端
+  `requestJSON` 在 `ok !== true` 时**直接抛错**——于是客户端那段「读 `payload.pendingBuilds`
+  弹批准框」成了**永远不可达的死代码**：用户只看到一条普通错误，**没有任何批准入口**，
+  装多少次都装不上。修法是一行：`pendingBuilds` 非空时放行 `ok:true`（`cancelled` 的既有
+  放行语义不变），并顺带把 `pendingBuilds` 的过滤提到变量里复用。
+  **怎么定位的（值得记）**：先否掉了「pnpm / 镜像 / 包坏了」三个嫌疑——在 profile 目录手动跑
+  宿主的原命令 `pnpm add`,**装成功了**；再用宿主自己的 CLI 跑同一条 `pluginManager` 代码，
+  **也失败**，且失败点明确指向 `[ERR_PNPM_IGNORED_BUILDS]`。于是问题定位到插件处理这条
+  结果的路径，而不是环境。
+  回归：新增门禁套件 `verify/build-approval.test.mjs`（**9 条**）——把真
+  `sendChangeResult` 抠出来**真调并读它发出的响应体**（不是源码形状断言）；
+  真实浏览器 e2e 78 → **82 条**，其中 [10] 直接断言「批准确认条出现过、点了名 cloudflared、
+  有『允许并安装』按钮、toast 指路」。**变异测试 4/4 全捕获**（回到旧规则 /
+  无条件放行 / 不透传 pendingBuilds / 不过滤脏数据），变异后按字节还原。
+  **本次不递增版本、不打包、不发布。**
+
 - **安装失败不再只说「看宿主日志」：连不上 npm 源时直接告诉你配镜像**（用户报「我在插件市场
   装了俩个插件都没能成功 你排除一下问题」）。排查用户真实 profile 的 pnpm 日志发现，**两个
   失败是两种完全不同的原因**：① `@linxin666/dsh-remote-web-ui` 是 `ERR_PNPM_EPERM`——报错

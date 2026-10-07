@@ -422,6 +422,9 @@ export function sendChangeResult(res, result, stage, activation) {
   const value = result !== null && typeof result === 'object' ? result : {}
   const error = projectChangeError(value.error)
   const application = optionalText(value.application) ?? 'failed'
+  const pending = Array.isArray(value.pendingBuilds)
+    ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
+    : []
   const payload = {
     // ok 不能只看 error：宿主的 ChangeResult 里 error 是可选的，`application:'failed'`
     // 完全可能不带 error。只看 error 就会把一次失败的操作报成 ok:true，客户端据此渲染
@@ -429,7 +432,14 @@ export function sendChangeResult(res, result, stage, activation) {
     // `cancelled` 单独放行：它是用户自己取消的（宿主可能同时带一个 error 说明原因），
     // 客户端要靠 `application` 渲染「已取消」文案——ok:false 会让 requestJSON 直接抛错，
     // 那条文案就永远不可达。`failed` 一律算失败。
-    ok: application === 'cancelled' ? true : (error === null && application !== 'failed'),
+    //
+    // **`pendingBuilds` 非空也要放行**（本次修的 bug）：这是「还差你批准一下构建脚本」，
+    // 不是失败到底——pnpm 11 遇到未批准的构建脚本会忽略它并非零退出，宿主把这次
+    // installBundle 折成 { application:'failed', error, pendingBuilds:['cloudflared'] }。
+    // 回 ok:false 会让客户端 requestJSON **直接抛错**，于是客户端那段「读 payload.pendingBuilds
+    // 弹批准框」成了**永远不可达的死代码**——用户只看到一条普通错误，**没有任何批准入口**，
+    // 装了永远装不上（真实案例：@linxin666/dsh-remote-web-ui 依赖 cloudflared 的 postinstall）。
+    ok: application === 'cancelled' || pending.length > 0 ? true : (error === null && application !== 'failed'),
     changed: value.changed === true,
     application,
     stage: optionalText(value.stage) ?? stage,
@@ -437,9 +447,7 @@ export function sendChangeResult(res, result, stage, activation) {
     enabled: value.enabled === undefined ? null : value.enabled === true,
     error,
     warnings: warningsOf(value),
-    pendingBuilds: Array.isArray(value.pendingBuilds)
-      ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
-      : []
+    pendingBuilds: pending
   }
   // 激活状态是可选的：读不回列表时给 `unknown`（带 reasons），**不给 null 也不给 live**——
   // null 会让客户端以为「这条不用谈激活」，live 就成了无凭据的保证。

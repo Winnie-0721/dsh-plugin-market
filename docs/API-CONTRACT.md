@@ -590,3 +590,20 @@ window.__ModuleLoader__.load({
     行内不报镜像 / 详情行不露诊断），变异后按字节还原。
     一条教训：**「变异没被捕获」先怀疑测试，而不是急着加断言**——第一版「行内短句不报镜像」
     没被捕获，查下来是我根本没测 `shortFailureText`，补上行为断言后才 6/6。
+20. **构建脚本待批准的批准路径**（`verify/build-approval.test.mjs` 9 条，v1.2.0 新增）：
+    这条契约此前**只写在宿主那一侧**、插件这边漏了，漏的后果是**批准入口完全不可达**。
+    宿主把「pnpm 因未批准的构建脚本非零退出」折成
+    `ChangeResult = { application:'failed', error, pendingBuilds:['<pkg>'] }`——语义是
+    **「没装成，但只差用户批准一下」**，而**不是**失败到底（宿主另有 `readPendingBuilds` /
+    `approveBuilds` 专门支持这条路径）。因此：
+    ① `pendingBuilds` 非空 ⇒ **`ok` 必须为 `true`**。回 `ok:false` 会让客户端
+    `requestJSON` 在 `ok!==true` 时直接抛错，客户端「读 `payload.pendingBuilds` 弹批准框」
+    就成了**永远不可达的死代码**，用户只看到一条普通错误、没有任何批准入口（真实表现：
+    「装了永远装不上」）；
+    ② `pendingBuilds` 只透传**字符串**（脏数据不进 UI）；
+    ③ 真正的失败（无 `pendingBuilds`）仍 `ok:false`，`cancelled` 的放行语义不变
+    ——修这条不许把其他失败一起放行。
+    该套件把真 `sendChangeResult` 抠出来**真调并读它发出的响应体**（源码形状断言测不出
+    `ok` 的推导行为）。真实浏览器 e2e 的 [10] 段另有一层：断言批准确认条出现过、
+    点了名要跑的包、有「允许并安装」按钮、toast 指路。
+    **变异测试 4/4 全捕获**（回到旧规则 / 无条件放行 / 不透传 / 不过滤），变异后按字节还原。

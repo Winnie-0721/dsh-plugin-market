@@ -169,7 +169,7 @@ A 和 B 共用一次读取，建议**一起做**。
 - 整个文件**从不加载、不执行 client bundle**（无 `ModuleLoader` / 无 jsdom / 无 render）。
 
 也就是说：**它能证明「文案和 CSS 不变量还在」，不能证明「界面真的这么表现」**。
-真实行为由 `verify/ui-check.ps1`（headless Edge + CDP，67 条）覆盖，但那条**不在发布门禁里**、
+真实行为由 `verify/ui-check.ps1`（headless Edge + CDP，78 条）覆盖，但那条**不在发布门禁里**、
 要本机有浏览器、要手动跑。
 
 这不是说门禁没用（它挡过版本漂移、zh/en 键漂移、僵尸 key、动效不变量），

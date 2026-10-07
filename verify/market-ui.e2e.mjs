@@ -600,6 +600,10 @@ try {
   await waitFor(client, `document.querySelector('.dshpm-updatesActions button[aria-busy="true"]') !== null`, 8000, '批量进行中（按钮 aria-busy）')
   const progressDuring = await evaluate(client, `document.querySelectorAll('.dshpm-progress').length`)
   expect('写操作进行中顶部没有黑条进度条（用户点名删掉的那条）', Number(progressDuring) === 0, `进度条元素 ${progressDuring}`)
+  // **批量进行中绝不能弹重启询问窗**（v1.2.0）：这是这个功能最容易做坏的地方——
+  // 若每一步都弹，「一键更新（N）」就会弹 N 次，用户被糊一脸弹窗。
+  const modalDuringBatch = await evaluate(client, `document.querySelectorAll('.dshpm-modalLayer').length`)
+  expect('一键更新进行中不弹重启询问窗（批量只在收尾问一次）', Number(modalDuringBatch) === 0, `弹窗元素 ${modalDuringBatch}`)
 
   // 批量进行中，切到「已安装」页确认那颗更新按钮也是禁用的。
   // 这是「一键更新永久卡死」的**入口**：从前这一页的按钮不像「可更新」页那样受 batchRunning 约束，
@@ -628,6 +632,93 @@ try {
     Array.isArray(rowResults) && rowResults.length === 2 && rowResults[0]?.ok === 'true' && /重启 DSH 后生效/.test(String(rowResults[0]?.text)) && rowResults[1]?.ok === 'false' && /占用/.test(String(rowResults[1]?.text)),
     JSON.stringify(rowResults),
   )
+
+  // ── 重启询问弹窗（v1.2.0）─────────────────────────────────────────────
+  // 批量收尾后**应该弹一次**「立即重启 / 稍后重启」。
+  // 注意：下面一律用 `elementFromPoint` 做**真实命中测试**，不用 JS `.click()`——
+  // `.click()` 绕过命中测试，覆盖层就算把按钮盖住了它照样「成功」，那种断言等于没测。
+  await waitFor(client, `document.querySelector('.dshpm-modalLayer') !== null`, 10000, '批量收尾后弹出重启询问窗')
+  const modalInfo = await evaluate(
+    client,
+    `(() => {
+       const layer = document.querySelector('.dshpm-modalLayer');
+       const card = document.querySelector('.dshpm-modalCard');
+       const now = document.querySelector('[data-action="now"]');
+       const later = document.querySelector('[data-action="later"]');
+       if (!layer || !card || !now || !later) return null;
+       const hit = (node) => {
+         if (!node) return null;
+         const r = node.getBoundingClientRect();
+         const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+         return el ? (el === node || node.contains(el) ? 'self' : el.className || el.tagName) : null;
+       };
+       const lr = layer.getBoundingClientRect();
+       const centre = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+       return {
+         role: card.getAttribute('role'),
+         ariaModal: card.getAttribute('aria-modal'),
+         title: card.querySelector('.dshpm-modalTitle') ? card.querySelector('.dshpm-modalTitle').textContent.trim() : '',
+         nowLabel: now.textContent.trim(),
+         laterLabel: later.textContent.trim(),
+         nowHit: hit(now),
+         laterHit: hit(later),
+         laterFocused: document.activeElement === later,
+         coversViewport: lr.width >= window.innerWidth - 1 && lr.height >= window.innerHeight - 1,
+         centreInsideModal: !!(centre && layer.contains(centre)),
+       };
+     })()`,
+  )
+  expect(
+    '批量收尾后弹一次重启询问窗（role=dialog + aria-modal，标题说明「重启 DSH 才能让新代码生效」）',
+    !!modalInfo && modalInfo.role === 'dialog' && modalInfo.ariaModal === 'true' && /重启 DSH/.test(modalInfo.title),
+    JSON.stringify(modalInfo),
+  )
+  expect('两颗按钮是「立即重启 / 稍后重启」', !!modalInfo && /立即重启|Restart now/.test(modalInfo.nowLabel) && /稍后重启|Restart later/.test(modalInfo.laterLabel), JSON.stringify(modalInfo))
+  expect(
+    '**真实命中测试**：两颗按钮都在最上层、点得到（覆盖层没有把自己的按钮盖住）',
+    modalInfo?.nowHit === 'self' && modalInfo?.laterHit === 'self',
+    JSON.stringify({ now: modalInfo?.nowHit, later: modalInfo?.laterHit }),
+  )
+  expect('遮罩盖满整个视口（不是只在角落）', modalInfo?.coversViewport === true && modalInfo?.centreInsideModal === true, JSON.stringify(modalInfo))
+  expect('打开时焦点默认落在「稍后重启」（破坏性那颗不是默认项）', modalInfo?.laterFocused === true, `focused=${modalInfo?.laterFocused}`)
+  expect('**只弹一次**：批量跑了 2 条，弹窗数量仍是 1', Number(await evaluate(client, `document.querySelectorAll('.dshpm-modalLayer').length`)) === 1, '弹窗数量不为 1')
+  // 几何：标题/正文/提示/按钮**互不重叠**，且卡片完整落在视口内。
+  // 这条是必要的——截图缩放后靠肉眼判断「有没有压字」不可靠（本仓库的 [2c] 就是为同一类问题立的）。
+  const modalGeom = await evaluate(
+    client,
+    `(() => {
+       const card = document.querySelector('.dshpm-modalCard');
+       const title = card.querySelector('.dshpm-modalTitle');
+       const body = card.querySelector('.dshpm-modalBody');
+       const hint = card.querySelector('.dshpm-modalHint') || card.querySelector('.dshpm-modalState');
+       const actions = card.querySelector('.dshpm-modalActions');
+       const box = (n) => { const r = n.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }; };
+       const cr = card.getBoundingClientRect();
+       return {
+         card: box(card), title: box(title), body: box(body), hint: hint ? box(hint) : null, actions: box(actions),
+         viewport: { w: window.innerWidth, h: window.innerHeight },
+         inViewport: cr.top >= -1 && cr.left >= -1 && cr.bottom <= window.innerHeight + 1 && cr.right <= window.innerWidth + 1,
+         titleDecoration: getComputedStyle(title).textDecorationLine,
+       };
+     })()`,
+  )
+  expect(
+    '弹窗内部不重叠：标题 → 正文 →（提示）→ 按钮依次向下排列',
+    modalGeom.title.bottom <= modalGeom.body.top + 1 &&
+      (!modalGeom.hint || modalGeom.body.bottom <= modalGeom.hint.top + 1) &&
+      (!modalGeom.hint || modalGeom.hint.bottom <= modalGeom.actions.top + 1),
+    JSON.stringify(modalGeom),
+  )
+  expect('弹窗完整落在视口内（不会有一半在屏幕外）', modalGeom.inViewport === true, JSON.stringify(modalGeom))
+  expect('标题没有被加删除线之类的装饰', modalGeom.titleDecoration === 'none', `decoration=${modalGeom.titleDecoration}`)
+  await screenshot(client, join(shotDir, 'market-restart-ask.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-restart-ask.png')}`)
+
+  // Esc = 稍后重启：关掉弹窗，但**横幅必须还在**（改动真的待重启，不能装作没事）。
+  await evaluate(client, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`)
+  await waitFor(client, `document.querySelector('.dshpm-modalLayer') === null`, 6000, 'Esc 关掉重启询问窗')
+  const bannerAfterLater = await evaluate(client, `(() => { const b = document.querySelector('.dshpm-restartBtn'); return b ? b.textContent.trim() : null; })()`)
+  expect('Esc 等同「稍后重启」：弹窗关掉，但重启横幅仍在（不假装已生效）', /重启 DSH/.test(String(bannerAfterLater)), `横幅=${bannerAfterLater}`)
 
   // 重启助手横幅：restart-required 之后必须出现一键「重启 DSH」。**只断言、绝不点击**——
   // 点了会真的退出这条 e2e 宿主；拉起/拉回的真实生命周期由 verify/restart-helper.test.mjs 覆盖。

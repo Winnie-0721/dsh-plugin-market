@@ -278,6 +278,17 @@ window.__ModuleLoader__.load({
         "restart.title": "立刻重启 DSH：正在流式输出的回复会被截断；桌面上应用窗口会重新打开。",
         "action.restart": "重启 DSH",
         "action.restarting": "正在重启…",
+        // 重启询问弹窗（v1.2.0）：装完之后主动问一次「现在重启还是等会儿」，
+        // 而不是让用户自己去横幅上找那颗按钮。默认「稍后」——重启会截断正在流的回复，
+        // 不能把破坏性动作做成默认项。
+        "restartAsk.title": "重启 DSH 才能让新代码生效",
+        "restartAsk.body": "已装好：{names}。宿主进程还在跑旧代码，重启后这些改动才会生效。",
+        "restartAsk.bodyMarket": "插件市场本身已更新到 v{version}。重启后新代码才会生效。",
+        "restartAsk.now": "立即重启",
+        "restartAsk.later": "稍后重启",
+        "restartAsk.hint": "重启会截断正在流式输出的回复；「稍后重启」后可从顶部横幅随时重启。",
+        "restartAsk.restarting": "正在重启 DSH，稍候页面会自己恢复…",
+        "restartAsk.listMore": "等 {count} 个",
         "err.self-update-unavailable.title": "更新通道没有回应",
         "err.self-update-unavailable.why": "jsDelivr 与 GitHub 三个源都没给出可用版本，这台机器可能访问不了它们。",
         "err.self-update-unavailable.next": "稍后重试；也可在终端用 dsh plugin add <Release 附件地址> 手动升级。",
@@ -537,6 +548,14 @@ window.__ModuleLoader__.load({
         "restart.title": "Restart DSH right now: replies still streaming will be cut off, and the desktop app reopens its window.",
         "action.restart": "Restart DSH",
         "action.restarting": "Restarting…",
+        "restartAsk.title": "Restart DSH so the new code takes effect",
+        "restartAsk.body": "Installed: {names}. The host process is still running the old code; the change applies after a restart.",
+        "restartAsk.bodyMarket": "The plugin market itself was updated to v{version}. The new code applies after a restart.",
+        "restartAsk.now": "Restart now",
+        "restartAsk.later": "Restart later",
+        "restartAsk.hint": "Restarting cuts off replies that are still streaming; with “Restart later” you can restart any time from the banner at the top.",
+        "restartAsk.restarting": "Restarting DSH — this page recovers on its own…",
+        "restartAsk.listMore": "and {count} more",
         "err.self-update-unavailable.title": "No update channel answered",
         "err.self-update-unavailable.why": "None of the jsDelivr and GitHub sources returned a usable version; this machine may not reach them.",
         "err.self-update-unavailable.next": "Try again later, or upgrade in a terminal with dsh plugin add <release asset URL>.",
@@ -1134,6 +1153,17 @@ function errorCopy(error) {
 .dshpm-banner[data-kind="error"] { border-left-color:var(--dsw-alias-state-error-primary,#d93025); }
 .dshpm-banner[data-kind="info"] { border-left-color:var(--dsw-alias-state-idle-primary,#8a8a8a); }
 .dshpm-bannerActions { display:flex; gap:6px; flex-wrap:wrap; }
+/* ── 重启询问弹窗（v1.2.0）：装完之后主动问一次「立即重启 / 稍后重启」。
+   fixed 覆盖层，不进文档流——**刻意不放在 .dshpm-root 里面**（用 Fragment 挂成兄弟节点），
+   否则它会成为 .dshpm-root 的直接子项，撞上 e2e [8]「任何直接子项都不得被压扁」那条几何断言。 */
+.dshpm-modalLayer { position:fixed; inset:0; z-index:70; display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:20px; background:var(--dsw-alias-bg-overlay,rgba(15,17,21,.42)); }
+.dshpm-modalCard { display:flex; flex-direction:column; gap:10px; box-sizing:border-box; width:min(440px, 100%); max-height:calc(100vh - 40px); overflow:auto; padding:16px 18px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:16px; background:var(--dsw-alias-bg-layer-2,#fff); box-shadow:0 18px 48px rgba(0,0,0,.22), 0 4px 12px rgba(0,0,0,.1); font-size:.9em; }
+.dshpm-modalTitle { font-weight:600; font-size:1.02em; }
+.dshpm-modalBody { color:var(--dsw-alias-label-secondary,#5b5b5b); line-height:1.55; overflow-wrap:anywhere; }
+.dshpm-modalNames { color:var(--dsw-alias-label-primary,#1a1a1a); font-weight:600; }
+.dshpm-modalActions { display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
+.dshpm-modalHint { font-size:.86em; color:var(--dsw-alias-label-secondary,#6b6b6b); line-height:1.5; }
+.dshpm-modalState { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#5b5b5b); }
 .dshpm-error { display:flex; flex-direction:column; gap:6px; box-sizing:border-box; padding:12px; border:1px solid var(--dsw-alias-state-error-primary,#d93025); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-errorTitle { font-weight:600; color:var(--dsw-alias-state-error-primary,#d93025); }
 .dshpm-errorBody { display:flex; flex-direction:column; gap:4px; font-size:.85em; }
@@ -1248,6 +1278,10 @@ function errorCopy(error) {
 .dshpm-tab::after { content:""; position:absolute; left:10px; right:10px; bottom:0; height:2px; border-radius:2px; background:var(--dsw-alias-brand-primary,#4d6bfe); transform:scaleX(0); transform-origin:right center; transition:transform .26s cubic-bezier(.22,1,.36,1); }
 .dshpm-tab[data-active="true"]::after { transform:scaleX(1); transform-origin:left center; }
 .dshpm-notice { animation:dshpm-toastin .3s cubic-bezier(.2,1.25,.35,1) backwards; }
+/* 弹窗：遮罩淡入 + 卡片升起。两者都用 backwards（用 forwards 会把 transform 钉死在末帧，
+   之后 hover/位移类样式就再也动不了——门禁有断言盯着这条）。 */
+.dshpm-modalLayer { animation:dshpm-fade .18s ease backwards; }
+.dshpm-modalCard { animation:dshpm-rise .26s cubic-bezier(.22,1,.36,1) backwards; }
 .dshpm-banner { animation:dshpm-rise .28s cubic-bezier(.22,1,.36,1) backwards; }
 .dshpm-detail { animation:dshpm-expand .26s cubic-bezier(.22,1,.36,1) backwards; }
 .dshpm-empty { animation:dshpm-rise .3s cubic-bezier(.22,1,.36,1) backwards; }
@@ -1282,6 +1316,9 @@ function errorCopy(error) {
 @media (prefers-reduced-motion: reduce) {
   /* 动效是装饰：关掉之后每个元素都必须按最终位置、完全可见地渲染。 */
   .dshpm-root *, .dshpm-root *::before, .dshpm-root *::after,
+  /* 弹窗**不在** .dshpm-root 里（见 .dshpm-modalLayer 的注释），所以必须单独列出来——
+     漏掉它就会变成「关掉动效后弹窗还带着入场动画」，而 e2e 正好在 reduce 下量动画名。 */
+  .dshpm-modalLayer, .dshpm-modalLayer *, .dshpm-modalLayer *::before, .dshpm-modalLayer *::after,
   .dshpm-entry, .dshpm-entry * { animation:none !important; transition:none !important; }
 }
 `;
@@ -1727,6 +1764,86 @@ function errorCopy(error) {
         el("div", { className: "dshpm-noticeTitle" }, props.title),
         props.body ? el("div", null, props.body) : null,
         props.children || null
+      );
+    }
+
+    /**
+     * 重启询问弹窗（v1.2.0）：装完之后**主动问一次**「立即重启 / 稍后重启」。
+     *
+     * 为什么要它：以前装完只把「有待重启的改动」横幅亮在页面顶部，用户得自己注意到、再找到那颗
+     * 按钮——「装完还要手动找重启」正是被抱怨的那件事。
+     *
+     * 几个刻意的决定：
+     *   - **默认是「稍后重启」**：重启会截断正在流式输出的回复，破坏性动作不能做默认项；
+     *   - **Esc 与点遮罩 = 稍后重启**（同义于「先不重启」，而不是「取消安装」——东西已经装好了）；
+     *   - 弹窗挂成 `.dshpm-root` 的**兄弟节点**（Fragment），不做它的子项：子项会被 e2e [8]
+     *     的几何断言盯上（「任何直接子项都不得被压扁」），而这个覆盖层天然比 root 高。
+     *   - 组件本身无状态：开/关由父级的 restartAsk 决定，重启中切换成「正在重启」态并隐藏按钮。
+     */
+    function RestartAskModal(props) {
+      var names = Array.isArray(props.names) ? props.names : [];
+      var restarting = props.phase === "restarting";
+      var layer = React.useRef(null);
+      // Esc = 稍后重启。用 document 级监听而不是给遮罩加 onKeyDown：弹窗里没有可聚焦的输入控件，
+      // 依赖元素自身获焦会在某些路径下收不到按键。
+      React.useEffect(function () {
+        function onKey(event) {
+          if (event && (event.key === "Escape" || event.key === "Esc")) props.onLater();
+        }
+        document.addEventListener("keydown", onKey);
+        return function () { document.removeEventListener("keydown", onKey); };
+      }, [props.onLater]);
+      // 打开时把焦点移到「稍后重启」上：键盘用户 Tab 的第一站是安全选项，不是破坏性那个。
+      React.useEffect(function () {
+        var node = layer.current;
+        if (node && typeof node.querySelector === "function") {
+          var later = node.querySelector('[data-action="later"]');
+          if (later && typeof later.focus === "function") later.focus();
+        }
+      }, []);
+      // 名字太多就折叠：只列前 3 个，其余用「等 N 个」表示（弹窗不是清单页）。
+      var shown = names.slice(0, 3);
+      var more = names.length - shown.length;
+      var namesText = shown.join("、") + (more > 0 ? " " + t("restartAsk.listMore", { count: more }) : "");
+      var body = props.marketVersion
+        ? t("restartAsk.bodyMarket", { version: props.marketVersion })
+        : t("restartAsk.body", { names: namesText });
+      return el("div", {
+        className: "dshpm-modalLayer",
+        ref: layer,
+        role: "presentation",
+        onClick: function (event) { if (event.target === event.currentTarget) props.onLater(); }
+      },
+        el("div", {
+          className: "dshpm-modalCard",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-label": t("restartAsk.title"),
+          "data-open": "true"
+        },
+          el("div", { className: "dshpm-modalTitle" }, t("restartAsk.title")),
+          el("div", { className: "dshpm-modalBody" }, body),
+          restarting
+            ? el("div", { className: "dshpm-modalState" }, el(IconSpinner, { size: 13 }), t("restartAsk.restarting"))
+            : el("div", { className: "dshpm-modalHint" }, t("restartAsk.hint")),
+          el("div", { className: "dshpm-modalActions" },
+            el("button", {
+              type: "button",
+              className: "dshpm-btn dshpm-btn--quiet",
+              "data-action": "later",
+              disabled: restarting,
+              onClick: props.onLater
+            }, t("restartAsk.later")),
+            el("button", {
+              type: "button",
+              className: "dshpm-btn dshpm-btn--primary dshpm-restartNowBtn",
+              "data-action": "now",
+              disabled: restarting,
+              "aria-busy": restarting ? "true" : "false",
+              title: t("restart.title"),
+              onClick: props.onNow
+            }, restarting ? el(IconSpinner, { size: 13 }) : el(IconUpgrade, { size: 13 }),
+              t("restartAsk.now"))))
       );
     }
 
@@ -2466,14 +2583,73 @@ function errorCopy(error) {
       var restartProbeRef = React.useRef(null);
       var restartSawDownRef = React.useRef(false);
 
-      /** 任何写操作回来 restart-required / requiresRestart，都点亮重启横幅。 */
-      function noteRestartFrom(payload) {
+      // ── 重启询问弹窗（v1.2.0）──
+      // ask = null | { names: string[], marketVersion: string|null, phase: "idle"|"restarting" }
+      var restartAskState = React.useState(null);
+      var restartAsk = restartAskState[0];
+      var setRestartAsk = restartAskState[1];
+      /** 本轮待重启的包名（累积去重；批量更新会连续写很多条）。 */
+      var restartNamesRef = React.useRef([]);
+      /** 已经就「哪些名字」问过用户了：**新名字才会再问一次**。
+       *  没有它的话，用户点过「稍后重启」之后再装同一个包会被反复打扰；
+       *  而完全不再问又会漏掉「后来又装了别的东西」这种真的需要再提醒的情况。 */
+      var askedRestartRef = React.useRef({ names: {}, market: false });
+      /** 弹窗开着时的同步可见判定（读 ref，而不是 state——同一批事件里 state 还是旧值）。 */
+      var restartAskRef = React.useRef(null);
+      restartAskRef.current = restartAsk;
+
+      /**
+       * 记一笔「这个改动要重启才生效」，并在**合适的时机**弹一次询问。
+       *
+       * 为什么要 `defer`：`noteRestartFrom` 有 5 个调用点，其中安装那个是安装/更新/
+       * 批量共用的一条路径。如果每次写操作都直接弹窗，「一键更新（N）」就会**弹 N 次**——
+       * 这是这个功能最容易做坏的地方。所以批量里的每一步都带 `defer:true` 只记账，
+       * 由批量收尾（finish）统一弹一次；单个操作则当场弹。
+       */
+      function noteRestartFrom(payload, options) {
         if (!payload) return;
-        if (payload.application === "restart-required" || payload.requiresRestart === true) {
-          setRestart(function (previous) {
-            return { pending: true, phase: previous && previous.phase === "restarting" ? "restarting" : "idle" };
-          });
+        var needs = payload.application === "restart-required" || payload.requiresRestart === true;
+        if (!needs) return;
+        var opts = options || {};
+        var label = opts.label ? String(opts.label) : null;
+        if (label !== null && restartNamesRef.current.indexOf(label) === -1) {
+          restartNamesRef.current.push(label);
         }
+        setRestart(function (previous) {
+          return { pending: true, phase: previous && previous.phase === "restarting" ? "restarting" : "idle" };
+        });
+        if (opts.defer !== true) maybeAskRestart(opts.marketVersion ? String(opts.marketVersion) : null);
+      }
+
+      /**
+       * 该不该弹询问：**只有出现「没问过的名字」时才弹**。
+       * 已经问过、用户选了「稍后重启」的那些不再打扰（横幅还在，随时能重启）。
+       */
+      function maybeAskRestart(marketVersion) {
+        if (restartAskRef.current !== null) return; // 已经开着，不重复弹
+        var fresh = [];
+        var names = restartNamesRef.current;
+        for (var i = 0; i < names.length; i++) {
+          if (askedRestartRef.current.names[names[i]] !== true) fresh.push(names[i]);
+        }
+        var freshMarket = marketVersion && !askedRestartRef.current.market ? marketVersion : null;
+        if (fresh.length === 0 && freshMarket === null) return;
+        for (var j = 0; j < fresh.length; j++) askedRestartRef.current.names[fresh[j]] = true;
+        if (freshMarket !== null) askedRestartRef.current.market = true;
+        setRestartAsk({ names: fresh, marketVersion: freshMarket, phase: "idle" });
+      }
+
+      /** 「稍后重启」= 关掉弹窗；**不改动已装好的东西**，横幅仍在顶部等待。 */
+      function dismissRestartAsk() {
+        setRestartAsk(null);
+      }
+
+      /** 「立即重启」：弹窗切到重启中（比 toast 更醒目地说明「正在重启」），并真的发起重启。 */
+      function restartNow() {
+        setRestartAsk(function (previous) {
+          return previous === null ? previous : { names: previous.names, marketVersion: previous.marketVersion, phase: "restarting" };
+        });
+        startRestart();
       }
 
       function stopRestartProbe() {
@@ -2516,14 +2692,16 @@ function errorCopy(error) {
       }
 
       function startRestart() {
-        if (restart && restart.phase === "restarting") return;
+        if (restart && restart.phase === "restarting") return Promise.resolve();
         setRestart({ pending: true, phase: "restarting" });
         setNotice({ kind: "info", text: t("notice.restartQueued") });
-        api.restart().then(function () {
+        return api.restart().then(function () {
           beginRestartProbe();
         }).catch(function (error) {
           // 助手没起来：宿主**没有**退出，如实报错并把按钮交还给用户（可以再点一次）。
           setRestart({ pending: true, phase: "failed" });
+          // 弹窗必须关掉：否则它会永远停在「正在重启」，而重启根本没发生。
+          setRestartAsk(null);
           setNotice({ kind: "error", error: error });
         });
       }
@@ -2879,7 +3057,9 @@ function errorCopy(error) {
           }
           setPending(null);
           var outcome = noticeFromResult(payload, "install", label);
-          noteRestartFrom(payload);
+          // 批量（silent）里的每一步只记账、不弹窗——否则「一键更新（N）」会弹 N 次，
+          // 由批量的 finish 统一问一次。
+          noteRestartFrom(payload, { label: label, defer: silent === true });
           if (!silent) setNotice(outcome);
           // 计成功看 applied（restart-required 也算装上了），不看气泡级别——
           // 否则「装好待重启」的更新会被批量汇成失败（用户截图里的「成功 0、失败 2」）。
@@ -2942,6 +3122,9 @@ function errorCopy(error) {
           setCheckPhase("checked");
           if (stoppedText) setNotice({ kind: "warn", text: stoppedText });
           else setNotice({ kind: fail > 0 ? "warn" : "success", text: t("notice.updateAllDone", { ok: ok, fail: fail }) });
+          // **批量只在这里问一次**：每一步都 defer 过（见 noteRestartFrom），
+          // 那些包的 restart-required 已经攒进 restartNamesRef，这里统一问。
+          maybeAskRestart(null);
           bumpTick();
         }
         function step() {
@@ -2980,7 +3163,7 @@ function errorCopy(error) {
           clearJob(key);
           setConfirming(null);
           setNotice(noticeFromResult(payload, "remove", bundle.name));
-          noteRestartFrom(payload);
+          noteRestartFrom(payload, { label: bundle.name });
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
@@ -2996,7 +3179,7 @@ function errorCopy(error) {
         api.toggle({ name: bundle.name, enabled: next }).then(function (payload) {
           if (!mountedRef.current) return;
           clearJob(key);
-          noteRestartFrom(payload);
+          noteRestartFrom(payload, { label: bundle.name });
           setNotice({
             kind: payload && payload.error ? "error" : "success",
             text: next ? t("notice.toggleEnabled", { name: bundle.name }) : t("notice.toggleDisabled", { name: bundle.name })
@@ -3018,7 +3201,7 @@ function errorCopy(error) {
         api.toggle({ id: id, enabled: next }).then(function (payload) {
           if (!mountedRef.current) return;
           clearJob(key);
-          noteRestartFrom(payload);
+          noteRestartFrom(payload, { label: id });
           setNotice({ kind: "success", text: next ? t("notice.toggleEnabled", { name: id }) : t("notice.toggleDisabled", { name: id }) });
           bumpTick();
         }).catch(function (error) {
@@ -3086,7 +3269,8 @@ function errorCopy(error) {
           var to = payload && payload.to ? payload.to : null;
           // 装完先亮「更新成功」（SELF_DONE_MS 后回 idle），重启前不谎称新代码已生效。
           markSelfDone();
-          noteRestartFrom(payload);
+          // 市场自更新是**独立**的一件事（不是插件列表里的一条），正文改说市场版本。
+          noteRestartFrom(payload, { marketVersion: to || target });
           setNotice({ kind: "success", text: to ? t("notice.selfUpdated", { version: to }) : t("notice.selfCurrent", { version: target }) });
         }).catch(function (error) {
           if (!mountedRef.current) return;
@@ -3298,10 +3482,14 @@ function errorCopy(error) {
       // 当前页：未知 id 退回第一页（受控 prop 不可能凭空变成别的值，这里只是防御）。
       var activePane = MARKET_PANES[tab] || MARKET_PANES[MARKET_TABS[0].id];
 
-      return el("div", {
-        className: "dshpm-root",
-        "data-busy": job ? "true" : "false"
-      },
+      // 弹窗挂成 .dshpm-root 的**兄弟节点**（Fragment 包一层），不做它的子项：
+      // .dshpm-root 的直接子项被 e2e [8] 的几何断言盯着（「任何直接子项都不得被压扁」），
+      // 而这个覆盖层是 fixed、天然比 root 高，塞进去只会让那条断言变得含糊。
+      return el(React.Fragment, null,
+        el("div", {
+          className: "dshpm-root",
+          "data-busy": job ? "true" : "false"
+        },
         // 进度已改为头部「刷新目录」按钮里的 spinner + aria-busy（截图里标题上方那条黑杠），
         // 页面顶部不再放横条——任何写操作仍然显示在按钮与 toast 上。
         el("div", { className: "dshpm-header" },
@@ -3399,6 +3587,17 @@ function errorCopy(error) {
         // 页面内容：同一时刻只渲染当前页（切走即卸载），并且统一套一层 .dshpm-page 外壳——
         // 三页共享同一套间距与高度，新增页面也自动对齐。
         el("div", { className: "dshpm-page", "data-page": tab, role: "tabpanel" }, activePane())
+        ),
+        // 重启询问弹窗：装完主动问一次「立即重启 / 稍后重启」（v1.2.0）。
+        restartAsk
+          ? el(RestartAskModal, {
+            names: restartAsk.names,
+            marketVersion: restartAsk.marketVersion,
+            phase: restartAsk.phase,
+            onNow: restartNow,
+            onLater: dismissRestartAsk
+          })
+          : null
       );
     }
 

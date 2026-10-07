@@ -863,10 +863,13 @@ function createHandlers(ctx, catalog, selfUpdate) {
 
       const value = result !== null && typeof result === 'object' ? result : {}
       const error = projectChangeError(value.error)
+      const application = optionalText(value.application) ?? 'failed'
       sendJson(res, 200, {
-        ok: error === null,
+        // 与 sendChangeResult 用**同一条规则**：只看 error 会把 `application:'failed'`
+        // 且不带 error 的一次失败开关报成 ok:true。
+        ok: application === 'cancelled' ? true : (error === null && application !== 'failed'),
         changed: value.changed === true,
-        application: optionalText(value.application) ?? 'failed',
+        application,
         enabled: value.enabled === undefined ? payload.enabled : value.enabled === true,
         error,
         warnings: warningsOf(value)

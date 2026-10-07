@@ -235,6 +235,33 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
   升入动画用 `backwards`），并且 `prefers-reduced-motion: reduce` 下**全部关闭而内容照旧完整可见**——
   真实浏览器里 A/B 验过，不是只看代码。
 
+- **独立审计揪出 6 个真实缺陷，其中最严重的一条会指错人**（v1.2.0）：`buildMatchIndex` 的
+  `putBareName` 用**原始** repo 名当键，而查表一律走会小写化的 `lookupKey`。真实目录 4412 条里
+  88 个仓库名含大写，实测 **0 个命中自己、5 个标到另一个 owner 的同名小写仓库**
+  （`bill277048-hash/DSH-model-router` → 被标成 `superboy911/dsh-model-router` 已安装）——
+  正是该文件注释明令禁止的「宁可不显示，也不能指错人」。一行修复后命中自己 0 → 82、
+  标错 5 → 3，剩下 6 条逐条查清（3 条同名 npm 包是设计、3 条是不同 owner 真撞车→正确判歧义）。
+  同批还修了：**失败的自更新被渲染成绿色「更新成功」**（`ok` 只看 `error`，而 `error` 是可选的，
+  `{application:'failed'}` 会算出 `ok:true`；与 `sendChangeResult` 的规则漂移，`/toggle` 同病）、
+  **并发 `ensure()` 每个等待者各自归一化**（让按数组身份的索引缓存逐个被击破）、
+  **发现页「重试」是死键**（误接 `bumpTick`，点了不发 `/catalog`，报错框永久停留）、
+  **退场计时器吞掉新回执**（200ms 窗口内的新气泡被一起清掉）、
+  **英文表两颗黑按钮文案相同**（门禁只断言了中文）。变异测试 **7/7 全捕获**。
+  这一轮我自己也踩了一个坑：给退场计时器加「只清自己那条」时写成了在排队 updater 里读 ref，
+  而 ref 已被同步清空 → 气泡**永远关不掉**；正则形状断言通过了，**真实浏览器 e2e 抓到**。
+  见 [REPORT §12.20](REPORT.md)。
+- **搜索路径先量后改：单次目录请求 53ms → 8ms**（v1.2.0）：审查时先测量再动手，**否掉了两个
+  自己的假设**——`entriesForBundle` 的 O(B×P) 实测只有 0.039ms（夸张到 300×600 也才 2.1ms）、
+  `React.memo`/`useMemo`/`useCallback` 在 `client.js` 里出现 **0 次**（没有记忆化可打穿），两处都**没改**。
+  真热点是 `/catalog` 每次请求重做整份目录的搜索归一化：真实快照 4412 条实测 **33ms 同步 CPU**
+  （`\p{M}+` 去组合符占 24ms）+ `buildMatchIndex` **12ms**，而这些都是**宿主事件循环**上的工作，
+  它同时在跑流式输出。修法两处：`foldText` 按**字符串内容**记忆化（不能用键在条目对象上的
+  `WeakMap`——`joinInstalled` 每次 `{...item}` 造新对象，那种缓存永远命中不了），
+  `buildMatchIndex` 按**数组身份**记忆化（快照数组是不可变引用，换目录即换身份）。
+  冷启动首帧不变（~75ms，必然建一次）——快的是二次搜索、翻页、改排序、切分类。
+  缓存「写错也照样跑」，所以新增 `catalog-search-cache.test.mjs`（11 条）并做**变异测试 4/4 全捕获**。
+  见 [REPORT §12.19](REPORT.md)。
+
 ## 7. 已知限制与后续工作
 
 - **只覆盖 Web/桌面 profile**：client 半是 `dsh.client` web 产物，headless profile 里只有

@@ -73,9 +73,14 @@ const timer = setInterval(() => {
     // DSH 自己的退出方式或 taskkill；见 docs/RELEASING.md §5。
     const child = spawn(payload.execPath, payload.args, { stdio: 'inherit', env, detached: true, windowsHide: true })
     if (child && typeof child.on === 'function') {
+      // 实测：spawn 失败（ENOENT）的 'error' 事件约 1ms 后才到，而本函数紧接着就同步
+      // process.exit(0)，所以**这个 handler 当前不可达**（独立审计发现，我用探针复现：
+      // 传不存在的 execPath，助手 exit 0 且 stdout/stderr 全空）。
+      // 仍然保留它，是因为它同时是「万一将来去掉下面那次同步 exit」的保险：
+      // EventEmitter 在**没有** 'error' 监听时会直接抛，把助手变成非 0 退出。
+      // 实测去掉监听在当前写法下也是 exit 0（同步退出先于事件），所以留着是零成本的防御。
+      // 客户端的恢复手段不依赖这里：它有界等待超时后会提示用户手动重启。
       child.on('error', () => {
-        // 拉不起来（文件被删、无权限……）：助手没有别的恢复手段，如实退出，
-        // 让客户端的有界等待超时后把「手动重启」的提示给用户。
         process.exit(0)
       })
     }

@@ -266,6 +266,42 @@ check('写操作只重读已安装列表：/status 挂载时读一次、目录�
   // 写操作函数仍只调 bumpTick（只重读已安装），不碰目录。
   assert.equal(/\[tick\]/.test(source), false, '不应再存在共享的 [tick] 依赖')
 })
+check('「重试」必须重抓它自己那一页的数据（审计发现的死键）', () => {
+  // 发现页的数据来自 /catalog，effect 依赖 catalogTick；曾经这里误接 bumpTick()
+  // （只动 installedTick），于是「重试」点了不发任何 /catalog 请求，报错框永远留在屏幕上
+  // ——用户唯一的自救路径是个死键。已安装页的 onRetry 才该接 bumpTick。
+  // 用两个页签挂载点之间的区间界定发现页，避免固定字窗截断（这份挂载块有 30 行）。
+  const discoverAt = source.indexOf('el(DiscoverPane, {')
+  const installedAt = source.indexOf('el(InstalledPane, {')
+  assert.ok(discoverAt > 0 && installedAt > discoverAt, '找到两个页签的挂载点且顺序正确')
+  const discoverBlock = source.slice(discoverAt, installedAt)
+  assert.match(discoverBlock, /onRetry: function \(\) \{ bumpCatalog\(\); \}/,
+    '发现页 onRetry 必须调 bumpCatalog()（重抓目录）')
+  assert.equal(/onRetry: function \(\) \{ bumpTick\(\); \}/.test(discoverBlock), false,
+    '发现页的 onRetry 不许接成 bumpTick（点了不发 /catalog，报错框留在屏幕上）')
+  // 对照：已安装页仍然接 bumpTick（它的数据来自 /installed，不是目录）
+  const installedBlock = source.slice(installedAt, source.indexOf('var activePane'))
+  assert.ok(installedBlock.length > 100, '截到了已安装页挂载块')
+  assert.match(installedBlock, /onRetry: function \(\) \{ bumpTick\(\); \}/,
+    '已安装页那一份仍要接 bumpTick（它读的是 /installed）')
+})
+check('退场计时器只准清掉「为它起的那条」回执（审计发现的 200ms 吞新回执）', () => {
+  // 旧写法 setTimeout 里无条件 setNotice(null)：退场窗口（200ms）内来了新回执，
+  // 旧计时器到期会把**新回执**也清掉——新回执本该活 NOTICE_DISMISS_MS(4600ms)。
+  assert.match(source, /noticeClosingRef/, '要记住退场计时器是为哪条回执起的')
+  // 关键：必须在**排队之前**把目标取值存进局部变量。setNotice 的函数式 updater 是等渲染时
+  // 才执行的，若在它之前清掉 ref，比较时两边都是 null、判定失败，回执永远关不掉
+  //（这个 bug 真发生过：正则形状断言放过了它，真实浏览器 e2e 抓到「提示条没自动收起」）。
+  assert.match(source, /var closing = noticeClosingRef\.current;\s*\n\s*noticeClosingRef\.current = null;\s*\n\s*setNotice\(function \(current\) \{\s*\n\s*return current === closing \? null : current;/,
+    '必须先取值到局部变量，再用它比对')
+  // 反向：不许在 updater 内部引用 ref（那是上面那个 bug 的形状）
+  const dismissAt = source.indexOf('function dismissNotice()')
+  const dismissBlock = source.slice(dismissAt, dismissAt + 1100)
+  assert.equal(/current === noticeClosingRef\.current/.test(dismissBlock), false,
+    'updater 内不许直接读 ref（会被同步清空，判定永远失败）')
+  assert.equal(/setNotice\(null\);/.test(dismissBlock), false,
+    'dismissNotice 的计时器里不许再有无条件 setNotice(null)')
+})
 check('自更新按钮四态状态机：插件市场更新/正在更新…/更新成功/再次检查', () => {
   assert.match(source, /selfPhase === "checking" \? t\("action\.checkingSelf"\)/)
   assert.match(source, /selfPhase === "installing" \? t\("action\.updatingSelf"\)/)
@@ -275,6 +311,15 @@ check('自更新按钮四态状态机：插件市场更新/正在更新…/更�
   // 两颗黑按钮写一样的字分不清（用户点名要文字区分）。
   assert.match(source, /selfPhase === "ready" \? t\("action\.recheckSelfOnly"\)/)
   assert.match(zhBlock, /"action\.recheckSelfOnly": "再次检查"/, '右键就绪态文案与左键「重新检查」不同')
+  // 英文表也必须不同——审计发现这里曾经两张表都叫 "Check again"：zh 区分了、en 没区分，
+  // 而门禁只断言了 zh（`enBlock` 是独立的表，漏一条就漏一种语言）。
+  assert.match(enBlock, /"action\.recheckSelf": "Re-check plugins"/, 'en 左键文案')
+  assert.match(enBlock, /"action\.recheckSelfOnly": "Check again"/, 'en 右键就绪态文案')
+  assert.notEqual(
+    enBlock.match(/"action\.recheckSelf": "([^"]+)"/)[1],
+    enBlock.match(/"action\.recheckSelfOnly": "([^"]+)"/)[1],
+    'en 的两颗黑按钮文案也不许相同'
+  )
   assert.match(zhBlock, /"action\.checkingSelf": "正在更新…"/, '点击后显示「正在更新…」')
   assert.match(zhBlock, /"action\.selfDone": "更新成功"/, '装完显示「更新成功」')
   assert.match(zhBlock, /"action\.checkSelf": "插件市场更新"/, '按钮已按用户要求改名')

@@ -416,6 +416,12 @@ function fakeManager() {
   return { calls, installBundle: async (spec, options) => { calls.push({ spec, options }); return { application: 'restart-required', changed: true } } }
 }
 
+// 宿主返回指定 ChangeResult 的假 manager（用来验 ok 的推导规则，而不是只看正常路径）。
+function managerReturning(changeResult) {
+  const calls = []
+  return { calls, installBundle: async (spec, options) => { calls.push({ spec, options }); return changeResult } }
+}
+
 await checkAsync('已是最新时不做任何下载、不调用安装', async () => {
   const fetchImpl = applyFetch()
   const manager = fakeManager()
@@ -509,6 +515,69 @@ await checkAsync('正常路径：下载 → 落盘 → 用本地绝对路径安�
     // 安装用的是绝对路径：pnpm 不认相对路径（install-spec.ts 会直接拒绝）。
     assert.ok(/^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith('/'), `必须是绝对路径：${spec}`)
     assert.deepEqual(readFileSync(spec), TARBALL, '落盘的字节必须与下载到的一致')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('宿主报 application:"failed" 时 ok 必须是 false（失败不许渲染成绿色「更新成功」）', async () => {
+  // 契约（docs/API-CONTRACT.md）要求 `application:'failed'` ⇒ `ok:false`。旧实现是
+  // `ok = (value.error == null)`——但宿主的 ChangeResult 里 error 是**可选**的，
+  // `{application:'failed'}` 不带 error 时它算出 ok:true，HTTP 200 回给客户端，
+  // 客户端 markSelfDone() + 绿色「更新到 vX」：**一次失败的自更新被渲染成成功**。
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-failed-'))
+  try {
+    const updater = createSelfUpdater({
+      fetchImpl: applyFetch(),
+      current: '1.0.0',
+      manager: managerReturning({ application: 'failed' }),
+      downloadDir: dir,
+      cacheMs: 0,
+      logger: { warn() {} }
+    })
+    const result = await updater.apply()
+    assert.equal(result.application, 'failed')
+    assert.equal(result.ok, false, 'application:failed ⇒ ok:false（即使没带 error）')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('宿主报 application:"cancelled" 时 ok 仍为 true（用户自己取消要走「已取消」文案）', async () => {
+  // `cancelled` 单独放行：客户端要靠 application 渲染「已取消」文案，ok:false 会让
+  // requestJSON 直接抛错，那条文案就永远不可达。这条与 index.js 的 sendChangeResult 一致。
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-cancelled-'))
+  try {
+    const updater = createSelfUpdater({
+      fetchImpl: applyFetch(),
+      current: '1.0.0',
+      manager: managerReturning({ application: 'cancelled' }),
+      downloadDir: dir,
+      cacheMs: 0,
+      logger: { warn() {} }
+    })
+    const result = await updater.apply()
+    assert.equal(result.application, 'cancelled')
+    assert.equal(result.ok, true, 'cancelled 必须放行，否则「已取消」文案不可达')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('宿主报 error 但 application 缺失时 ok 为 false（且 application 回落 failed）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-err-'))
+  try {
+    const updater = createSelfUpdater({
+      fetchImpl: applyFetch(),
+      current: '1.0.0',
+      manager: managerReturning({ error: { code: 'eperm', message: '拒绝访问' } }),
+      downloadDir: dir,
+      cacheMs: 0,
+      logger: { warn() {} }
+    })
+    const result = await updater.apply()
+    assert.equal(result.application, 'failed', '带了 error 而没说 application → 按 failed 处理')
+    assert.equal(result.ok, false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

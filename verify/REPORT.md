@@ -951,3 +951,141 @@ e2e `[8]` 的"任何直接子项不得被压扁 + 根自己滚动"两条断言�
 **本轮最终状态**：门禁全绿；`catalog-identity` **36/36**、`host-contract` **27/27**、
 `client-copy` **32/32**、`self-update` **43/43**、真实浏览器 **78/78**。
 
+### 12.19 代码质量与性能审查（v1.2.0 同期）
+
+用户要求「审查并优化 代码质量和性能」。**先量再改**，量完否掉了自己两个假设：
+
+**被否掉的假设（重要——写下来防止以后有人照着假问题去改）**：
+
+1. 「`entriesForBundle` 对每个 bundle 扫一遍 plugins，是 O(B×P) 热点」——量了：真实
+   场景（40 bundle / 60 plugin）**0.039ms**；夸张到 300×600 也只要 2.1ms。**不是问题，不改**。
+2. 「不稳定 props 打穿了 `React.memo` 的记忆化」——`client.js` 里 `React.memo` 出现 **0 次**
+   （`useMemo`/`useCallback` 也是 0）。没有记忆化可打穿。**不是问题，不改**。
+
+**真实热点（唯一一处，已修）**：`/catalog` 每次请求都把整份目录重新做一遍搜索归一化。
+用真实快照（4412 条）量：一次请求折叠 **30884 个字符串 = 33ms 同步 CPU**；拆开看
+`NFKD` 8.5ms、`\p{M}+` 去组合符 **24ms**（扫 1.5M 字符）、`toLowerCase` 4.4ms。同一次
+请求里 `buildMatchIndex` 还要再花 **12ms**。这些都在**宿主的事件循环**上——它同时
+（通过同一份目录快照）服务于市场面板与流式输出，所以同步顿挫会直接顶到用户。
+
+两处修复（`plugin-market/lib/catalog.js`，共 +58/−6）：
+
+- `foldText` 按**字符串内容**记忆化（`Map`，上界 65536，满了整体清空）。
+  为什么不是键在条目对象上的 `WeakMap`：`joinInstalled` 每次请求都用 `{...item}` 造新对象，
+  那种缓存**永远命中不了**——这一点是先量出来才没有写错。
+- `buildMatchIndex` 按**数组身份**记忆化（只留最新一份）。快照数组是不可变引用
+  （lib 内无原地改写，`createCatalogCache` 换目录时整个替换数组），所以身份相同 → 索引必然相同；
+  「刷新目录必须换索引」由身份天然保证。
+
+**效果（真实快照，完整 `/catalog` 路径 join+filter+sort+paginate）**：单次请求
+**53ms → 8ms**；逐字输入 6 个查询 **119ms → 68ms**；冷启动首帧不变（~75ms，必然要建一次）。
+
+**证据强度**：新增门禁套件 `verify/catalog-search-cache.test.mjs`（**11 条**，已被
+`release.ps1` 自动纳入，现共 **13 个**套件）。缓存类代码是「写错了也照样跑」的那种——
+结果依旧正确、测试依旧全绿，只在特定条件下静静给错答案，所以做了**变异测试 4/4 全被捕**：
+
+| 变异 | 被捕获 |
+|---|---|
+| 索引换数组时不重建（有旧的就复用） | ✓ 8 条断言 |
+| 索引改用**数组长度**当键（像身份但不是） | ✓ 6 条断言 |
+| `foldText` 改用**字符串长度**当键（不同字符串相撞） | ✓ 4 条断言 |
+| 查询侧不再归一化（`JOSÉ` 搜不到 `josé`） | ✓ 4 条断言 |
+
+变异后按字节还原并校验一致。**变异测试自己也纠了一次**：第一版 M1 我写成「删掉整个
+快速路径」，结果套件**全绿**——因为那是把缓存去掉、每次都重建，语义仍然正确，只是变慢。
+那不是 bug 而是性能退化，所以换成真正的语义破坏。这条也说明「变异没被捕获」未必是断言弱，
+可能是变异本身不构成错误。
+
+**顺带修正一处失实注释**：我最初写「搜索框每敲一个字就发一次 /catalog」，读了客户端
+`commitQueryInput` + `SEARCH_DEBOUNCE_MS=300` 后发现**是防抖的**，注释已改为如实描述
+（防抖落定后一次 + 翻页/改排序/切分类/刷新各一次）。
+
+**本轮验证**：门禁全绿（13 套件）；真实浏览器 **78/78**（搜索路径被真实覆盖）。
+
+### 12.20 独立审计发现的真实缺陷与修正（v1.2.0 同期）
+
+§12.19 是我自己量自己改。为了不再犯「自己验自己」的错，这一节的两个半都交给
+**独立审计**（host 半 / client 半分开、只读、被明确要求「一开始怀疑但量完不成立的也要报」）。
+它们报回来的东西里**有 6 条是真缺陷**，其中 2 条会造成用户可见的错误状态。
+
+**最严重的一条：把别人的插件标成「已安装 / 可更新」**（host 半发现，我独立复现）。
+
+`buildMatchIndex` 的 `putBareName` 用**原始** repo 名当 `nameKeys` 的键，而所有查表都走
+`lookupKey`（会 `normalizedKey` 小写化）。真实目录（4412 条）里有 **88 个**仓库名含大写字母，
+实测结果：**0 个命中自己、5 个标到了另一个 owner 的同名小写仓库**：
+
+```
+bill277048-hash/DSH-model-router  ->  被标成已安装: superboy911/dsh-model-router
+hajimimaodie8/DSH-Session-Sync    ->  被标成已安装: PerryLink/dsh-session-sync
+didclawapp-ai/DSH-Office          ->  被标成已安装: Fayelin12/dsh-office
+shengsheng90/DSH-taskboard        ->  被标成已安装: cloader/dsh-taskboard
+nanshan1995/DSH-Plugin-Market     ->  被标成已安装: kimiya1010/dsh-plugin-market
+```
+
+这正是该文件注释里**明令禁止**的事（「歧义不猜…宁可不显示，也不能指错人」）——注释写对了，
+代码没做到。一行修复（`normalizedKey(repo)` 当键）后：命中自己 **0 → 82**，标错 **5 → 3**。
+
+修完仍有 6 条不命中，我**逐条查清**才收尾，不是「好看了就当修好了」：
+- 3 条是目录里**真有同名 npm 包**（`dsh-office` / `dsh-session-sync` / `dsh-taskboard`），
+  npm 名优先是**设计**，不是 bug；
+- 3 条是不同 owner 的小写裸名真撞车（`dsh-model-router` 有 2 个仓库、`dsh-guardian` 有 3 个），
+  修好后正确判为**歧义不猜**——比修复前「猜错到别人头上」正确。
+
+**第二条：失败的自更新被渲染成绿色「更新成功」**（host 半发现，端到端链路可证）。
+
+`self-update.js` 的 `ok` 只看 `value.error`，而宿主的 ChangeResult 里 `error` 是**可选**的：
+`{application:'failed'}` 不带 error 时算出 `ok:true` → HTTP 200 → 客户端 `markSelfDone()`
++ 绿色「更新到 vX」。同一个文件里 `sendChangeResult` 早就把这条规则写清楚了
+（`application === 'cancelled' ? true : error === null && application !== 'failed'`），
+**两处规则漂移**。`/toggle` 也有一份同样的漂移。三处都改成同一条规则。
+
+**第三条：并发 `ensure()` 每个等待者各自归一化一遍**（host 半发现）。`inflight` 只共享了
+**网络**，`normalizeCatalog` 仍被每个等待者各跑一次（约 2.5ms），且各造一份新的 `plugins`
+数组——这会让 §12.19 那个**按数组身份的索引缓存逐个被击破**，等于白做。改成只让第一个
+等待者归一化、其余复用同一份快照（用对象身份断言验证 8 个等待者共用 1 个数组）。
+
+**client 半发现三条**：①**发现页的「重试」是个死键**——`onRetry` 误接 `bumpTick()`
+（只动 `installedTick`），而目录 effect 依赖 `catalogTick`，于是目录加载失败后点「重试」
+**一个 `/catalog` 请求都不发**，报错框永远留在屏幕上（用户唯一的自救路径失效）；
+②**退场计时器吞掉新回执**——200ms 退场窗口内来的新回执会被旧计时器一起 `setNotice(null)`，
+本该活 4600ms 的气泡 200ms 就没了（注释宣称覆盖了这种情况，实际 cleanup 只在卸载时跑）；
+③**英文表两颗黑按钮文案相同**——`action.recheckSelf` 与 `action.recheckSelfOnly` 都是
+`"Check again"`，而它们自己上方的注释写着「必须不同」，中文表是区分的；门禁只断言了中文，
+**漏掉一种语言就漏掉一种语言**。
+
+**我自己在这一轮里犯的两个错（都记下来）**：
+1. 修 ② 时我先写成「`setNotice(updater)` 里读 ref，之后同步清 ref」——函数式 updater 是
+   **排队等渲染时**才执行的，等它跑到时 ref 已经是 null，判定永远失败，**气泡再也关不掉**。
+   我那条正则形状断言**通过了**，是**真实浏览器 e2e** 报「提示条没自动收起」才抓到的。
+   教训与 §12.16/§12.18 一致：形状断言证明不了行为。已改成先取值到局部变量再比对，
+   并把「updater 内不许读 ref」反写成一条断言。
+2. 我的 `check()` 是同步的，写了个 `async` 回调进去会**「通过」但断言没跑完**——又一个
+   「测试通过本身是假的」，已加 `awaitCheck` 就地 await。
+
+**证据强度**：新增/扩充后 `catalog-search-cache` **15 条**、`client-copy` **34 条**、
+`self-update` **45 条**（+3 条专测 `ok` 推导规则：`failed`⇒false / `cancelled`⇒true /
+带 error 无 application⇒failed）；**变异测试 7/7 全捕获**（host 3 + client 4，含我上面
+犯的那个 ref bug 的形状），变异后按字节还原。
+
+**审计的净产出还包括「否掉的假设」**：host 半明确写下并**撤回了自己第一个性能数字**
+（`joinInstalled` 12ms 未能复现，4 个进程重测为 **0.31ms**，他主动丢弃了那个数）；
+`bundleNameFor` 的 O(n³) 在真实规模只有 0.7ms、**不列为缺陷**；`AbortSignal.timeout`
+不持有事件循环（**否认**定时器泄漏）；`readJsonBody` 的 stalled-client 风险**未能归因**
+于本插件，如实标为「未证实」。这些和我 §12.19 否掉自己两条假设是同一个动作。
+
+**有意不改的项（记下来，避免以后被当成漏改）**：
+- `restart-helper.cjs:76` 的 `child.on('error')`：**量过确认当前不可达**（ENOENT 的 `error`
+  事件约 1ms 后才到，而函数紧接着就同步 `process.exit(0)`；我用探针复现：不存在的 execPath
+  → 助手 exit 0、stdout/stderr 全空）。**但保留**：它同时是「将来若去掉那次同步 exit」的保险
+  （EventEmitter 无 `'error'` 监听时会直接抛）。实测去掉监听在当前也是 exit 0，所以留着零成本。
+  注释已如实改写为「当前不可达 + 为什么仍保留」，不再谎称它在兜底。
+- **零调用的导出**（`catalog.js` 的 `invalidate`/`sources`/`config`、`self-update.js` 的 `reset`）：
+  删导出是**兼容决策**而不是质量修复，收益接近于零，留给后续按需处理。
+- 纯样式/文案类 cosmetic（`repoTail` 的一处旧注释与实现描述不同但真实数据下等价、
+  `formatDate` 其实不格式化、几处死 CSS 与死 `t()` 多余入参、三个函数缩进列不同）：
+  都不改变行为，本轮不动；其中死 CSS 里有两条被 `client-copy.test.mjs` **要求保留**，
+  说明「看着没用」不等于能删。
+
+
+
+

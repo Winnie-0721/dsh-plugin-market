@@ -614,9 +614,16 @@ export function createSelfUpdater(options = {}) {
     }
     const value = result !== null && typeof result === 'object' ? result : {}
     const failure = value.error ?? null
+    // application 先定，ok 再由它推——**不能只看 error**。宿主的 ChangeResult 里 error 是
+    // 可选的：`application:'failed'` 完全可能不带 error。只看 error 就会把一次失败的安装
+    // 报成 ok:true，HTTP 200 回给客户端，客户端据此亮绿色「更新到 vX」——一次**失败的
+    // 自更新被渲染成成功**。这条规则与 index.js 的 sendChangeResult 必须一致
+    //（那里 `cancelled` 单独放行：用户自己取消的，客户端要靠 application 渲染「已取消」，
+    //  ok:false 会让 requestJSON 直接抛错，那条文案就永远不可达）。
+    const application = typeof value.application === 'string' ? value.application : failure === null ? 'applied' : 'failed'
     return {
-      ok: failure === null,
-      application: typeof value.application === 'string' ? value.application : failure === null ? 'applied' : 'failed',
+      ok: application === 'cancelled' ? true : failure === null && application !== 'failed',
+      application,
       from: status.current,
       to: status.latest,
       // 宿主半在进程里被 Loader 缓存：新代码要重启 DSH 才生效（见 docs/RELEASING.md §5）。

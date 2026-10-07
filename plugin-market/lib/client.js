@@ -498,9 +498,9 @@ window.__ModuleLoader__.load({
         "action.checkUpdates": "Check for updates",
         "action.checkSelf": "Plugin market update",
         "action.checkingSelf": "Updating…",
-        "action.recheckSelf": "Check again",
-        // Must differ from the left button's "Check again": two black buttons with the same
-        // label are indistinguishable.
+        "action.recheckSelf": "Re-check plugins",
+        // Must differ from the left button's "Re-check plugins": two black buttons with the
+        // same label are indistinguishable.
         "action.recheckSelfOnly": "Check again",
         // Transient success state: without it the button jumps back to its idle label and the
         // user never sees that the install actually finished.
@@ -2549,15 +2549,28 @@ function errorCopy(error) {
       var noticeClosing = noticeClosingState[0];
       var setNoticeClosing = noticeClosingState[1];
       var noticeTimerRef = React.useRef(null);
+      // 退场计时器是为**哪一条**回执起的：到期时只准清掉同一条。
+      // 不记这个的话，退场途中（200ms 窗口内）来了新回执，旧计时器会把**新回执**一起
+      // setNotice(null)——用户刚看到 200ms 就没了，而新回执本该活 NOTICE_DISMISS_MS。
+      var noticeClosingRef = React.useRef(null);
 
       function dismissNotice() {
         if (noticeClosing) return;
         setNoticeClosing(true);
         if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+        noticeClosingRef.current = notice;
         noticeTimerRef.current = setTimeout(function () {
           noticeTimerRef.current = null;
           if (!mountedRef.current) return;
-          setNotice(null);
+          // 「要关的那条」必须先**取值存进局部变量**再交给 updater：函数式 updater 是
+          // **排队等渲染时才执行**的，若在它之前就把 ref 清成 null，比较时两边都是 null，
+          // 判定失败 → 回执永远关不掉（页面会一直挂着那张气泡）。
+          // 这个 bug 真发生过：正则形状断言没抓住，**真实浏览器 e2e 抓到了**。
+          var closing = noticeClosingRef.current;
+          noticeClosingRef.current = null;
+          setNotice(function (current) {
+            return current === closing ? null : current;
+          });
           setNoticeClosing(false);
         }, NOTICE_CLOSE_MS);
       }
@@ -3426,7 +3439,11 @@ function errorCopy(error) {
             onInstall: installItem,
             onToggleDetails: toggleDetails,
             onCopy: copyCommand,
-            onRetry: function () { bumpTick(); }
+            // 「重试」必须重抓**目录**：这一页的数据来自 /catalog，而 bumpTick 只动
+            // installedTick，目录 effect 依赖的是 catalogTick——接错的话按钮点了没反应，
+            // 报错框永远留在屏幕上（用户唯一的自救路径变成死键）。只有下面「已安装」页
+            // 的 onRetry 才该接 bumpTick。
+            onRetry: function () { bumpCatalog(); }
           });
         },
         installed: function () {

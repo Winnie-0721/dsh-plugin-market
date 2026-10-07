@@ -268,13 +268,41 @@ function compareText(a, b) {
 }
 
 /**
- * 搜索归一化：小写 + 去变音符号。
- * `José` 要能被 `jose` 搜到（真实目录里有 25 条描述带 Latin-1 重音）；
- * NFKD 把 `é` 拆成 `e` + 组合符，再把组合符去掉。
+ * 搜索归一化的**记忆化**包装。
+ *
+ * 为什么需要：客户端搜索框有 300ms 防抖，所以**不是**每个按键都发请求；但每敲完
+ * 一个词（防抖落定）就要发一次 /catalog，翻页、改排序、切分类、刷新目录各发一次，
+ * 每次请求都要把整份目录的参与匹配字段重新折叠一遍。用真实快照（4412 条）量过，
+ * 一次请求折叠 30884 个字符串 = **约 33ms 同步 CPU**，其中 normalization + 去组合符
+ * 占 24ms（`\p{M}+` 正则扫 1.5M 字符最贵）。这段时间花在**宿主的事件循环**上，
+ * 它同时还在跑流式输出。同一个词搜第二次、翻页、改排序时字段都没变，折叠结果可以
+ * 复用：光这一处记忆化就把整个请求从约 53ms 降到约 18ms（再叠上下面 matchIndexFor
+ * 的索引记忆化，共约 8ms）。
+ *
+ * 缓存键是**字符串本身**（不是条目对象、也不是 id）：joinInstalled 每次请求都用
+ * `{...item}` 造新对象，挂在对象上的 WeakMap 永远命中不了；而且目录刷新后条目对象
+ * 会整批换掉。按内容缓存与这两种情况都无关，且同样的字符串天然共享结果
+ * （`dsh-drag-and-drop` 这类重名在目录里大量重复）。
+ *
+ * 上界：到了 FOLD_CACHE_CAP 就整个清空。不清空会让一个长时间运行、目录频繁刷新的
+ * 宿主缓慢涨内存；全清只损失一次冷启动（约 30ms），换取上界确定且实现足够短。
+ * 真实目录的参与匹配字段合计约 1.5M 字符、25606 个去重字符串，所以 65536 是 2.6 倍余量，
+ * 实际几乎碰不到清空路径。**真到达上界时堆增长实测约 18MB**（不是「几 MB」——这是我
+ * 最初写注释时的乐观估计，被独立审计量出来纠正了）；相对整份目录快照仍算小。
  */
+const FOLD_CACHE_CAP = 65536
+const foldCache = new Map()
+
 function foldText(value) {
   if (typeof value !== 'string' || value === '') return ''
-  return value.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase()
+  const hit = foldCache.get(value)
+  if (hit !== undefined) return hit
+  // NFKD 把 `é` 拆成 `e` + 组合符，再把组合符去掉：`José` 要能被 `jose` 搜到
+  //（真实目录里有 25 条描述带 Latin-1 重音）。
+  const folded = value.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase()
+  if (foldCache.size >= FOLD_CACHE_CAP) foldCache.clear()
+  foldCache.set(value, folded)
+  return folded
 }
 
 /**
@@ -550,14 +578,22 @@ function buildMatchIndex(plugins) {
   }
   /** 裸仓库名：同一个仓库的多条共享，不同仓库争用则歧义（`AKIRACOD/x` vs `bill9109/x`）。 */
   const putBareName = (repo, repoKey, item) => {
-    const existing = nameKeys.get(repo)
+    // **必须用 normalizedKey 当键**：查表一律走 lookupKey，而它会把探针小写化
+    // （`normalizedKey`）。这里若直接用原始 repo 名当键，含大写字母的仓库名
+    // （真实目录里 88 个，如 `bill277048-hash/DSH-model-router`）永远查不到自己；
+    // 更糟的是小写探针会命中**另一个** owner 的同名小写仓库，把别人的包标成
+    // 「已安装 / 可更新」——正是本文件注释里明令禁止的「指错人」。
+    // 实测（真实 4412 条）：这 88 个里 0 个命中自己、5 个标错到别的插件。
+    const key = normalizedKey(repo)
+    if (key === null) return
+    const existing = nameKeys.get(key)
     if (existing === undefined) {
-      nameKeys.set(repo, { repoKey, items: [item] })
+      nameKeys.set(key, { repoKey, items: [item] })
       return
     }
     if (existing === AMBIGUOUS) return
     if (existing.repoKey !== repoKey) {
-      nameKeys.set(repo, AMBIGUOUS)
+      nameKeys.set(key, AMBIGUOUS)
       return
     }
     if (!existing.items.includes(item)) existing.items.push(item)
@@ -619,12 +655,39 @@ function matchBundle(index, bundle) {
 }
 
 /**
+ * 匹配索引的按数组身份记忆化（只留最新一份，所以不叫缓存）。
+ *
+ * 为什么：buildMatchIndex 要遍历整份目录，真实规模（4412 条）量到 **约 12ms**。
+ * 而它是**按同一个缓存快照数组反复重建**的：防抖落定后的每次 /catalog 都调一次
+ * joinInstalled（翻页、改排序同理），/installed 里 joinBundles 还要再建一次。
+ * 这些 12ms 都烧在宿主的事件循环上（它同时还在跑流式输出）。
+ * 快照数组是不可变的（lib 内没有任何原地改写，createCatalogCache 换目录时整个替换
+ * 数组），所以身份相同的数组 → 索引必然相同。
+ *
+ * 为什么按**数组身份**而不是把 WeakMap 键在条目对象上：joinInstalled 每次请求都用
+ * `{...item}` 造新对象，键在条目上的缓存永远命中不了；而快照数组本身是稳定引用。
+ * 「目录刷新后必须重建」由身份天然保证——新数组就是新键，不需要额外失效逻辑。
+ *
+ * 为什么不做成无界 Map：只留最新一份，被替换掉的旧索引交给 GC。
+ */
+let indexMemoKey = null
+let indexMemoValue = null
+
+function matchIndexFor(plugins) {
+  if (indexMemoKey === plugins && indexMemoValue !== null) return indexMemoValue
+  const index = buildMatchIndex(plugins)
+  indexMemoKey = plugins
+  indexMemoValue = index
+  return index
+}
+
+/**
  * 契约 §2.2：已安装信息 join。返回新数组，不改动缓存里的原对象
  * （缓存被复用，任何原地写入都会污染后续请求）。
  */
 export function joinInstalled(plugins, bundles) {
   const list = Array.isArray(plugins) ? plugins : []
-  const index = buildMatchIndex(list)
+  const index = matchIndexFor(list)
   const matched = new Map()
   for (const bundle of Array.isArray(bundles) ? bundles : []) {
     // 一个 bundle 可能对应同一仓库的多个条目（多子插件仓库）：全部标为已安装。
@@ -652,7 +715,7 @@ export function joinInstalled(plugins, bundles) {
  *  一个 bundle 命中同一仓库的多个条目时取**最高**目录版本（那个仓库里最新的那个）。 */
 export function joinBundles(bundles, plugins) {
   const list = Array.isArray(bundles) ? bundles : []
-  const index = buildMatchIndex(Array.isArray(plugins) ? plugins : [])
+  const index = matchIndexFor(Array.isArray(plugins) ? plugins : [])
   return list.map((bundle) => {
     const hits = matchBundle(index, bundle)
     let latest = null
@@ -841,14 +904,21 @@ export function createCatalogCache(options = {}) {
     const result = await inflight
 
     if (result.ok === true) {
-      const fetchedAtMs = now()
-      current = {
-        ...normalizeCatalog(result.raw, { source: result.source }),
-        fetchedAt: new Date(fetchedAtMs).toISOString(),
-        fetchedAtMs,
-        stale: false,
-        error: null
+      // 并发等待者拿到的是**同一个** result 对象：只让第一个归一化，其余复用同一份快照。
+      // 不这么做的话，N 个并发调用会对同一份 raw 各跑一次 normalizeCatalog（每次约 2.5ms
+      // 同步 CPU），而且各造一份新的 plugins 数组——按数组身份记忆化的 matchIndexFor
+      // 会被每一份新数组逐个击破，等于没缓存。冷启动瞬间客户端会并发打好几个接口。
+      if (result.normalized === undefined) {
+        const fetchedAtMs = now()
+        result.normalized = {
+          ...normalizeCatalog(result.raw, { source: result.source }),
+          fetchedAt: new Date(fetchedAtMs).toISOString(),
+          fetchedAtMs,
+          stale: false,
+          error: null
+        }
       }
+      current = result.normalized
       lastFailure = null
       return { ok: true, cache: current }
     }

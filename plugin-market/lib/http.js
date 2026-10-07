@@ -122,8 +122,12 @@ export function sendJson(res, status, payload, extraHeaders = {}) {
 }
 
 /**
- * 统一的失败响应：`{ ok:false, error:{ code, message, hint } }`。
+ * 统一的失败响应：`{ ok:false, error:{ code, message, hint, diagnostic? } }`。
  * code 必须在契约 §1 的清单里；message/hint 允许端点覆盖。
+ *
+ * `diagnostic` 是契约 §2.8 的字段（按顺序列出每个源各自的失败原因），客户端会用它对
+ * EPERM/EACCES/EBUSY 做「文件被占用」的可操作提示——早先这里只透传 message/hint，
+ * 传进来的 diagnostic 被静默丢掉，那段文案永远拿不到证据。
  */
 export function sendError(res, status, code, overrides = {}) {
   const fallback = ERROR_TEXT[code] ?? { message: code, hint: undefined }
@@ -131,6 +135,7 @@ export function sendError(res, status, code, overrides = {}) {
   const hint = typeof overrides.hint === 'string' && overrides.hint !== '' ? overrides.hint : fallback.hint
   const error = { code, message }
   if (typeof hint === 'string' && hint !== '') error.hint = hint
+  if (typeof overrides.diagnostic === 'string' && overrides.diagnostic !== '') error.diagnostic = overrides.diagnostic
   sendJson(res, status, { ok: false, error }, overrides.headers ?? {})
 }
 

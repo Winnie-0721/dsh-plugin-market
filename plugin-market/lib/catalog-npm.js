@@ -235,12 +235,15 @@ export async function readCatalogFromNpm(source, options = {}) {
     return { ...classifyFetchError(error, tarballTimeoutMs), reason: `tarball：${shortError(error)}`, label }
   }
 
+  // dist.integrity 是**必填**校验：元数据本身也来自网络，只信「元数据说没问题」等于没校验。
+  // 缺字段就整源失败并退到下一个源——不匹配即拒绝，绝不「装上一次算一次」。
   const integrity = typeof metadata?.dist?.integrity === 'string' && metadata.dist.integrity !== '' ? metadata.dist.integrity : null
-  if (integrity !== null) {
-    const verdict = verifyIntegrity(bytes, integrity)
-    if (verdict.ok !== true) {
-      return { ok: false, kind: 'integrity', reason: verdict.reason, label: versionedLabel }
-    }
+  if (integrity === null) {
+    return { ok: false, kind: 'integrity', reason: '元数据没有 dist.integrity，拒绝使用未校验的 tarball', label: versionedLabel }
+  }
+  const verdict = verifyIntegrity(bytes, integrity)
+  if (verdict.ok !== true) {
+    return { ok: false, kind: 'integrity', reason: verdict.reason, label: versionedLabel }
   }
 
   let raw
@@ -249,7 +252,10 @@ export async function readCatalogFromNpm(source, options = {}) {
     if (file === null) {
       return { ok: false, kind: 'bad-tarball', reason: `tarball 里没有 ${CATALOG_FILE}`, label: versionedLabel }
     }
-    raw = JSON.parse(file.toString('utf8'))
+    // 包里的 plugins.json 可能带 UTF-8 BOM（PowerShell / 记事本编辑过的文件常见；本仓库
+    // 自己就有 verify/ps-bom.test.mjs）。JSON.parse 不认 BOM，而 URL 那条路走 response.text()
+    // 会被 fetch 规范自动剥掉——所以只有 npm 这条路需要显式 trimStart，否则主源每次都失败。
+    raw = JSON.parse(file.toString('utf8').trimStart())
   } catch (error) {
     return { ok: false, kind: 'bad-tarball', reason: `读取 tarball 失败：${shortError(error)}`, label: versionedLabel }
   }

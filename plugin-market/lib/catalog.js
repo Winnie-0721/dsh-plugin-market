@@ -116,7 +116,16 @@ export function looksLikeHtml(body) {
   return head.startsWith('<')
 }
 
-/** 契约 §3.3：JSON 对象 + plugins 数组 + count 数字，缺一不可。 */
+/**
+ * 契约 §3.3：JSON 对象 + plugins 数组 + count 数字，缺一不可。
+ *
+ * 还要**交叉核对** `plugins.length` 与 `count`：只查类型的话，一个结构合法但内容空/截断的
+ * 正文（`{count:4412, plugins:[]}`）会被当成新鲜目录覆盖掉好缓存——市场整个变空、
+ * 分类 chips 消失，而且因为 `stale:false` 连「缓存可能过期」的横幅都不显示，
+ * 看起来就像「真的一共有 0 个插件」。抓取失败宁可报错，也不能静默清空。
+ * 容差：小目录给足余量（用户自己写一个 `DSHM_REGISTRY_URL` 时，`count` 常常只是随手写的），
+ * 大目录按 2% 判——真正要挡的是「差一个数量级」的截断/坏数据，而不是手工目录里 count 没跟上。
+ */
 export function validateCatalogPayload(raw) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, message: '返回的不是 JSON 对象。' }
@@ -126,6 +135,18 @@ export function validateCatalogPayload(raw) {
   }
   if (!Number.isFinite(raw.count)) {
     return { ok: false, message: '缺少数字类型的 count。' }
+  }
+  const declared = raw.count
+  const actual = raw.plugins.length
+  // count 声明有内容却给不出条目：这不是「目录很小」，是坏数据（截断/清空）。
+  if (declared > 0 && actual === 0) {
+    return { ok: false, message: `count 声明 ${declared} 个插件，但 plugins 是空的。` }
+  }
+  // 小目录（≤100）至少给 5 条余量：手工维护的源里 count 写错几条很常见，
+  // 而那些目录本身就只有几十条——按 1% 算容差 1 会把它们整源拒掉。
+  const tolerance = declared <= 100 ? 5 : Math.max(5, Math.ceil(declared * 0.02))
+  if (Math.abs(actual - declared) > tolerance) {
+    return { ok: false, message: `count（${declared}）与 plugins 条数（${actual}）相差过大，疑似截断或坏数据。` }
   }
   return { ok: true }
 }
@@ -246,27 +267,59 @@ function compareText(a, b) {
   return left < right ? -1 : 1
 }
 
+/**
+ * 搜索归一化：小写 + 去变音符号。
+ * `José` 要能被 `jose` 搜到（真实目录里有 25 条描述带 Latin-1 重音）；
+ * NFKD 把 `é` 拆成 `e` + 组合符，再把组合符去掉。
+ */
+function foldText(value) {
+  if (typeof value !== 'string' || value === '') return ''
+  return value.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase()
+}
+
+/**
+ * 搜索：**逐字段**匹配，空白分隔的多个词是「与」（市场类应用的常规语义）。
+ *
+ * 之前把各字段拼成一个大 haystack 再 `includes`，有个真实缺陷：字段之间用 `\n` 连接，
+ * 跨字段的子串也能命中（`beta\nalpha` 匹配「名字叫 beta、作者是 alpha」）。
+ * 现在字段各自归一化，词必须落在**同一个字段**里，且所有词都要命中。
+ *
+ * `url` **保留**在字段里：用户从 GitHub/目录页复制一个仓库地址粘进搜索框是常见操作，
+ * 去掉它会让 `https://github.com/owner/repo` 搜出 0 条（回归）。
+ * 「搜 `github` 出全量」的噪音主要来自描述里写了 github，不是 url——两者都不能靠删字段解决，
+ * 靠的是**分词 + 逐字段**：搜完整地址能精确命中，搜单个通用词仍会有较多结果（这是搜索的本来语义）。
+ */
 function matchesQuery(item, query) {
-  const haystack = [
+  const tokens = String(query).split(/\s+/).filter((token) => token !== '')
+  if (tokens.length === 0) return true
+  const fields = [
     item.id,
     item.name,
     item.owner,
     item.npm,
-    item.url,
     item.description?.zh,
     item.description?.en,
     Array.isArray(item.capabilities) ? item.capabilities.join(' ') : ''
   ]
-    .filter((value) => typeof value === 'string' && value !== '')
-    .join('\n')
-    .toLowerCase()
-  return haystack.includes(query)
+    .map(foldText)
+    .filter((value) => value !== '')
+  const url = foldText(item.url)
+  if (fields.length === 0 && url === '') return false
+  // 每个词都要落在某个字段里（同一字段内即可，不跨字段拼）。
+  return tokens.every((token) => {
+    if (fields.some((field) => field.includes(token))) return true
+    // 仓库地址只在「这个词看起来是个地址/路径」时才参与匹配：用户粘贴
+    // `https://github.com/owner/repo` 或 `github.com/owner/repo` 能精确命中；
+    // 而搜 `github` 这种通用词不会因为每条都有 github 地址就返回全量。
+    return url !== '' && /[/.]/.test(token) && url.includes(token)
+  })
 }
 
 /** 契约 §2.2 的 query/category/installed/updates 过滤。 */
 export function filterPlugins(plugins, options = {}) {
   const list = Array.isArray(plugins) ? plugins : []
-  const query = typeof options.query === 'string' ? options.query.trim().toLowerCase() : ''
+  // 与 matchesQuery 用同一套归一化（小写 + 去变音符号），否则 `José` 搜 `jose` 会先在这里落空。
+  const query = foldText(typeof options.query === 'string' ? options.query.trim() : '')
   const category =
     typeof options.category === 'string' && options.category !== '' && options.category !== 'all'
       ? options.category
@@ -315,20 +368,34 @@ export function sortPlugins(plugins, sort = 'top') {
   if (comparator === undefined) {
     throw new Error(`未知排序：${sort}（只能是 top / new / downloads / name）`)
   }
-  list.sort(comparator)
+  // 兜底键：`id` 在目录内唯一，用它保证**全序**。
+  // 只靠 stars/downloads/name 比较时，同名免 scope 包（真实数据里有 171 组完全并列）会返回 0，
+  // 于是并列组的先后由输入顺序决定——刷新一次源顺序变了，同一个插件就可能换页位。
+  // 全序让「同样的数据 → 同样的分页」，不会在两页边界上重复或漏掉条目。
+  list.sort((a, b) => comparator(a, b) || compareText(a.id, b.id))
   return list
 }
 
-/** 契约 §2.2 的 page/pageSize；page 超出范围时返回空页，但 total/pages 仍是真实的。 */
+/**
+ * 契约 §2.2 的 page/pageSize。
+ *
+ * `page` 超出末页时**收敛到末页**（而不是回一个空页）：市场类应用的常规做法。
+ * 之前返回空 items 而 page 仍是原值，界面会显示「共 N 个结果 · 第 5/2 页」+ 空网格——
+ * 用户在第 5 页时刷新目录/改筛选让结果变少，就会卡在这个自相矛盾的状态里
+ * （客户端只在改搜索条件时重置页码，目录刷新不会）。
+ * `pages` 仍按 total 算，`total` 仍是筛选后的真实条数。
+ */
 export function paginate(items, page = 1, pageSize = 24) {
   const list = Array.isArray(items) ? items : []
   const total = list.length
   const size = Number.isSafeInteger(pageSize) && pageSize > 0 ? pageSize : 24
-  const current = Number.isSafeInteger(page) && page > 0 ? page : 1
+  const requested = Number.isSafeInteger(page) && page > 0 ? page : 1
   const pages = Math.max(1, Math.ceil(total / size))
+  const current = Math.min(requested, pages)
   const start = (current - 1) * size
   return {
     page: current,
+    requestedPage: requested,
     pageSize: size,
     total,
     pages,
@@ -398,14 +465,45 @@ export function isUpdateAvailable(installedVersion, catalogVersion) {
   return compared !== null && compared > 0
 }
 
-/** 仓库地址尾段，用于 npm 为空时的 bundle 匹配；剥掉 .git 与 /tree/... 的尾巴。 */
+/**
+ * 仓库地址尾段：**仓库名**，不是 URL 的最后一个路径段。
+ *
+ * 后者不是身份——monorepo 子目录 URL（`…/owner/repo/tree/main/packages/dsh-plugin`）的最后一段
+ * 会变成 `dsh-plugin`，甚至 `dsh` / `bundle` / `client` 这类通用词，与别的仓库撞车
+ * （实测 4412 条里 471 条含 `/tree/`，435 条的最后一段不等于仓库名）。所以先砍掉
+ * `/tree/`、`/blob/` 这类「仓库内位置」标记及其后面的部分，再取最后一段。
+ */
 export function repoTail(url) {
+  const segments = repoSegments(url)
+  return segments === null ? null : segments[segments.length - 1]
+}
+
+/**
+ * 仓库地址的身份段：`[owner, repo]`。
+ *
+ * **不能取 URL 的最后一段**：monorepo 子目录地址（`…/owner/repo/tree/main/packages/dsh-plugin`）
+ * 的最后一段会变成 `dsh-plugin`，甚至 `dsh` / `bundle` / `client` 这类通用词，与别的仓库撞车
+ * ——实测 4412 条里 471 条的 URL 带 `/tree/…`，435 条的最后一段不等于仓库名，`dsh` 这一个键
+ * 会被两个不同仓库争抢。
+ *
+ * 所有主流代码托管（GitHub / GitLab / Gitea…）的仓库都固定落在前两段：`/<owner>/<repo>/…`。
+ * 所以直接取前两段，比「先找 /tree/ 再回溯」简单且没有边界坑（仓库恰好叫 `tree`、owner 恰好叫
+ * `tree`、GitLab 的 `/-/tree/` 形态——启发式在那几种输入上都会算错）。
+ */
+function repoSegments(url) {
   const value = optionalText(url)
   if (value === null) return null
-  const cleaned = value.replace(/[?#].*$/, '').replace(/\/+$/, '')
-  const parts = cleaned.split('/').filter((part) => part !== '')
-  if (parts.length === 0) return null
-  return parts[parts.length - 1].replace(/\.git$/i, '')
+  let pathname = value
+  try {
+    pathname = new URL(value).pathname
+  } catch {
+    // 非绝对 URL（`git@host:owner/repo.git`）：剥掉协议与 user@host 前缀后按分隔符切。
+    pathname = value.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^[^/@]*@[^/:]*:/, '')
+  }
+  const cleaned = String(pathname).replace(/[?#].*$/, '').replace(/\.git$/i, '')
+  const segments = cleaned.split('/').filter((segment) => segment !== '')
+  if (segments.length === 0) return null
+  return segments.length >= 2 ? [segments[0], segments[1]] : [segments[0]]
 }
 
 function normalizedKey(value) {
@@ -414,36 +512,110 @@ function normalizedKey(value) {
 }
 
 /**
- * 匹配索引：npm 名是第一身份，仓库尾段只做兜底，不能覆盖已有 npm 键。
- * 契约 §2.3：大小写不敏感；npm 为空时用仓库地址尾段匹配。
+ * 匹配索引（契约 §2.3）。按身份可信度分三层，**歧义不猜**：
+ *
+ *  - `npmKeys`：npm 名（含 scope）是唯一身份；
+ *  - `sharedKeys`：`owner/repo` 与 `@owner/repo`——这两个键可能对应**同一仓库的多个子插件**
+ *    （真实目录里 `DamonKoy/dsh-web-ui#dsh-aionui-panel`、`#dsh-liangshen`… 十行同属一个仓库），
+ *    装了那个仓库就等于装了它们，所以这类键存**一组**条目，命中时全部标为已安装；
+ *  - `nameKeys`：裸的 `repo` 名——不同 owner 可能重名（`AKIRACOD/dsh-drag-and-drop` vs
+ *    `bill9109/dsh-drag-and-drop`），冲突时标记歧义、不匹配（宁可不显示，也不能指错人）。
+ *
+ * `@owner/仓库名` 也是「从 git 地址安装、package.json 的 name 带 scope」的合法场景所必需：
+ * `dsh plugin add https://github.com/bycall/xxx` 装出来的包常叫 `@bycall/xxx`，而目录里那条的
+ * `npm` 是无 scope 的 `xxx`（真实目录 1431 条是这种形态）。
+ *
+ * **但不能反过来「把 bundle 的 scope 剥掉去查」**：那会让目录里根本不存在的 `@随便/xxx`
+ * 命中 `npm === xxx` 的**另一个包**（假「已安装/可更新」，点更新还会装错包）。
+ * 差别就在 **owner 要不要对上**。
  */
 function buildMatchIndex(plugins) {
-  const index = new Map()
-  const add = (key, item) => {
+  const npmKeys = new Map()
+  const sharedKeys = new Map()
+  // 裸仓库名：只有「同一个仓库的多条」才共享；**不同仓库**（不同 owner）争用同名时才判歧义。
+  const nameKeys = new Map()
+  const put = (index, key, item, { exclusive = true } = {}) => {
     const normalized = normalizedKey(key)
-    if (normalized === null || index.has(normalized)) return
-    index.set(normalized, item)
+    if (normalized === null) return
+    if (exclusive) {
+      const existing = index.get(normalized)
+      if (existing === undefined) index.set(normalized, item)
+      else if (existing !== item) index.set(normalized, AMBIGUOUS)
+      return
+    }
+    // 共享键（同一仓库的多个条目）：存一组，**不**因多条目而判歧义。
+    const list = index.get(normalized)
+    if (list === undefined) index.set(normalized, [item])
+    else if (list !== AMBIGUOUS && !list.includes(item)) list.push(item)
   }
-  for (const item of plugins) add(item.npm, item)
+  /** 裸仓库名：同一个仓库的多条共享，不同仓库争用则歧义（`AKIRACOD/x` vs `bill9109/x`）。 */
+  const putBareName = (repo, repoKey, item) => {
+    const existing = nameKeys.get(repo)
+    if (existing === undefined) {
+      nameKeys.set(repo, { repoKey, items: [item] })
+      return
+    }
+    if (existing === AMBIGUOUS) return
+    if (existing.repoKey !== repoKey) {
+      nameKeys.set(repo, AMBIGUOUS)
+      return
+    }
+    if (!existing.items.includes(item)) existing.items.push(item)
+  }
   for (const item of plugins) {
-    if (item.npm !== null && item.npm !== undefined) continue
-    add(repoTail(item.url), item)
+    const owner = optionalText(item.owner)
+    // monorepo 子插件的 `name` 形如 `dsh-gungnir#dsh-plugin`（`#` 后是子目录名），
+    // 仓库名是 `#` 之前那段——带 owner 的别名要按仓库名注册，否则 @owner/repo 对不上。
+    const rawName = optionalText(item.name)
+    const base = rawName === null ? null : rawName.split('#')[0].trim()
+    if (owner !== null && base !== null && base !== '') {
+      // 带 owner 的别名对两类条目都注册：npm 条目与仓库条目都可能被「@owner/名字」装进来。
+      put(sharedKeys, `@${owner}/${base}`, item, { exclusive: false })
+    }
+    if (optionalText(item.npm) !== null) {
+      put(npmKeys, item.npm, item)
+      continue
+    }
+    const segments = repoSegments(item.url)
+    if (segments === null || segments.length < 2) continue
+    const repo = segments[1]
+    const repoKey = normalizedKey(`${segments[0]}/${repo}`)
+    put(sharedKeys, `${segments[0]}/${repo}`, item, { exclusive: false })
+    put(sharedKeys, `@${segments[0]}/${repo}`, item, { exclusive: false })
+    putBareName(repo, repoKey, item)
   }
-  return index
+  return { npmKeys, sharedKeys, nameKeys }
 }
 
+/** 索引里被标记为歧义的键：存在但不是唯一候选。 */
+const AMBIGUOUS = Symbol('ambiguous-repo-key')
+
+function lookupKey(index, key) {
+  const normalized = normalizedKey(key)
+  if (normalized === null) return null
+  const hit = index.get(normalized)
+  if (hit === undefined || hit === AMBIGUOUS) return null
+  // 裸仓库名存的是 { repoKey, items }：同一个仓库的多条一起返回。
+  return hit !== null && typeof hit === 'object' && Array.isArray(hit.items) ? hit.items : hit
+}
+
+/**
+ * bundle → 目录条目（契约 §2.3）。返回**数组**：共享键（同一仓库的多个子插件）会一次命中多条。
+ *
+ * 顺序即可信度：npm 名 → `owner/repo` / `@owner/repo`（共享）→ 裸仓库名。
+ * **不再剥 scope 再查**：`@unknownorg/foo` 与目录里的 `foo` 是两个不同的包，
+ * 拿它去命中「npm 恰好叫 foo」的条目会让用户看到假的「已安装 / 可更新」，
+ * 点更新还会装成另一个包（实测 1431 条无 scope 条目会被任意 `@随便/同名` 撞上）。
+ */
 function matchBundle(index, bundle) {
-  if (bundle === null || typeof bundle !== 'object') return null
-  const name = normalizedKey(bundle.name)
-  if (name === null) return null
-  const direct = index.get(name)
-  if (direct !== undefined) return direct
-  // 带 scope 的包名再去掉 scope 试一次，覆盖「从仓库装、npm 字段为空」的条目。
-  const slash = name.lastIndexOf('/')
-  if (slash === -1) return null
-  const base = name.slice(slash + 1)
-  if (base === '') return null
-  return index.get(base) ?? null
+  if (bundle === null || typeof bundle !== 'object') return []
+  const name = optionalText(bundle.name)
+  if (name === null) return []
+  const npm = lookupKey(index.npmKeys, name)
+  if (npm !== null) return [npm]
+  const shared = lookupKey(index.sharedKeys, name) ?? lookupKey(index.nameKeys, name)
+  if (shared === null) return []
+  return Array.isArray(shared) ? shared : [shared]
 }
 
 /**
@@ -455,8 +627,10 @@ export function joinInstalled(plugins, bundles) {
   const index = buildMatchIndex(list)
   const matched = new Map()
   for (const bundle of Array.isArray(bundles) ? bundles : []) {
-    const item = matchBundle(index, bundle)
-    if (item !== null && !matched.has(item)) matched.set(item, bundle)
+    // 一个 bundle 可能对应同一仓库的多个条目（多子插件仓库）：全部标为已安装。
+    for (const item of matchBundle(index, bundle)) {
+      if (!matched.has(item)) matched.set(item, bundle)
+    }
   }
   return list.map((item) => {
     const bundle = matched.get(item)
@@ -474,13 +648,18 @@ export function joinInstalled(plugins, bundles) {
   })
 }
 
-/** 契约 §2.3：bundle 视角的 join，补 latest / updateAvailable。 */
+/** 契约 §2.3：bundle 视角的 join，补 latest / updateAvailable。
+ *  一个 bundle 命中同一仓库的多个条目时取**最高**目录版本（那个仓库里最新的那个）。 */
 export function joinBundles(bundles, plugins) {
   const list = Array.isArray(bundles) ? bundles : []
   const index = buildMatchIndex(Array.isArray(plugins) ? plugins : [])
   return list.map((bundle) => {
-    const item = matchBundle(index, bundle)
-    const latest = item === null ? null : item.version
+    const hits = matchBundle(index, bundle)
+    let latest = null
+    for (const item of hits) {
+      if (item.version === null || item.version === undefined) continue
+      if (latest === null || compareVersions(item.version, latest) === 1) latest = item.version
+    }
     return {
       ...bundle,
       latest,

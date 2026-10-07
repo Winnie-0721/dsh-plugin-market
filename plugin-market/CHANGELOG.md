@@ -2,6 +2,116 @@
 
 ## 1.1.6
 
+- **核心逻辑审计修复：身份匹配、内容校验、错误归类三类真实缺陷**（用户要求「检查核心代码
+  是否有逻辑错误」并按「现代应用市场的逻辑」修复）：三份独立审计（catalog / self-update+http /
+  host 路由）共报 26 条，我逐条在真实 4412 条目录快照上复核——**复核否掉了 3 条**（排序并列组
+  数量统计错误、搜索「跨字段命中换行」未复现、`page>pages` 属契约允许），**其余按严重度修掉**：
+  1. **目录身份层（会装错包，最高优先）**：`matchBundle` 曾在 npm 名未命中时**把 scope 剥掉再查**，
+     而目录里 1431/4412 条是「无 scope 且 `npm === name`」——装任意一个**目录里没有**的
+     `@随便/<name>` 就会被认成那个条目（假「已安装/可更新」），点更新时 `pinnedNpmSpec` 还会把
+     spec 钉成别人的包名，**真的装成另一个包**。现在按可信度分层匹配（npm 名 → 仓库名 →
+     `@owner/仓库名`），**取消去 scope 兜底**。
+     `repoTail` 也修了：它声称「剥掉 /tree/… 的尾巴」实际只取 URL 最后一段，于是
+     `…/owner/repo/tree/main/adapters/dsh` 的身份键变成通用词 `dsh`（实测 471 条含 `/tree/`、
+     435 条尾段不等于仓库名、181 条 bogus 键真被用上，`dsh` 这一个键被两个仓库争抢）。
+     `buildMatchIndex` 同时收 `repo` / `owner/repo` / `@owner/repo`，**一个键落到两个不同条目时
+     标记歧义、不再匹配**（原来是「先到先得」，哪条被标成已安装纯看文件顺序）。
+  2. **内容闸门（市场可能被静默清空）**：`validateCatalogPayload` 只查类型，于是
+     `{count:4412, plugins:[]}`（源站故障/截断）会被判为合法并以 `stale:false` 覆盖好缓存——
+     市场整个变空、分类 chips 消失，而且因为不是 stale 连「缓存可能过期」横幅都不显示，
+     看起来像「真的一共 0 个插件」。现在交叉核对 `plugins.length` 与 `count`（1% 容差）。
+  3. **主用 npm 源静默失效**：npm 路径 `JSON.parse(file.toString('utf8'))` 不剥 BOM，而 URL 路径走
+     `response.text()` 会被 fetch 规范自动剥掉——包内 `plugins.json` 带 BOM（本仓库自己就有
+     `ps-bom.test.mjs`）时**每个请求都失败**，静默退化到下一个 registry 再到 30s 的官方 URL。
+     现在 `trimStart()`。同时 `dist.integrity` 由「有则校验」改为**必填**：元数据本身也来自网络，
+     只信「元数据说没问题」等于没校验，缺字段即整源失败（与文件头声明的信任模型一致）。
+  4. **搜索**：`url` 曾在搜索 haystack 里，于是搜 `github` **命中全部 4412 条**（几乎每条都有
+     github 地址），用户以为搜到了什么其实全量；字段间用 `\n` 连接还导致跨字段子串命中。
+     现在只搜 UI 承诺的字段（名字/作者/描述/能力），多词是「与」语义并按字段匹配；另加
+     NFKD 去变音符号（`jose` 能搜到 `José`，实测目录里 25 条描述带重音）。
+  5. **分页与排序**：`paginate` 在 `page` 超出末页时**收敛到末页**（原返回 `page=5/pages=2/items=[]`，
+     界面显示「第 5/2 页」+ 空网格且不会自愈——客户端只在改搜索条件时重置页码）；`sortPlugins`
+     追加 `id` 兜底键保证**全序**（真实数据有 171 组完全并列，原来是「谁先来谁在前」，
+     刷新源顺序就会换页位）。
+  6. **host 契约**：`sendError` 曾静默丢掉 `overrides.diagnostic`——契约 §2.8 的字段**永远不会出现**，
+     而客户端靠它对 EPERM/EACCES/EBUSY 给出「文件被占用」的可操作提示；`sendChangeResult` 的
+     `ok` 只看 `error`，于是宿主 `application:'failed'`（`error` 是可选的）被报成 `ok:true`，
+     客户端渲染绿色「已安装」并计为成功（`cancelled` 保持 `ok:true`，否则客户端会抛错丢掉「已取消」文案）；
+      重名插件安装由「第一个匹配就装」改为**报歧义**（真实目录 195 个重名，`dsh-memory` 对应
+      10 条 5 个不同 spec——用户在装别人的包）；`MANAGEMENT_MESSAGE/HINT` 改 `Map`
+     （对象字面量 + `__proto__` 这类键会拿到 `Object.prototype` 的值，而契约要求 message 是字符串）。
+  7. **重启链路**：`restart` 端点改为**先安排退出、再写响应**（原顺序在响应写失败时——客户端切走/
+     代理断开——异常被外层吞掉，退出永不安排，而 `restart.js` 已置 `requested`，之后每次点击都回
+     `already:true` 并跳过安排 → **「重启 DSH」永久失效**）；`restart.js` 把 `child.on('error')`
+     提到 `pid<=0` 那条提早 return **之前**（spawn 的 ENOENT 是异步事件，未处理的 `'error'`
+     会直接终止宿主进程，用户看到 500 之后进程就没了），并在该路径顺手 `unref`。
+  8. **自更新通道（两条「谎称已是最新」）**：`isNewer` 曾把 `compareVersions` 的 `null` 折叠成
+     `false`，于是本机是**合法 npm 预发布号**（`1.1.5-rc.1`）时 `apply()` 回
+     `{ok:true, application:'up-to-date'}`、界面显示「已是最新」——正是文件注释里禁止的「猜」，
+     现在 `isNewer` 返回 `true|false|null`、`check()` 对不可解析的本机版本如实报通道不可用；
+     另一个源**知道**有更高版本却拿不到清单（附件缺 digest → 回落到 v1.1.6 起已下线的
+     `releases/index.json`）时，原先那份更旧的候选会把结果盖成「已是最新」，现在这类
+     「知道有新版但验不了」让整次检查失败并说清是哪个版本。另：标签名过 `isUsableTag`
+     校验（孤立代理项能通过 `\S+` 却让 `encodeURIComponent` 抛 `URIError`，从单源坏数据
+     变成 500 internal）；`mkdir`/`writeFile`/`rename` 的文件系统错误归类为契约里的
+     `self-update-download`（原先是裸 await → 500 internal，客户端那条专用文案永远用不上）
+     并在失败时删掉 `.part`。
+  9. **客户端**：目录过期横幅的原因**永远**是「原因未知」（服务端 `/status` 给的是字符串错误码、
+     `/catalog` 压根不带 error，客户端却按对象读 `error.message/.code`）——现在字符串/对象两种
+     形态都认，认不出的码原样显示（「原因未知」让人没法判断是网络、限流还是源站挂了）；
+     「正文不是 JSON」原先归到 `internal`（反代返回 HTML 时界面说「宿主内部出错 / 看宿主日志」），
+     `err.badResponse.*` 三段文案**成了死文案**，现在 2xx 却给出非 JSON 归 `badResponse`；
+     `err.badResponse.why` 里的 `{status}` 占位符从未被插值（`t` 没收到第二参），也一起修；
+     写操作的忙碌态改为**按作业 key 归位**（原 `clearJob()` 无条件清空：装 A 时点装 B，A 完成
+     会把 B 的忙碌态也清掉，界面显示空闲 → 用户再点一次就是重复安装），并加了同 key 去重
+     （读 ref 而非 state，否则同一批事件里连点两次守卫失效）。
+  回归：新增两个套件——`verify/catalog-identity.test.mjs`（36 条：身份层/内容校验/搜索/排序/分页，
+  有真实快照时一并跑规模复核）与 `verify/host-contract.test.mjs`（16 条：diagnostic 透传、
+  `ok` 推导、重名歧义、重启顺序、error 监听顺序、Map 映射表），两者都由门禁自动执行；
+  `client-copy.test.mjs` 26→**30/30**、`self-update.test.mjs` 39→**43/43**。
+  这一批审计同时留下一条方法论记录：三份审计共 26 条结论里 3 条经复核不成立，**不能照抄**。
+
+- **上一版修复的对抗性复核：抓出并修掉 4 条我自己引入/残留的缺陷**（把 diff 交给独立一方
+  专门找错，而不是自己再读一遍）。这一轮全部由**可复现的证据**驱动：
+  1. **「一键更新」会永久卡死（最严重，是我上一版引入的）**：新加的「同一个包正在装就吞掉重复
+     点击」守卫**只 `return` 不回调**，而一键更新的顺序执行靠回调推进——用户在「已安装」页插进
+     一个正在被批量处理的包时，那一步既不发请求也不回调 → 循环断掉、`batch` 永远 `{running:true}`、
+     按钮被自己的守卫挡住，**整个会话内一键更新彻底失效、只能刷新页面**。
+     根因还有一处不一致：「已安装」页的更新按钮原先不像「可更新」页那样受 `batchRunning` 约束，
+     正好从那一页漏过去。修法三条一起上：守卫命中时也回调（并在批量里把这类记为 `skipped`，
+     既不算成功也不算失败）、已安装页按钮补上 `batchRunning`、新增「{name} 正在装/更新，已跳过。」文案。
+  2. **「取消安装」的文案是死路径**：`ok` 判成 `error === null && application !== 'failed'`，
+     于是宿主「取消 + 带一个说明原因的 error」时 `ok=false`，客户端 `requestJSON` 直接抛错，
+     `notice.*Cancelled` 永远渲染不出来。现在 `cancelled` 恒为 `ok=true`（无论有没有 error）。
+  3. **过期原因仍有一半路径是「原因未知」**：上一版只让客户端认字符串错误码，但 `/catalog`
+     响应里根本没有 `error` 字段，而客户端优先读的正是它——只有 `/status` 那条半路径能拿到。
+     现在 `/catalog` 也带 `error: cache.error ?? null`。
+  4. **搜索与身份的过度修复**（两条都是我上一版用力过猛）：
+     - 为了让「搜 `github` 不再返回全量」而**整段删掉 `url`**，导致用户从 GitHub 复制地址粘进
+       搜索框变成 **0 结果**（`https://github.com/bycall/dsh-answer-reviewer` 由 1→0）。而且
+       复核发现「搜 github 出全量」的真凶是**描述里写了 github**、不是 url。现在 url 回来了，
+       但**只对「地址形状」的词生效**（含 `/` 或 `.`）：粘贴完整地址精确命中，搜通用词仍不会全量。
+     - 为了杀掉「`@随便/同名` 误命中」而删掉 scope 兜底，**把 1431 条合法匹配一起杀了**：
+       `dsh plugin add <git url>` 装出来的包名常是 `@owner/name`，而目录里那条的 `npm` 是无 scope 的
+       `name`——真实目录里 1431 条正是这种形态（复核用 `joinInstalled().installed` 量化：0/1431 全落空）。
+       正确修法是**按 owner 对别名**（`@owner/name` 只在目录里确有 owner 对该仓库时成立，
+       `@unknownorg/name` 仍不匹配）。同一轮里还修了两处哨兵误伤：
+       ① 同一仓库的**多个子插件**（`name` 形如 `repo#sub`，真实 50 个仓库、463 条带 `#`）被误判成
+       「重名歧义」而全部不显示已安装——现在 `owner/repo`、`@owner/repo` 是**共享键**（命中多条都算），
+       只有**不同 owner** 争用裸仓库名时才判歧义；
+       ② 条目 `name` 里的 `#子目录` 后缀没剥掉，导致 `@owner/repo` 对不上。
+  5. **内容校验收紧了但要给手工源留活路**：1% 容差对 `count=10/实际 13` 这类手工
+     `DSHM_REGISTRY_URL` 目录过严（整源被拒），改成小目录（≤100）给 5 条余量、大目录按 2%。
+  6. **`unverified` 去重**：多个源报同一个版本时诊断文案里出现「1.1.6、1.1.6」。
+  7. **注释的论证站不住**：重启端点「先排退出再写响应」这个**顺序是对的**（防御性），但我原先写的
+     因果链（「响应写失败 → 异常被吞 → 退出永不安排」）经实测**缺少证据**——对已 destroy 的 socket
+     写并不抛错，只有对已 end 过的 res 才会同步抛 `ERR_STREAM_WRITE_AFTER_END`。注释已改成诚实版本。
+  本轮同时把两条**只 grep 源码形状**的断言换成了真调 handler 读响应体的**行为测试**
+  （`sendChangeResult` 六种 application/error 组合），因为形状断言换个等价写法就会假红/假绿。
+  `host-contract.test.mjs` 16/16、`catalog-identity.test.mjs` **36/36**、`client-copy.test.mjs`
+  **30/30**、`self-update.test.mjs` 43/43、门禁与 e2e **64/64** 全绿。
+
+
 - **三个页签页面统一间距与高度，新增页面只改一处注册表**（用户报：发现 / 已安装 / 可更新
   三个页面「高度不对齐」，并要求「设计成统一的，方便后续添加页面」）：根因是三页各写各的
   外壳——发现页是「工具条 + 分类 + 汇总 + 网格」，已安装页是「汇总 + 行列表」，

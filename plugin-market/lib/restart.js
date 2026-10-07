@@ -118,20 +118,23 @@ export function spawnRestartHelper(options = {}) {
   }
   try {
     const child = built.spawnImpl(built.command.file, built.command.args, built.command.options)
+    // 'error' 监听必须在任何提早 return **之前**挂上：spawn 失败（如 ENOENT、可执行文件被
+    // 自更新换掉）是**异步**事件，child.pid 只是 undefined，spawn 本身不抛错。早先这里先
+    // 判 pid<=0 再挂监听，那条路径会把一个没人处理的 'error' 事件留在 EventEmitter 上，
+    // Node 直接以未捕获异常终止宿主——用户看到 500 之后进程就没了。
+    if (child && typeof child.on === 'function') {
+      child.on('error', (error) => {
+        console.error('[deepseek-harness-market] 重启助手异常：', error)
+      })
+    }
     const pid = child && typeof child.pid === 'number' ? child.pid : 0
     if (pid <= 0) {
+      if (child && typeof child.unref === 'function') child.unref()
       return {
         ok: false,
         message: '重启助手没能启动。',
         hint: '看宿主日志里 deepseek-harness-market 的记录；仍不行就手动重启 DSH。'
       }
-    }
-    if (typeof child.on === 'function') {
-      // spawn 的 ENOENT 等错误是异步事件：这里只记日志——响应已经按成功路径走了，
-      // 真正的兜底是客户端的有界等待（等不到宿主回来就如实提示手动重启）。
-      child.on('error', (error) => {
-        console.error('[deepseek-harness-market] 重启助手异常：', error)
-      })
     }
     if (typeof child.unref === 'function') child.unref()
     state.requested = true

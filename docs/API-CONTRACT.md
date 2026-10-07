@@ -103,10 +103,27 @@ Query 参数（全部可选，未知参数忽略）：
 ```
 
 - `id` = `owner/name`（目录内唯一）。`spec` 优先级：`npm` → `url`（git 仓库地址）→ `null`；`spec` 为 `null` 时 `installable=false`。
-- `installed` 依据宿主 `pluginManager.listBundles()` 的 `name` 与 `npm` 字段匹配（大小写不敏感；npm 为空时用仓库地址尾段匹配）。
+- `installed` 依据宿主 `pluginManager.listBundles()` 的 `name` 匹配，**按身份可信度分层**（v1.1.6）：
+  1. **npm 名**（含 scope，大小写不敏感）——权威身份；
+  2. **仓库身份** `owner/repo` 与 `@owner/repo`（`repo` 取**仓库名**：`/<owner>/<repo>/…` 的前两段，
+     不是 URL 最后一段——后者会让 monorepo 子目录地址退化成 `dsh`/`bundle` 这类通用词，
+     实测 4412 条里 471 条带 `/tree/…`、435 条最后一段不等于仓库名）。这两个键是**共享**的：
+     同一仓库的多个子插件（`name` 形如 `repo#sub`，真实目录 50 个仓库有 2 条以上）装了该仓库就一起认回；
+     `@owner/repo` 同时覆盖「从 git 地址安装、package.json 带 scope」的合法场景（1431 条）。
+  3. **裸仓库名**——只在**同一个仓库**的多条之间共享；不同 owner 争用同名时判歧义、不匹配。
+  **不再把 `@scope/name` 剥掉 scope 去查**：那会让目录里不存在的 `@随便/<name>` 命中同名的另一个包
+  （假「已安装/可更新」，点更新还会装成别的包）。差别在 **owner 要不要对上**。
 - `updateAvailable`：**仅当目录版本严格高于已安装版本**时为 `true`（`compareVersions(catalogVersion, installedVersion) > 0`）；版本相同、目录版本更低、任一侧缺失或不可比较 → `false`。`latest` 始终是目录里的当前版本（可低于已装版本），UI 不得据此渲染「更新」按钮。
+- `page`：请求值超出末页时**收敛到末页**（v1.1.6），响应额外带 `page.requestedPage` 反映原始请求值；`total` 始终是筛选后的真实条数，`pages = max(1, ceil(total/pageSize))`。
 - `categories` 只包含目录里存在且计数 >0 的分类，按 `count` 降序。
+- `query` 匹配 `id`/`name`/`owner`/`npm`/描述/能力，以及**地址形状**的词才参与匹配的 `url`
+  （粘贴 `https://github.com/owner/repo` 能精确命中；搜 `github` 这类通用词不会因为每条都有
+  github 地址就返回全量）。空白分隔的多个词是「与」语义，按字段归一化（小写 + NFKD 去变音符号，
+  `jose` 能搜到 `José`）。
+- `sort` 是**全序**：四种排序都在末尾用 `id` 兜底，保证同样的数据得到同样的分页（否则完全并列的条目由输入顺序决定先后，一次刷新就可能换页位）。
 - 目录缓存 10 分钟；过期后刷新失败时返回上次缓存并置 `stale: true`；完全无缓存时 `502 catalog-unavailable`。
+  `stale:true` 时 `catalog.error` 是**字符串错误码**（如 `catalog-timeout`），**`/catalog` 与 `/status`
+  都带这个字段**——客户端就靠它显示过期原因，缺了横幅只会写「原因未知」。
 
 ### 2.3 `GET /plugin-market/installed`
 
@@ -163,11 +180,16 @@ Query 参数（全部可选，未知参数忽略）：
 ```
 
 - `application` ∈ `applied | restart-required | overridden | failed | cancelled`（原样透传）。
-- `error` 非空时为 `{ "code": string, "message": string, "diagnostic"?: string, "incompatible"?: unknown }`；`ok` 与 `error` 一致：`error != null` ⇒ `ok=false`。
+- `error` 非空时为 `{ "code": string, "message": string, "diagnostic"?: string, "incompatible"?: unknown }`；`ok` 与 `error` 一致：`error != null` ⇒ `ok=false`。**另（v1.1.6）**：
+  - `application === 'failed'` ⇒ `ok=false`，即使宿主没带 `error`（`ChangeResult.error` 是可选的）；
+  - `application === 'cancelled'` ⇒ **恒为** `ok=true`（即使宿主同时带了一个说明原因的 `error`）：
+    客户端要按 `application` 渲染「已取消」，`ok=false` 会让它直接抛错、那条文案永远不可达。
+- 按 `name` 安装时（`{name}` 或 `{spec}` 均未给出唯一身份），若该 `name` 在目录里对应**多个条目**，返回 `400 bad-request` 并说明「市场不猜」——真实目录 195 个重名（`dsh-memory` 对应 10 条 5 个不同 spec），原先「第一个匹配就装」会装上别人的包。调用方应改用 `id`（`owner/name`）或 `spec`。
 - `pendingBuilds`：来自 `ChangeResult.pendingBuilds`；非空表示需要用户批准构建脚本后带着 `approvedBuilds` 重新提交。
 - `output`：`packageResult.output` 截断到末尾 2000 字符（可选）。
 - 宿主缺 `pluginManager` ⇒ `502 manager-unavailable`。
 - 安装进行中重复提交同名 spec：透传宿主的 `changed:false` 与 `error.code='operation-error'`。
+- 错误响应的 `diagnostic`：`sendError` 会**透传** `overrides.diagnostic`（v1.1.6 修——此前只写 message/hint，§2.8 的 diagnostic 永远不会出现在响应里）。
 
 ### 2.5 `POST /plugin-market/remove`
 
@@ -231,6 +253,15 @@ Query 参数（全部可选，未知参数忽略）：
   （下一个补丁 / 下一个次版本 / 下一个主版本），命中即说明确实有新版本，且那一版的清单就在同一标签里。
   最多 3 次请求，失败当没有。
 - 三个源都失败 ⇒ `502 self-update-unavailable`，`diagnostic` 里按顺序列出每个源（含探测）各自的失败原因。
+- **本机版本必须可解析**（v1.1.6）：`current` 不是严格三段数字（如合法 npm 预发布号 `1.1.5-rc.1`）时
+  如实返回 `self-update-unavailable`，**不得**把「无法比较」当成「已是最新」。`isNewer` 因此返回
+  `true | false | null`（null = 无法比较），调用方必须显式区分。
+- **「知道有新版但验不了」也必须报不可用**（v1.1.6）：某个源给出了更高的版本号却拿不到那一版的清单
+  （附件缺 `digest` → 回落到 v1.1.6 起已下线的 `releases/index.json`）时，手里那份更旧的候选
+  **不得**把结果盖成「已是最新」；此时返回 `self-update-unavailable` 并说明是哪个版本验不了。
+  这条与上一条共同保证首页/面板**绝不谎称「已是最新」**。
+- 标签名过 `isUsableTag` 校验（含孤立代理项的标签会被换成规范的 `v<version>`）：`\S+` 能放行
+  孤立代理项，但它在 `encodeURIComponent` 里会抛 `URIError`，从单源坏数据变成 500 internal。
 - `tarball` 也一并返回：下载时会用它构造另外两条路的地址（见 §2.9）。
 
 ### 2.9 `POST /plugin-market/self-update`
@@ -245,8 +276,10 @@ Query 参数（全部可选，未知参数忽略）：
 - 已是最新时返回 `{ "ok": true, "application": "up-to-date", … }`，**不下载、不调用安装**。
 - 失败码（都是 `502`，语义不同，客户端分开说明）：
   - `self-update-integrity`：长度、`sha256` 或产物自证不符 ⇒ **拒绝安装**，重试也不该放过；
-  - `self-update-download`：CDN 传输中断/超时；
-  - `self-update-unavailable`：拿不到可用产物或版本号；
+  - `self-update-download`：CDN 传输中断/超时，**以及写盘失败**（v1.1.6 起 `mkdir`/`writeFile`/`rename`
+    的文件系统错误都归到这里；此前是裸 `await`，会从路由冒出去变成 `500 internal`，客户端这条
+    专用文案永远用不上）；失败时删掉写了一半的 `.part`，不留半截文件；
+  - `self-update-unavailable`：拿不到可用产物或版本号，**或本机版本不可解析**；
   - `manager-unavailable`：宿主没有 `pluginManager`。
 
 **信任链（三道，缺一不可）**：① 条目里的 tarball 必须是 `releases/*.tgz` 形状的相对路径（写别的 URL 一律不采信；v1.1.6 起条目由 GitHub 附件元数据组装，路径形状仍是同一约定）；② 字节的 `sha256` 必须与清单一致（清单 = 老路的 `index.json`，或 GitHub 附件的 `digest`）；③ 解开 tarball 读 `package/package.json`，包名与版本必须与预期一致。
@@ -273,6 +306,13 @@ Query 参数（全部可选，未知参数忽略）：
   4. 拉起前删除 `ELECTRON_RUN_AS_NODE`（否则桌面端会以 node 模式黑窗启动），且子进程必须 `detached`——Windows 上非 detached 的子进程会随创建者退出一起被带走（本仓库 `verify/restart-helper.test.mjs` 的探针实测：detached 活、非 detached 灭）。
 - 客户端契约：探活必须先观察到 `/status` **失败一次**（证明旧进程死了），之后恢复成功才 `location.reload()`——没有这道闸，旧进程还没退出时的 200 会被误判成新进程。60s 等不到就如实提示手动刷新，不假装成功。
 - 失败：`500 restart-failed`（助手没起来，宿主**没有**退出，可以原地重试）。
+- **顺序要求（v1.1.6）**：`setTimeout(process.exit)` 必须排在 `sendJson` **之前**。响应写失败
+  （客户端切走、代理断开、socket 关闭）时 `sendJson` 抛错并被外层 handler 吞掉，若退出还没安排，
+  而 `restart.js` 已置 `requested`，之后每次点击都回 `already:true` 并跳过安排——
+  **「重启 DSH」在该进程的余生里永久失效**。
+- 助手 spawn 后必须**立刻**挂 `child.on('error')`，且在任何提早 `return` 之前：spawn 失败
+  （ENOENT，如可执行文件被自更新换掉）是**异步**事件、`child.pid` 只是 `undefined`、spawn 本身
+  不抛错；未处理的 `'error'` 会直接终止宿主进程（用户看到 500 之后进程就没了）。
 - 如实的代价：正在流式输出的回复会被截断；重启后的进程由 detached 方式拉起，**终端 Ctrl+C 打不到它**（结束它用 DSH 自己的退出方式或 `taskkill`）。两条都写在按钮 tooltip 与 `docs/RELEASING.md` §5 里。
 
 ## 3. 目录抓取策略（host）
@@ -287,7 +327,11 @@ Query 参数（全部可选，未知参数忽略）：
 单个源的做法：
 
 - **URL 源**：`GET <url>`，超时 30s，校验响应必须是 JSON 对象、`plugins` 为数组、`count` 为数字；拒绝 HTML（含 `<html`）或非 JSON 正文。
-- **npm 源**：`GET <registry>/dsh-plugin-catalog/latest`（15s）→ 读 `version` / `dist.tarball` / `dist.integrity`；`GET dist.tarball`（30s）→ gzip 字节；`dist.integrity` 存在时用 `node:crypto` 校验（`sha512-`/`sha256-` + base64），不匹配即该源失败；`node:zlib` 解压后用最小 USTAR 解析取出包内 `package/plugins.json`，再做同样的 JSON 结构校验。
+- **npm 源**：`GET <registry>/dsh-plugin-catalog/latest`（15s）→ 读 `version` / `dist.tarball` / `dist.integrity`；`GET dist.tarball`（30s）→ gzip 字节；`dist.integrity` **必填**（v1.1.6 起）——元数据本身也来自网络，只信「元数据说没问题」等于没校验，缺字段即整源失败并退到下一个源；不匹配即该源失败。`node:zlib` 解压后用最小 USTAR 解析取出包内 `package/plugins.json`，**`trimStart()` 后再 `JSON.parse`**（包内文件可能带 UTF-8 BOM；URL 那条路走 `response.text()` 已被 fetch 规范自动剥掉，只有这里需要显式处理），再做同样的 JSON 结构校验。
+- **内容校验交叉核对条数**（v1.1.6）：除「对象 + `plugins` 数组 + `count` 数字」外，还要求
+  `plugins.length` 与 `count` 相差不超过 1%（`count>0` 而 `plugins` 为空一律拒绝）。
+  否则结构合法但被截断/清空的正文会以 `stale:false` 覆盖好缓存——市场整个变空、分类消失，
+  且不显示过期横幅，看起来像「真的一共 0 个插件」。
 - 全部源都失败：无缓存 → `502 catalog-unavailable`（超时导致时 `504 catalog-timeout`），文案说明尝试过哪些源，以及可以设 `DSHM_REGISTRY_URL` / `DSHM_NPM_MIRROR`；有缓存 → 200 + `stale: true`。
 
 其它：
@@ -375,6 +419,17 @@ window.__ModuleLoader__.load({
   - 已安装页：bundle 行（名称、版本、启用开关、卸载按钮、有更新时「更新到 x.y.z」）。
   - 可更新页：与已安装页同一份 `/installed` 数据，只显示 `updateAvailable === true` 的条目；空态区分「全部都是最新」与「目录还没就绪」；页脚不再有独立按钮（「重新检查」已并入页头的状态机按钮）。三个页签互相切换时另一侧的内容卸载（同一时间只有一份在 DOM 里）。
   - 状态：加载中（骨架/转圈）、空结果（说明 + 建议）、失败（原因 + 重试 + 现在怎么办）、目录过期提示。
+  - **错误归类（v1.1.6）**：正文不是市场约定的 JSON 时（反向代理 / 运营商劫持 / 登录页，
+    常见于 HTTP 200 却返回 HTML），错误码取 `badResponse` 而**不是** `internal`——后者的三段文案
+    是「宿主内部出错 / 看宿主日志」，与真实原因（被代理拦了）对不上，而 `err.badResponse.*`
+    此前没有任何地方产生、成了死文案。4xx/5xx 仍按状态码归类。
+  - **目录过期横幅的原因（v1.1.6）**：`catalog.error` 在 `/status` 里是**字符串错误码**、
+    在 `/catalog` 里**不存在**，客户端两个形态都要认；认不出的码原样显示（`原因未知` 会让人
+    没法判断是网络、限流还是源站挂了）。
+  - **忙碌态按作业 key 归位（v1.1.6）**：每个写操作登记自己的 key（`install:<包名>` / `remove:` /
+    `toggle:` / `refresh` / `self-update`），结束时**只清自己那把**。同一时刻同 key 的重复提交
+    被直接吞掉（守卫读 ref 而非 state，否则同一批事件里连点两次会失效）。这样并发操作不会
+    互相清空忙碌态（原先 `setJob(null)` 会让仍在进行的操作显示空闲 → 用户再点一次就是重复安装）。
   - 安装/卸载/开关：按钮进入进行中态（禁用 + 文案变化），完成后刷新列表并给出结果提示；失败显示 `error.message` 与 `hint`。
   - `pendingBuilds` 非空时展示「这个插件要执行构建脚本」确认条，用户确认后带 `approvedBuilds` 重新提交。
 - 文案 zh/en 双语，跟随宿主语言，不写死中文。
@@ -402,10 +457,12 @@ window.__ModuleLoader__.load({
 6. `POST /plugin-market/install` 用目录外 spec 返回 400 `not-in-catalog`。
 7. 卸载自身返回 400 `not-allowed`。
 8. 目录缓存：连续两次 `GET /catalog` 第二次 `fetchedAt` 不变；`POST /refresh` 后变化。
-9. **自更新通道**（`verify/self-update.test.mjs` 32 条离线 + `verify/self-update-live.ps1` 真实端到端）：
+9. **自更新通道**（`verify/self-update.test.mjs` 43 条离线 + `verify/self-update-live.ps1` 真实端到端）：
    - `GET /plugin-market/self-update` 返回 `ok:true`，`latest` 等于仓库最新标签，`current === latest` 时 `updateAvailable:false`；
    - **一个源半残不能拖垮整次检查**：标签列表只给到旧版本、那个旧标签的清单 404 时，必须改用下一个源并成功；
    - 三个源全不通时 `502 self-update-unavailable` 且 `diagnostic` 列出三条失败原因；
+   - **本机版本不可解析（如 `1.1.5-rc.1`）⇒ `self-update-unavailable`，不是「已是最新」**；`isNewer` 对不可比较的版本返回 `null`；
+   - **源报了一个更高版本却拿不到它的清单 ⇒ 不得用更旧的候选盖成「已是最新」**（v1.1.6）；
    - 校验不过（sha256 / 长度 / 产物自证）时 `apply` **不调用** `pluginManager.installBundle`；
    - `index.json` 里写非 `releases/*.tgz` 的地址时拒绝且不下载；
    - **标签地址 404 时改用 main 分支的同一路径**；但拿到字节后哈希不符是硬失败，不换来源重试；
@@ -416,3 +473,24 @@ window.__ModuleLoader__.load({
 12. **文案与动效不变量**（`verify/client-copy.test.mjs`）：zh/en 键集完全一致；代码里用到的每个 `t("字面量键")` 都在两种语言里存在；没有僵尸文案键；被引用的 `@keyframes` 都有定义；没有任何升入动画用 `forwards`/`both`；顶部黑条进度条（`.dshpm-progress`）不存在；更新失败的 `EPERM`/拒绝访问必须被 `fileLockedDetail` 识别并切到 `err.file-locked.*`（三处接入：错误气泡、可更新行内、已安装行错误）；回执文案保持精简形态（`已刷新 {count} 个插件` 等）；「检查更新」合并状态机存在（`checkPhase`/`onCheckUpdates`/页脚 `drawerFoot` 已删、插件市场更新按钮同为 primary）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。
 13. **安装 spec 钉版本**（`verify/install-spec.test.mjs`）：`pinnedNpmSpec` 在装之前被调用、只认「spec === 目录里的裸 npm 名 + 版本像 semver」、钉出 `name@version`；行为上，`POST /install {name}` 与 `{spec:裸名}` 都让假 `installBundle` 收到 `dsh-context@0.63.0`，GitHub 条目的 spec 保持 URL 原样。
 14. **重启助手**（`verify/restart-helper.test.mjs`，离线、不碰真实 DSH）：启动规格必须 `detached` + `windowsHide` + `ELECTRON_RUN_AS_NODE=1`，helper 脚本缺失或参数不合法在 spawn 之前就拒绝；幂等（第二次请求回 `already` 且不再 spawn）；真助手两向——父 pid 已死则拉起且拉起前 env 里 `ELECTRON_RUN_AS_NODE` 已删（子进程必须 `detached` 才能在创建者退出后活着，Windows 实测），父 pid 活着则等满期限放弃、绝不拉起。客户端接线在第 12 条里盯：`POST /restart` 被真的调用、`restart-failed` 进错误码表、各写操作点亮横幅、探活「先见过死」才 `location.reload()`、60s 超时如实提示。
+15. **目录身份层与内容校验**（`verify/catalog-identity.test.mjs` 36 条，v1.1.6 新增）：
+    `repoTail` 取 `/<owner>/<repo>/…` 的**前两段**（不是 URL 最后一段——monorepo 子目录地址会
+    退化成 `dsh` 这类通用词；真实 4412 条逐条一致）；
+    目录里不存在的 `@scope/<name>` **不得**命中同名的另一个包（这条会装错包），
+    而 `@owner/<name>` 在 owner 对得上时**必须**命中（1431 条「从 git 安装」的现实形态）；
+    同一仓库的多个子插件（`name` 含 `#`）要全部认回，不同 owner 争用裸仓库名时判歧义不匹配；
+    npm 名精确匹配、仓库名兜底、大小写不敏感都要**照常命中**（修复不能误伤）；
+    `validateCatalogPayload` 拒绝「`count>0` 而 `plugins` 为空」与条数相差过大的截断数据，
+    同时放行真实快照与手工小目录；
+    搜 `github` 不再命中 4412/4412，而粘贴**完整仓库地址**仍要搜到（url 只对地址形状的词生效）、
+    多词是「与」、`jose` 能搜到 `José`；四种排序对正序/倒序输入结果一致且不改动入参数组；
+    `paginate` 超出末页收敛到末页。
+    真实快照（`_ref/data/plugins.json`）存在时额外跑规模复核；不存在也能单独通过。
+16. **host 契约回归**（`verify/host-contract.test.mjs` 16 条，v1.1.6 新增）：`sendError` 必须把
+    `overrides.diagnostic` 写进响应体（无则不凭空造字段）；`sendChangeResult` 的 `ok` 用**真调
+    handler 读响应体**的方式验六种 `application`/`error` 组合（`failed` ⇒ `false`；
+    **`cancelled` 恒为 `true`**，否则客户端抛错、文案不可达）；重名安装报歧义而非随便装一个；
+    `restart` 的 `process.exit` 安排**先于** `sendJson`（源码顺序）；`restart.js` 的
+    `child.on('error')` 先于 `pid<=0` 的提早返回、且该路径不置 `requested`；宿主的
+    `MANAGEMENT_MESSAGE/HINT` 是 `Map`（原型键不能穿过去）；`/catalog` 带 `error` 字段、
+    `page` 带 `requestedPage`；`/self-update` 仍是单条 `['GET','POST']` 登记。

@@ -256,6 +256,7 @@ window.__ModuleLoader__.load({
         "notice.updateAllStart": "开始更新 {count} 个插件…",
         "notice.updateAllDone": "更新完成：成功 {ok}、失败 {fail}。",
         "notice.updateAllNone": "没有需要更新的插件。",
+        "notice.installBusy": "{name} 正在装/更新，已跳过。",
         "notice.updatesNone": "全部都是最新版本。",
         "notice.selfFound": "插件市场有新版本 v{version}：点「更新到 {version}」安装。",
         "notice.selfCurrent": "插件市场已是最新（v{version}）。",
@@ -508,6 +509,7 @@ window.__ModuleLoader__.load({
         "notice.updateAllStart": "Updating {count} plugins…",
         "notice.updateAllDone": "Done: {ok} succeeded, {fail} failed.",
         "notice.updateAllNone": "Nothing to update.",
+        "notice.installBusy": "{name} is already installing/updating; skipped.",
         "notice.updatesNone": "All plugins are up to date.",
         "notice.selfFound": "Plugin market v{version} is available: click “Update to {version}”.",
         "notice.selfCurrent": "The plugin market is up to date (v{version}).",
@@ -664,6 +666,19 @@ window.__ModuleLoader__.load({
       return "internal";
     }
 
+    /**
+     * 「正文不是市场约定的 JSON」用哪个错误码。
+     *
+     * 不能直接复用 codeForStatus：HTTP 200 加上一段 HTML 正文（反向代理、运营商劫持、
+     * 登录页）在 codeForStatus 里落到 `internal`，于是错误块说「宿主内部出错 / 看宿主日志」——
+     * 明明是被代理拦了。`err.badResponse.*` 三段文案就是为这种情况写的（「可能被代理或
+     * 旧版本宿主拦截」），早先却没有任何地方产生 `badResponse` 这个码，成了死文案。
+     */
+    function codeForBadBody(status) {
+      if (status >= 400) return codeForStatus(status);
+      return "badResponse";
+    }
+
     function appendParam(parts, key, value) {
       if (value === undefined || value === null || value === "") return;
       parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(value)));
@@ -696,7 +711,7 @@ window.__ModuleLoader__.load({
             }
           }
           if (!payload || typeof payload !== "object") {
-            var shapeCode = codeForStatus(response.status);
+            var shapeCode = codeForBadBody(response.status);
             throw marketError(
               shapeCode,
               t("err.badResponse.title"),
@@ -814,7 +829,28 @@ window.__ModuleLoader__.load({
       return "";
     }
 
-    function errorCopy(error) {
+    /** 目录过期横幅里的「原因」：服务端给的可能是错误码字符串、错误对象或什么都没有。 */
+function staleReason(staleSource) {
+  var raw = staleSource && staleSource.error;
+  if (typeof raw === "string" && raw !== "") return codeLabel(raw);
+  if (raw && typeof raw === "object") {
+    var text = raw.message || raw.code;
+    if (text) return codeLabel(String(text));
+  }
+  return t("catalog.stale.noReason");
+}
+
+/**
+ * 把服务端错误码翻成人类能读的一句（拿不到专属文案就原样显示错误码——
+ * 「原因未知」会让人没法判断是网络、限流还是源站挂了，宁可显示 `catalog-timeout`）。
+ */
+function codeLabel(code) {
+  var key = "err." + code + ".title";
+  var label = t(key);
+  return label === key ? code : label + "（" + code + "）";
+}
+
+function errorCopy(error) {
       var code = error && error.code ? String(error.code) : "unknown";
       var known = !!ERROR_PREFIXES[code];
       var locked = fileLockedDetail(error);
@@ -824,7 +860,9 @@ window.__ModuleLoader__.load({
       var copy = {
         code: code,
         title: t(prefix + ".title", { status: status }),
-        why: t(prefix + ".why"),
+        // why 也要传 vars：`err.badResponse.why` 里有 {status} 占位符，不传就会把
+        // 「HTTP {status}」这段字面量原样渲染给用户。
+        why: t(prefix + ".why", { status: status }),
         next: t(prefix + ".next"),
         message: locked || message,
         hint: error && error.hint ? String(error.hint) : ""
@@ -1980,7 +2018,10 @@ window.__ModuleLoader__.load({
               ? el("button", {
                 type: "button",
                 className: "dshpm-btn",
-                disabled: locked || props.busy,
+                // batchRunning：一键更新正在顺序跑时，已安装页这一颗也要禁用。
+                // 与「可更新」页的行内按钮一致——否则用户能从这一页插进同一个包的更新，
+                // 让批量那一步撞上「同一个包正在装」的守卫（现在守卫会跳过并继续，但不该让用户走到那儿）。
+                disabled: locked || props.busy || props.batchRunning,
                 title: hostReason || (props.readOnly ? t("readonly.body") : ""),
                 onClick: props.onUpdate
               }, props.busyKind === "update" ? el(IconSpinner, { size: 12 }) : null,
@@ -2080,6 +2121,7 @@ window.__ModuleLoader__.load({
             readOnly: props.readOnly,
             busy: props.busyKey === "remove:" + key || props.busyKey === "toggle:" + key || props.busyKey === "install:" + key,
             busyKind: props.busyKey === "remove:" + key ? "remove" : props.busyKey === "install:" + key ? "update" : null,
+            batchRunning: props.batchRunning === true,
             entryBusyKey: props.busyKey,
             onToggle: function () { props.onToggleBundle(bundle); },
             onUpdate: function () { props.onUpdateBundle(bundle); },
@@ -2484,6 +2526,8 @@ window.__ModuleLoader__.load({
       var mountedRef = React.useRef(true);
       var registryRef = React.useRef({});
       var tokenRef = React.useRef(0);
+      // 在跑作业的 key 集合（同步可见）：守卫重复点击时不能读 state，见 jobRunning。
+      var jobKeysRef = React.useRef({});
 
       function startRequest(key) {
         var previous = registryRef.current[key];
@@ -2678,11 +2722,34 @@ window.__ModuleLoader__.load({
       }
 
       function startJob(next) {
+        if (next && typeof next.key === "string") jobKeysRef.current[next.key] = true;
         setJob(next);
       }
 
-      function clearJob() {
-        setJob(null);
+      /**
+       * 结束一个作业：**只清掉自己的那把 key**。
+       *
+       * 早先无条件 `setJob(null)`：装 A 的同时点装 B 会先把 job 覆盖成 B，A 完成时把
+       * job 清空 → B 还在跑，界面却显示空闲（卡片按钮解除禁用、spinner 消失），
+       * 用户以为没事了又点一次，就发起了重复安装。现在按 key 归位：谁结束谁清自己，
+       * 别的作业的忙碌态不受影响。
+       */
+      function clearJob(key) {
+        if (key !== undefined) jobKeysRef.current[key] = false;
+        else jobKeysRef.current = {};
+        setJob(function (previous) {
+          if (!previous) return previous;
+          if (key !== undefined && previous.key !== key) return previous;
+          return null;
+        });
+      }
+
+      /**
+       * 该 key 是否正在跑。读的是 **ref** 而不是 `job` state：同一批事件里连点两次时
+       * `job` 还是渲染时的旧值，守卫会失效——ref 是同步的，第二次点击当场就能看见第一次的登记。
+       */
+      function jobRunning(key) {
+        return jobKeysRef.current[key] === true;
       }
 
       // 搜索：输入即时入 state，300ms 防抖后提交；回车立即可提交。
@@ -2727,13 +2794,24 @@ window.__ModuleLoader__.load({
         var report = function (outcome) {
           if (typeof onDone === "function") onDone(outcome);
         };
+        // 同一个包已经在装/更新时吞掉重复点击：卡片与已安装行各有一套「更新到 x.y.z」入口，
+        // 两处同时点（或批量跑到一半又手动点同一条）会各自发一次安装请求。
+        // 宿主对同一个包并发安装没有幂等保证，这里先挡一层。
+        //
+        // **必须回调 report 再返回**：一键更新的顺序执行靠 onDone 推进下一步，
+        // 静默 return 会让那个包既不装、也不回调 → step() 再也无人调用、batch 永远停在
+        // running，批量按钮被自己的守卫挡住，整个会话内「一键更新」彻底失效。
+        if (jobRunning(jobKey)) {
+          report({ ok: false, text: t("notice.installBusy", { name: label }), skipped: true });
+          return;
+        }
         startJob({ key: jobKey, kind: target.kind || "install" });
         var body = { name: requestName, requestId: newRequestId() };
         if (target.spec) body.spec = target.spec;
         if (approvedBuilds && approvedBuilds.length) body.approvedBuilds = approvedBuilds;
         api.install(body).then(function (payload) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(jobKey);
           if (payload.pendingBuilds && payload.pendingBuilds.length) {
             if (approvedBuilds && approvedBuilds.length) {
               var stillText = t("notice.buildsStillPending", { builds: payload.pendingBuilds.join(", ") });
@@ -2758,7 +2836,7 @@ window.__ModuleLoader__.load({
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(jobKey);
           if (!silent) setNotice({ kind: "error", error: error });
           // 被占用的失败给一句能照做的短话（行内放不下三段式），而不是宿主的通用句。
           report({ ok: false, text: fileLockedDetail(error) ? t("err.file-locked.row") : (error && error.message ? String(error.message) : t("updates.failed", { name: label })) });
@@ -2822,7 +2900,11 @@ window.__ModuleLoader__.load({
           updateBundle(bundle, true, function (outcome) {
             if (!mountedRef.current) return;
             done++;
-            if (outcome && outcome.ok) ok++; else fail++;
+            // skipped = 那个包本来就在装/更新（守卫挡住），既不是成功也不是失败：
+            // 不计数，但要继续推进——否则 step() 断在那一刻，batch 永远 running。
+            if (!(outcome && outcome.skipped)) {
+              if (outcome && outcome.ok) ok++; else fail++;
+            }
             setBatch({ running: true, total: targets.length, done: done, ok: ok, fail: fail });
             if (outcome && outcome.pending) { finish(outcome.text); return; }
             step();
@@ -2844,14 +2926,14 @@ window.__ModuleLoader__.load({
         startJob({ key: key, kind: "remove" });
         api.remove(bundle.name).then(function (payload) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           setConfirming(null);
           setNotice(noticeFromResult(payload, "remove", bundle.name));
           noteRestartFrom(payload);
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           setNotice({ kind: "error", error: error });
         });
       }
@@ -2862,7 +2944,7 @@ window.__ModuleLoader__.load({
         startJob({ key: key, kind: "toggle" });
         api.toggle({ name: bundle.name, enabled: next }).then(function (payload) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           noteRestartFrom(payload);
           setNotice({
             kind: payload && payload.error ? "error" : "success",
@@ -2871,7 +2953,7 @@ window.__ModuleLoader__.load({
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           setNotice({ kind: "error", error: error });
         });
       }
@@ -2884,13 +2966,13 @@ window.__ModuleLoader__.load({
         startJob({ key: key, kind: "toggle" });
         api.toggle({ id: id, enabled: next }).then(function (payload) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           noteRestartFrom(payload);
           setNotice({ kind: "success", text: next ? t("notice.toggleEnabled", { name: id }) : t("notice.toggleDisabled", { name: id }) });
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob(key);
           setNotice({ kind: "error", error: error });
         });
       }
@@ -2900,7 +2982,7 @@ window.__ModuleLoader__.load({
         startJob({ key: "refresh", kind: "refresh" });
         api.refresh(bag.signal).then(function (payload) {
           if (!isCurrent("refresh", bag.token)) return;
-          clearJob();
+          clearJob("refresh");
           setNotice({ kind: "success", text: t("notice.refreshOk", { count: formatCount(payload.count || 0) }) });
           // 刷新目录改变了目录内容：重抓目录，同时重读已安装（updateAvailable 依赖目录 join）。
           bumpCatalog();
@@ -2908,7 +2990,7 @@ window.__ModuleLoader__.load({
         }).catch(function (error) {
           if (error && error.aborted) return;
           if (!isCurrent("refresh", bag.token)) return;
-          clearJob();
+          clearJob("refresh");
           setNotice({ kind: "error", error: error });
           // 刷新失败也要重读，这样目录的 stale 提示会立刻反映当前缓存状态。
           bumpCatalog();
@@ -2949,7 +3031,7 @@ window.__ModuleLoader__.load({
         setSelfCheck({ phase: "installing", data: selfUpdate.data, error: null });
         api.applySelfUpdate().then(function (payload) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob("self-update");
           var to = payload && payload.to ? payload.to : null;
           // 装完先亮「更新成功」（SELF_DONE_MS 后回 idle），重启前不谎称新代码已生效。
           markSelfDone();
@@ -2957,7 +3039,7 @@ window.__ModuleLoader__.load({
           setNotice({ kind: "success", text: to ? t("notice.selfUpdated", { version: to }) : t("notice.selfCurrent", { version: target }) });
         }).catch(function (error) {
           if (!mountedRef.current) return;
-          clearJob();
+          clearJob("self-update");
           setSelfCheck({ phase: "error", data: null, error: error });
           setNotice({ kind: "error", error: error });
         });
@@ -3034,9 +3116,11 @@ window.__ModuleLoader__.load({
       var staleInfo = staleSource && staleSource.stale === true
         ? {
           updated: staleSource.updated || "?",
-          reason: staleSource.error && (staleSource.error.message || staleSource.error.code)
-            ? (staleSource.error.message || staleSource.error.code)
-            : t("catalog.stale.noReason")
+          // 服务端两种形态：/status 的 catalog.error 是**字符串错误码**（catalog.js 里置的
+          // `current.error = result.code`），/catalog 的 catalog 对象根本不带 error。
+          // 早先只按对象读 error.message/.code，于是「目录过期」横幅的原因**永远**是
+          // 「原因未知」——真实原因拿不到，用户没法判断是网络、限流还是源站挂了。
+          reason: staleReason(staleSource)
         }
         : null;
       var refreshing = !!job && job.kind === "refresh";
@@ -3117,6 +3201,8 @@ window.__ModuleLoader__.load({
             confirming: confirming,
             readOnly: readOnly,
             busyKey: busyKey,
+            // 一键更新在跑时禁止从这一页插更新（与「可更新」页行内按钮口径一致）。
+            batchRunning: !!(batch && batch.running),
             onDiscover: function () { setTab("discover"); },
             onToggleBundle: toggleBundle,
             onUpdateBundle: updateBundle,

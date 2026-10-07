@@ -96,6 +96,20 @@ check('isNewer 只在严格更高时为真', () => {
   assert.equal(isNewer('1.0.0', '1.0.0'), false)
   assert.equal(isNewer('0.9.9', '1.0.0'), false)
 })
+check('isNewer 对不可比较的版本返回 null，不折叠成「没有更新」', () => {
+  // 错过的样子：`compareVersions(...) === 1` 把 null 压成 false，于是本机是合法 npm 预发布号
+  // （`1.1.5-rc.1`）时，check() 报 updateAvailable:false、apply() 回
+  // `{ok:true, application:'up-to-date'}` —— 把「无法比较」谎称成「已是最新」。
+  assert.equal(isNewer('1.1.6', '1.1.5-rc.1'), null)
+  assert.equal(isNewer('1.1.6', '1.1.5+build.7'), null)
+  assert.equal(isNewer('1.1.6', 'garbage'), null)
+})
+checkAsync('本机版本不可解析时 check 如实报通道不可用（不是「已是最新」）', async () => {
+  const updater = createSelfUpdater({ current: '1.1.5-rc.1', fetch: async () => ({ ok: true, status: 200, text: async () => '{}' }) })
+  const result = await updater.check()
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'self-update-unavailable')
+})
 check('pickLatestVersion 取最大且忽略垃圾项', () => {
   assert.equal(pickLatestVersion(['1.0.10', 'v1.0.2', 'bogus', '1.1.0', '1.0.9']), '1.1.0')
   assert.equal(pickLatestVersion(['bogus', '']), null)
@@ -227,8 +241,36 @@ await checkAsync('第一个源不可用时继续问下一个，且如实记下�
   assert.ok(result.attempts.some((attempt) => /503/.test(attempt.reason)), '镜像 503 也要留记录')
 })
 
-await checkAsync('第一个源就给出更高版本时早退出，不再问其余源', async () => {
+await checkAsync('源报了一个更高版本却拿不到它的清单时，不得用更旧的候选盖成「已是最新」', async () => {
+  // 真实场景（v1.1.6 起）：GitHub Release 附件缺 digest → 回落到该标签的 releases/index.json，
+  // 而这份清单自 v1.1.6 起已从仓库下线 → 404；同时 jsDelivr 只索引到旧版本。
+  // 修复前：best = 旧的 1.1.5，updateAvailable = false → 界面显示「插件市场已是最新（v1.1.5）」。
   const fetchImpl = fakeFetch([
+    ['api.github.com', jsonResponse({ tag_name: 'v1.1.6', assets: [{ name: 'deepseek-harness-market-1.1.6.tgz' }] })],
+    ['data.jsdelivr.com', jsonResponse({ versions: [{ version: '1.1.5' }] })],
+  ])
+  const updater = createSelfUpdater({ fetchImpl, current: '1.1.5', logger: { warn() {} } })
+  const result = await updater.check({ force: true })
+  assert.equal(result.ok, false, '不得报成功')
+  assert.equal(result.code, 'self-update-unavailable')
+  assert.match(result.message, /1\.1\.6/, '要说清是哪个版本验不了')
+  assert.notEqual(result.updateAvailable, false, 'updateAvailable 不得是 false（那是「已是最新」的谎）')
+})
+
+await checkAsync('正常的「有更新」路径不受影响（1.1.5 → 1.1.6）', async () => {
+  const fetchImpl = fakeFetch([
+    ['api.github.com', jsonResponse({ tag_name: 'v1.1.6', assets: [{ name: 'deepseek-harness-market-1.1.6.tgz' }] })],
+    ['data.jsdelivr.com', jsonResponse({ versions: [{ version: '1.1.5' }, { version: '1.1.6' }] })],
+    ['releases/index.json', jsonResponse(REPO_INDEX('1.1.6'))],
+  ])
+  const updater = createSelfUpdater({ fetchImpl, current: '1.1.5', logger: { warn() {} } })
+  const result = await updater.check({ force: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.updateAvailable, true, '必须有更新（这条与上一条共同保证「不谎称已是最新」的修复没有误伤正常路径）')
+  assert.equal(result.latest, '1.1.6')
+})
+
+await checkAsync('第一个源就给出更高版本时早退出，不再问其余源', async () => {  const fetchImpl = fakeFetch([
     ['api.github.com', jsonResponse({ tag_name: 'v1.1.0' })],
     ['releases/index.json', jsonResponse(REPO_INDEX('1.1.0'))],
     ['data.jsdelivr.com', jsonResponse({ versions: [{ version: '9.9.9' }] })],

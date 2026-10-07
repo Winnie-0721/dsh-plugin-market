@@ -33,7 +33,7 @@
 
 import { Buffer } from 'node:buffer'
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -82,9 +82,13 @@ export function compareVersions(a, b) {
   return 0
 }
 
-/** 只在候选严格高于当前时才算「有更新」：相同或更低都不提示。 */
+/** 只在候选严格高于当前时才算「有更新」：相同或更低都不提示。
+ *  任一版本不可解析时 `compareVersions` 返回 null——这里如实返回 null，**不折叠成 false**：
+ *  折叠会让「无法比较」看起来像「已是最新」，调用方必须区分这两件事。 */
 export function isNewer(candidate, current) {
-  return compareVersions(candidate, current) === 1
+  const compared = compareVersions(candidate, current)
+  if (compared === null) return null
+  return compared === 1
 }
 
 /** 从版本串列表里取最高的一个；全部不可解析时返回 null。 */
@@ -109,6 +113,17 @@ export function isSha256Hex(value) {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 }
 
+/**
+ * 标签名是否可用：`v?` + 非空白字符，且**必须是合法 UTF-16**（不含孤立代理项）。
+ * 孤立代理项（`\ud800`）能通过 `\S+`，却是 JSON 能携带的（外部 CDN 内容），
+ * 之后 `encodeURIComponent` 会抛 URIError——那会从 check() 冒出去变成 500 internal，
+ * 单源坏数据不该拖垮整次检查（其它失败路径都规规矩矩返回 { ok:false, reason }）。
+ */
+function isUsableTag(value) {
+  if (typeof value !== 'string' || !/^v?\S+$/.test(value)) return false
+  return !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)
+}
+
 /** 把一个 index.json 条目收敛成安装需要的字段；缺关键字段返回 null。 */
 export function normalizeEntry(raw) {
   if (raw === null || typeof raw !== 'object') return null
@@ -117,7 +132,7 @@ export function normalizeEntry(raw) {
   const tarball = isReleaseTarballPath(raw.tarball) ? raw.tarball : null
   return {
     version: String(raw.version).trim().replace(/^v/, ''),
-    tag: typeof raw.tag === 'string' && /^v?\S+$/.test(raw.tag) ? raw.tag : `v${String(raw.version).trim().replace(/^v/, '')}`,
+    tag: isUsableTag(raw.tag) ? raw.tag : `v${String(raw.version).trim().replace(/^v/, '')}`,
     versionCode: Number.isSafeInteger(raw.versionCode) ? raw.versionCode : null,
     build: typeof raw.build === 'string' ? raw.build : null,
     tarball,
@@ -364,6 +379,18 @@ export function createSelfUpdater(options = {}) {
     if (typeof fetchImpl !== 'function') {
       return { ok: false, code: 'self-update-unavailable', message: '当前运行环境没有 fetch。', attempts: [] }
     }
+    // 本机版本必须是严格三段数字（parseVersion 的约定）。预发布号（`1.1.5-rc.1`）或任何
+    // 不可解析的值**不能**被当成「已是最新」——那等于把「无法比较」说成「没有更新」，
+    // 而且 apply() 还会回一个 ok:true 的「up-to-date」。如实报通道不可用。
+    if (current !== null && parseVersion(current) === null) {
+      return {
+        ok: false,
+        code: 'self-update-unavailable',
+        message: `本机版本「${current}」不是严格的三段版本号，无法与本通道比较。`,
+        hint: '这条通道只比较 1.2.3 形式；请在终端用 dsh plugin add <Release 附件地址> 手动升级。',
+        attempts: []
+      }
+    }
 
     // 逐个源「完整地」试：源给出候选版本 **并且** 拿得到那一版的清单，才算这个源成功。
     // 早退出条件是「已经有一个明确高于当前版本的答案」——那种情况下不用再问别的源；
@@ -371,6 +398,11 @@ export function createSelfUpdater(options = {}) {
     // jsDelivr 的标签列表要过一阵才索引到新标签，而 @main 那份清单已经是新的）。
     const attempts = []
     const candidates = []
+    // 有的源**知道**存在某个更高的版本，却拿不到那一版的清单（附件缺 digest → 回落到
+    // 该标签的 releases/index.json，而 v1.1.6 起仓库里已没有这份清单）。
+    // 这种「知道有新版但验不了」必须让整次检查失败，绝不能让更旧的候选把它盖成「已是最新」。
+    // 用 Set 去重：多个源可能报同一个版本（实测 message 里出现过「1.1.6、1.1.6」）。
+    const unverified = new Set()
     for (const source of buildSources()) {
       const res = await source.read(fetchImpl)
       if (res.ok !== true) {
@@ -382,11 +414,12 @@ export function createSelfUpdater(options = {}) {
         : await entryForTag(fetchImpl, res.tag, res.version, null)
       if (resolved.ok !== true) {
         attempts.push({ id: `${source.id}:index`, label: `${source.label} → ${res.tag} 的 releases/index.json`, ok: false, reason: resolved.reason })
+        if (typeof res.version === 'string' && res.version !== '') unverified.add(res.version)
         continue
       }
       attempts.push({ id: source.id, label: source.label, ok: true, reason: `v${resolved.entry.version}` })
       candidates.push({ source, entry: resolved.entry })
-      if (current !== null && isNewer(resolved.entry.version, current)) break
+      if (current !== null && isNewer(resolved.entry.version, current) === true) break
     }
 
     if (candidates.length === 0) {
@@ -407,9 +440,9 @@ export function createSelfUpdater(options = {}) {
     // 而且那一版的清单就在同一个标签里。有界（最多 3 次）、确定性，不是盲目猜版本。
     // 如实标注：releases/ 目录下线后（v1.1.6 起）新版本的标签里没有清单，探测只会 404 并记档；
     // 它继续为 ≤v1.1.5 的标签、以及「第 1 源被限流但标签带清单」的情况补位。
-    if (best === null || current === null || !isNewer(best.entry.version, current)) {
+    if (best === null || current === null || isNewer(best.entry.version, current) !== true) {
       for (const candidateVersion of current === null ? [] : nextCandidates(current)) {
-        if (best !== null && !isNewer(candidateVersion, best.entry.version)) continue
+        if (best !== null && isNewer(candidateVersion, best.entry.version) !== true) continue
         const probe = await entryForTag(fetchImpl, `v${candidateVersion}`, candidateVersion, null)
         if (probe.ok !== true) {
           attempts.push({ id: 'tag-probe', label: `标签 v${candidateVersion} 的 releases/index.json`, ok: false, reason: probe.reason })
@@ -420,6 +453,23 @@ export function createSelfUpdater(options = {}) {
         best = { source: { id: 'tag-probe' }, entry: probe.entry }
         break
       }
+    }
+
+    // 有的源**知道**存在更高的版本却验不了（附件缺 digest → 回落到已下线的 releases/index.json）。
+    // 这时哪怕手里有更旧的候选，也绝不能报「已是最新」——那是把「查不到」谎称成「没有」。
+    // 如实报通道不可用，并说清是哪个版本验不了。
+    const unverifiableNewer = [...unverified].filter((version) => current === null || isNewer(version, current) === true)
+    if (unverifiableNewer.length > 0 && (best === null || isNewer(best.entry.version, current) !== true)) {
+      const detail = attempts.map((attempt) => `${attempt.label}：${attempt.reason}`).join('；')
+      const value = {
+        ok: false,
+        code: 'self-update-unavailable',
+        message: `更新通道报告了更新的版本（${unverifiableNewer.join('、')}），但那一版的发布产物无法校验，不谎称已是最新。`,
+        hint: `稍后重试；也可在终端用 dsh plugin add <Release 附件地址> 手动升级。已试过：${detail === '' ? '没有可用源' : detail}`,
+        attempts
+      }
+      cache = { at: now, value }
+      return value
     }
 
     if (best === null) {
@@ -437,7 +487,7 @@ export function createSelfUpdater(options = {}) {
     }
 
     const entry = best.entry
-    const updateAvailable = current === null ? true : isNewer(entry.version, current)
+    const updateAvailable = current === null ? true : isNewer(entry.version, current) === true
     const url = entry.tarball === null ? null : `${CDN_BASE}@${encodeURIComponent(entry.tag)}/${entry.tarball}`
     const value = {
       ok: true,
@@ -514,12 +564,24 @@ export function createSelfUpdater(options = {}) {
         message: `产物自证不符：清单声明 ${manifest.name ?? '?'}@${manifest.version ?? '?'}，期望 ${MARKET_PACKAGE}@${status.latest}。`
       }
     }
-    await mkdir(downloadDir, { recursive: true })
+    try {
+      await mkdir(downloadDir, { recursive: true })
+    } catch (error) {
+      return { ok: false, code: 'self-update-download', message: `创建下载目录失败：${shortError(error)}` }
+    }
     const target = join(downloadDir, `${MARKET_PACKAGE}-${status.latest}.tgz`)
     const partial = `${target}.part`
     // 先写 .part 再改名：pnpm 永远不会读到写了一半的 tarball。
-    await writeFile(partial, bytes)
-    await rename(partial, target)
+    // 文件系统错误（目录被占、磁盘满、权限）在这里被归类成契约里的 self-update-download——
+    // 早先它们是裸 await，会从 apply() 冒出去变成 500 internal（客户端那条专用文案永远用不上）；
+    // 失败时顺手清掉 .part，不留半截文件。
+    try {
+      await writeFile(partial, bytes)
+      await rename(partial, target)
+    } catch (error) {
+      try { await unlink(partial) } catch { /* .part 本来就不存在：无需上报 */ }
+      return { ok: false, code: 'self-update-download', message: `写入下载产物失败：${shortError(error)}` }
+    }
     return { ok: true, path: target, bytes: bytes.length }
   }
 

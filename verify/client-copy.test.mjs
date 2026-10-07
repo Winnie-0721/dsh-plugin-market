@@ -344,8 +344,7 @@ check('第三个页签「可更新」：排在已安装右边、带计数角标�
   assert.equal(source.includes('scrollIntoView'), false, '不再需要滚动定位：内容现在整页出现')
   assert.match(source, /entryCount > 0 \? el\("span", \{ className: "dshpm-count" \}/, '页签要带可更新计数角标')
 })
-check('三个页签页面统一布局：共用一个外壳 + 固定页签高度（用户报「高度不对齐」）', () => {
-  // 用户截图：三个页签各自的页面内容起点/高度不一样，切一下就跳。修法是给页面加统一外壳，
+check('三个页签页面统一布局：共用一个外壳 + 固定页签高度（用户报「高度不对齐」）', () => {  // 用户截图：三个页签各自的页面内容起点/高度不一样，切一下就跳。修法是给页面加统一外壳，
   // 并把页签按钮的高度固定（有没有角标都一样高）——这样后续新增页面天然对齐。
   assert.match(css, /\.dshpm-root > \.dshpm-page\s*\{[^}]*display:flex[^}]*flex-direction:column[^}]*gap:12px/,
     '页面外壳 .dshpm-page 要统一纵向间距')
@@ -358,8 +357,7 @@ check('三个页签页面统一布局：共用一个外壳 + 固定页签高度�
   assert.match(css, /\.dshpm-installed \{ display:flex; flex-direction:column; gap:12px; \}/, '已安装/发现页内容容器节距 12px')
   assert.match(css, /\.dshpm-updatesPanel \{[^}]*gap:12px/, '可更新页内容容器节距 12px')
 })
-check('搜索框只有一个清除键：样式表关掉 Chromium 原生的 ::-webkit-search-cancel-button', () => {
-  // 用户截图（2026-10-06）：搜索框聚焦且有值时出现两个清除键——我们 .dshpm-search 里那颗，
+check('搜索框只有一个清除键：样式表关掉 Chromium 原生的 ::-webkit-search-cancel-button', () => {  // 用户截图（2026-10-06）：搜索框聚焦且有值时出现两个清除键——我们 .dshpm-search 里那颗，
   // 加上 Chromium 给 input[type=search] 画的原生 ✕（按 accent-color 上色，所以是蓝的）。
   // 原生那颗不在 DOM 里，数不出来，所以先在样式表层面钉死；真机行为由 market-ui.e2e.mjs 的
   // [3a]（聚焦输入 + 截图 market-search-clear.png）与本条一起兜底。
@@ -373,6 +371,62 @@ check('搜索框只有一个清除键：样式表关掉 Chromium 原生的 ::-we
   assert.match(source, /props\.queryInput\s*\? el\("button"/, '清除键按输入值条件渲染')
   assert.match(source, /onClick: props\.onQueryClear/, '清除键要接 onQueryClear 而不是靠浏览器默认行为')
 })
+check('错误归类与目录过期原因：两条真实可达的文案路径', () => {
+  // ① 「返回的不是 JSON」不能再归成 internal。用户报过/实测过：反向代理返回一段 HTML 时，
+  //    codeForStatus(200) 落到 "internal"，界面写「宿主内部出错 / 看宿主日志」——明明是被代理拦了；
+  //    而 err.badResponse.* 三段文案（「可能被代理或旧版本宿主拦截」）此前**没有任何地方产生**
+  //    badResponse 这个码，是死文案。
+  assert.match(source, /function codeForBadBody\(status\)/, '要有专用的「正文形状不对」归类函数')
+  assert.match(source, /if \(status >= 400\) return codeForStatus\(status\);/, '4xx/5xx 仍按状态码归类')
+  assert.match(source, /return "badResponse";/, '2xx 却给出非 JSON 时归到 badResponse')
+  assert.match(source, /var shapeCode = codeForBadBody\(response\.status\);/, '解析正文失败处要用新函数')
+  assert.match(source, /"badResponse": true/, 'badResponse 必须在 ERROR_PREFIXES 里（否则又落回 unknown）')
+  // ② why 也要传插值变量：err.badResponse.why 里有 {status}，不传会把字面量渲染给用户。
+  assert.match(source, /why: t\(prefix \+ "\.why", \{ status: status \}\)/, 'why 文案要传 {status}')
+  assert.match(zhBlock, /"err\.badResponse\.why": "[^"]*HTTP \{status\}[^"]*"/, '中文 why 里确实有 {status} 占位符')
+})
+check('目录过期横幅要显示真实原因（用户报「原因未知」）', () => {
+  // 服务端两种形态：/status 的 catalog.error 是**字符串错误码**（catalog.js 置 `error = result.code`），
+  // /catalog 的 catalog 对象不带 error。旧代码只按对象读 error.message/.code → reason 永远是
+  // 「原因未知」，用户无法判断是网络、限流还是源站挂了。
+  assert.match(source, /function staleReason\(staleSource\)/, '要有集中的原因推导函数')
+  assert.match(source, /if \(typeof raw === "string" && raw !== ""\) return codeLabel\(raw\);/, '字符串错误码要直接用')
+  assert.match(source, /var text = raw\.message \|\| raw\.code;/, '对象形态仍要支持')
+  assert.match(source, /return t\("catalog\.stale\.noReason"\);/, '真拿不到才说「原因未知」')
+  assert.match(source, /reason: staleReason\(staleSource\)/, '横幅要用这个函数取原因')
+  assert.match(source, /return label === key \? code : label \+ "（" \+ code \+ "）";/, '认不出的码原样显示，不要丢掉信息')
+})
+check('忙碌态按作业 key 归位：并发操作不互相清空', () => {
+  // 装 A 的同时点装 B：旧代码 clearJob() 无条件 setJob(null)，A 完成时把 B 的忙碌态也清掉，
+  // 界面显示空闲、按钮解除禁用 → 用户再点一次就是重复安装。
+  assert.match(source, /function clearJob\(key\)/, 'clearJob 必须接收自己的 key')
+  assert.match(source, /if \(key !== undefined && previous\.key !== key\) return previous;/, '不是自己的作业不清')
+  assert.match(source, /function jobRunning\(key\)/, '要有同步可见的「在跑」判定')
+  assert.match(source, /var jobKeysRef = React\.useRef\(\{\}\)/, '判定读 ref（同一批事件里 state 还是旧值）')
+  // 所有 clearJob 调用都必须带上 key，否则等于回到旧的「清空一切」行为。
+  const bare = [...source.matchAll(/clearJob\(\)/g)].length
+  assert.equal(bare, 0, `还有 ${bare} 处 clearJob() 没带 key`)
+})
+check('同 key 守卫必须回调 onDone，否则「一键更新」永久卡死', () => {
+  // 实测过的死锁：一键更新顺序执行靠 updateBundle 的 onDone 推进；
+  // 若守卫只 `return`（不回调），撞上同 key 的那一步既不发请求也不回调 → step() 断掉、
+  // batch 永远 running、按钮被自己的守卫挡住 → 整个会话内一键更新彻底失效。
+  assert.match(source, /if \(jobRunning\(jobKey\)\) \{[\s\S]{0,200}report\(/, '守卫命中也要 report，让 step 继续')
+  assert.match(source, /"notice\.installBusy"/, '跳过时要有文案说明')
+  // batch 的计数：跳过的既不算成功也不算失败，但必须继续推进。
+  assert.match(source, /outcome && outcome\.skipped/, '批量要识别 skipped')
+  assert.match(source, /notice\.installBusy": "\{name\} 正在装\/更新，已跳过。"/, '中文文案')
+  // 已安装页那颗更新按钮要跟「可更新」页一样受 batchRunning 约束（否则用户能从两页插同一颗）。
+  assert.match(source, /disabled: locked \|\| props\.busy \|\| props\.batchRunning/, '已安装页更新按钮要禁 batchRunning')
+  assert.match(source, /batchRunning: !!\(batch && batch\.running\)/, 'batchRunning 要传进 InstalledPane')
+})
+check('分页超出末页时收敛：不会出现「第 5/2 页」+ 空网格', () => {
+  // 客户端只在改搜索条件时重置页码，目录刷新让它变短时不会重置；
+  // 后端收敛到末页后这里也就自然一致了。同时把 requestedPage 交出来便于诊断。
+  assert.match(source, /var page = payload\.page \|\| \{ page: 1, pages: 1, total: items\.length \};/, '仍按响应里的 page 渲染')
+  assert.match(source, /onPage: function \(value\) \{ setPage\(value < 1 \? 1 : value\); \}/, '页码下限仍是 1')
+})
+
 
 console.log('')
 if (failures.length > 0) {

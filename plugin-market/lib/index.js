@@ -52,8 +52,10 @@ const SORT_VALUES = ['top', 'new', 'downloads', 'name']
 /** 宿主把「这条由基础设施管理」表达成 ReadOnlyReason，映射到契约的 not-allowed。 */
 const READ_ONLY_CODES = new Set(['management-required', 'unaddressable', 'not-removable'])
 
-/** ManagementError 只有 code，没有面向用户的 message；这里补上「发生了什么」。 */
-const MANAGEMENT_MESSAGE = {
+/** ManagementError 只有 code，没有面向用户的 message；这里补上「发生了什么」。
+ *  用 Map 而不是对象字面量：错误码来自宿主/第三方，`__proto__`/`constructor` 这类键
+ *  在对象上会走进 Object.prototype 拿到函数或对象，而契约要求 message 是字符串。 */
+const MANAGEMENT_MESSAGE = new Map(Object.entries({
   'management-required': '当前进程没有插件管理权限。',
   unaddressable: '当前进程定位不到这个插件。',
   'unknown-plugin': '宿主不认识这个插件。',
@@ -66,10 +68,10 @@ const MANAGEMENT_MESSAGE = {
   'stale-approval': '构建脚本的批准已经过期。',
   'incompatible-version': '这个版本与当前 DSH 不兼容。',
   'operation-error': '宿主执行这个操作时报错。'
-}
+}))
 
 /** 每个宿主错误码对应「现在怎么办」。 */
-const MANAGEMENT_HINT = {
+const MANAGEMENT_HINT = new Map(Object.entries({
   'management-required': '用 dsh plugin 命令行操作，或换一个允许管理的 profile。',
   unaddressable: '在启动了这个 profile 的终端里操作。',
   'unknown-plugin': '先点「刷新目录」，或确认包名拼写。',
@@ -82,7 +84,7 @@ const MANAGEMENT_HINT = {
   'stale-approval': '重新点一次安装，按提示批准构建脚本。',
   'incompatible-version': '换一个与当前 DSH 兼容的版本。',
   'operation-error': '看宿主日志里的 pnpm 输出，修好原因后重试。'
-}
+}))
 
 function optionalText(value) {
   if (value === null || value === undefined) return null
@@ -248,9 +250,9 @@ function projectChangeError(error) {
   const code = optionalText(error.code) ?? 'operation-error'
   const projected = {
     code,
-    message: optionalText(error.message) ?? MANAGEMENT_MESSAGE[code] ?? '宿主拒绝了这个操作。'
+    message: optionalText(error.message) ?? MANAGEMENT_MESSAGE.get(code) ?? '宿主拒绝了这个操作。'
   }
-  const hint = optionalText(error.hint) ?? MANAGEMENT_HINT[code]
+  const hint = optionalText(error.hint) ?? MANAGEMENT_HINT.get(code) ?? null
   if (hint !== null) projected.hint = hint
   if (optionalText(error.diagnostic) !== null) projected.diagnostic = optionalText(error.diagnostic)
   if (error.incompatible !== undefined) projected.incompatible = error.incompatible
@@ -271,14 +273,22 @@ function warningsOf(value) {
   return Array.isArray(value.warnings) ? value.warnings.filter((entry) => typeof entry === 'string') : []
 }
 
-/** 契约 §2.4 / §2.5 的响应；宿主错误码原样透传（契约要求「透传 error.code」）。 */
-function sendChangeResult(res, result, stage) {
+/** 契约 §2.4 / §2.5 的响应；宿主错误码原样透传（契约要求「透传 error.code」）。
+ *  导出只为让回归测试能真调它读响应体（源码形状断言测不出 `ok` 的推导行为）。 */
+export function sendChangeResult(res, result, stage) {
   const value = result !== null && typeof result === 'object' ? result : {}
   const error = projectChangeError(value.error)
+  const application = optionalText(value.application) ?? 'failed'
   const payload = {
-    ok: error === null,
+    // ok 不能只看 error：宿主的 ChangeResult 里 error 是可选的，`application:'failed'`
+    // 完全可能不带 error。只看 error 就会把一次失败的操作报成 ok:true，客户端据此渲染
+    // 绿色「已安装」并把它计为成功。
+    // `cancelled` 单独放行：它是用户自己取消的（宿主可能同时带一个 error 说明原因），
+    // 客户端要靠 `application` 渲染「已取消」文案——ok:false 会让 requestJSON 直接抛错，
+    // 那条文案就永远不可达。`failed` 一律算失败。
+    ok: application === 'cancelled' ? true : (error === null && application !== 'failed'),
     changed: value.changed === true,
-    application: optionalText(value.application) ?? 'failed',
+    application,
     stage: optionalText(value.stage) ?? stage,
     target: value.target ?? null,
     enabled: value.enabled === undefined ? null : value.enabled === true,
@@ -293,11 +303,27 @@ function sendChangeResult(res, result, stage) {
   sendJson(res, 200, payload)
 }
 
+/**
+ * 按名字在目录里找条目（契约 §2.4 允许 `{name}` 形式）。
+ *
+ * 按**身份强度**分级，而不是把所有字段混在一个 `find` 里：
+ *   1. `id` / `npm` / `url` 是唯一身份 → 命中即确定；
+ *   2. `name` 只是显示名，真实目录里有 195 个重名（如 `dsh-memory` 对应 10 个条目、5 个不同 spec）
+ *      → 只有一个候选才算确定，多个候选必须报 `ambiguous-install`。
+ *
+ * 以前是「第一个匹配就装」，用户请求一个重名插件会随机装上别人的包——市场类应用
+ * 绝不会这样处理歧义。
+ */
 function findCatalogItem(items, name) {
-  if (name === null) return undefined
-  return items.find(
-    (item) => sameKey(item.id, name) || sameKey(item.npm, name) || sameKey(item.url, name) || sameKey(item.name, name)
+  if (name === null) return { item: null, ambiguous: false }
+  const byIdentity = items.find(
+    (item) => sameKey(item.id, name) || sameKey(item.npm, name) || sameKey(item.url, name)
   )
+  if (byIdentity !== undefined) return { item: byIdentity, ambiguous: false }
+  const byName = items.filter((item) => sameKey(item.name, name))
+  if (byName.length === 1) return { item: byName[0], ambiguous: false }
+  if (byName.length > 1) return { item: null, ambiguous: true }
+  return { item: null, ambiguous: false }
 }
 
 const SEMVER_LIKE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
@@ -428,10 +454,14 @@ function createHandlers(ctx, catalog, selfUpdate) {
           updated: cache.updated,
           fetchedAt: cache.fetchedAt,
           source: cache.source,
-          stale: cache.stale === true
+          stale: cache.stale === true,
+          // 客户端就靠这个显示「目录过期」横幅的**原因**；不带它的话横幅永远写「原因未知」
+          // （发现页加载后 staleSource 优先取这个对象，而不是 /status 那份）。
+          error: cache.error ?? null
         },
         page: {
           page: pageInfo.page,
+          requestedPage: pageInfo.requestedPage,
           pageSize: pageInfo.pageSize,
           total: pageInfo.total,
           pages: pageInfo.pages
@@ -512,8 +542,17 @@ function createHandlers(ctx, catalog, selfUpdate) {
         }
         spec = hit.spec ?? spec
       } else {
-        hit = findCatalogItem(items, requestedName)
-        if (hit === undefined) {
+        const found = findCatalogItem(items, requestedName)
+        if (found.ambiguous) {
+          // 重名：绝不在多个包里随便挑一个装。让调用方给出 id 或 spec（目录页给出）。
+          sendError(res, 400, 'bad-request', {
+            message: `目录里有多个插件叫「${requestedName}」，无法确定要装哪一个。`,
+            hint: '用目录里的 id（owner/name）或 spec 重试；市场不猜。'
+          })
+          return
+        }
+        hit = found.item
+        if (hit === null) {
           sendError(res, 400, 'not-in-catalog', {
             message: '目录里没有这个插件，已拒绝安装。',
             hint: '先点「刷新目录」；市场只安装目录里列出的插件。'
@@ -712,19 +751,23 @@ function createHandlers(ctx, catalog, selfUpdate) {
         sendError(res, 500, 'restart-failed', { message: outcome.message, hint: outcome.hint })
         return
       }
+      // **先排退出、再写响应**：两条都无害，但顺序上更稳——`sendJson` 同步写，退出在
+      // RESTART_EXIT_DELAY_MS（900ms）之后，响应一定先落地；而万一写响应这一步抛错
+      // （对已 end 过的 res 写会同步抛 ERR_STREAM_WRITE_AFTER_END），退出也已经安排好了。
+      // 反过来写的话，那种异常会被外层 handler 吞掉（headersSent 分支），退出就永远不会安排，
+      // 而 restart.js 已把 `requested` 置位——之后每次点击都回 `already:true` 并跳过安排。
+      // （对已 destroy 的 socket 实测不抛错，所以这是一条防御性顺序，不是已复现的故障。）
+      if (outcome.already !== true) {
+        setTimeout(() => {
+          process.exit(0)
+        }, RESTART_EXIT_DELAY_MS)
+      }
       sendJson(res, 200, {
         ok: true,
         pid: outcome.pid,
         already: outcome.already === true,
         delayMs: RESTART_EXIT_DELAY_MS
       })
-      // already = 上一次请求已经安排过助手与退出，这里不再重复安排（两个退出定时器没坏处，
-      // 但两个助手会拉起两个宿主——幂等在 restart.js 里就把第二发挡掉了）。
-      if (outcome.already !== true) {
-        setTimeout(() => {
-          process.exit(0)
-        }, RESTART_EXIT_DELAY_MS)
-      }
     }
   }
 

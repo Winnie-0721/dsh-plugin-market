@@ -1,0 +1,214 @@
+/**
+ * host 半的契约回归（`verify/` 下所有 *.test.mjs 都由 release.ps1 门禁执行）。
+ *
+ * 每条都对应一个真实存在过的缺陷，而不是风格偏好：
+ *   1. `sendError` 把 `diagnostic` 丢了 → 契约 §2.8 的字段永远拿不到，客户端靠它做
+ *      「文件被占用」的可操作提示；
+ *   2. `ok: error === null` 把宿主的 `application:'failed'` 报成成功 → 客户端渲染绿色
+ *      「已安装」并计为成功；
+ *   3. 重名插件「第一个匹配就装」→ 用户请求 `dsh-memory` 会随机装上别人的包；
+ *   4. 重启端点在**安排退出之前**写响应 → 响应写失败后 `already:true` 让重启永久失效；
+ *   5. 宿主错误码当对象键 → `__proto__` 之类拿到 Object.prototype 的值。
+ *
+ * 用法：node verify/host-contract.test.mjs
+ */
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+import { sendError, sendJson, createRouteTable } from '../plugin-market/lib/http.js'
+import { sendChangeResult } from '../plugin-market/lib/index.js'
+import { buildHelperCommand, buildRestartPayload, spawnRestartHelper } from '../plugin-market/lib/restart.js'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
+const indexSource = readFileSync(new URL('../plugin-market/lib/index.js', import.meta.url), 'utf8')
+
+let passed = 0
+const failures = []
+function check(name, fn) {
+  try {
+    fn()
+    passed += 1
+    console.log(`  ✓ ${name}`)
+  } catch (error) {
+    failures.push({ name, message: error.message })
+    console.log(`  ✗ ${name}\n      ${error.message}`)
+  }
+}
+function capture() {
+  const res = {
+    status: null,
+    headers: null,
+    body: null,
+    headersSent: false,
+    writableEnded: false,
+    writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true },
+    end(body) { this.body = body; this.writableEnded = true }
+  }
+  return res
+}
+
+console.log('\n[1] sendError：diagnostic 必须真的出现在响应体里')
+check('diagnostic 被透传（契约 §2.8）', () => {
+  // 错过的样子：sendError 只读 message/hint，传进来的 diagnostic 被静默丢掉，
+  // 于是「更新通道没有回应」这类错误永远不带「每个源各自为什么失败」。
+  const res = capture()
+  sendError(res, 502, 'self-update-unavailable', {
+    message: '更新源都没回应。',
+    hint: '稍后重试。',
+    diagnostic: 'jsDelivr：HTTP 403；GitHub：timeout'
+  })
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.error.diagnostic, 'jsDelivr：HTTP 403；GitHub：timeout')
+})
+check('没有 diagnostic 时不凭空造字段', () => {
+  const res = capture()
+  sendError(res, 500, 'internal')
+  const payload = JSON.parse(res.body)
+  assert.equal(Object.hasOwn(payload.error, 'diagnostic'), false)
+})
+check('空的 diagnostic 字符串不写入', () => {
+  const res = capture()
+  sendError(res, 500, 'internal', { diagnostic: '' })
+  assert.equal(Object.hasOwn(JSON.parse(res.body).error, 'diagnostic'), false)
+})
+check('message/hint 覆盖仍然生效', () => {
+  const res = capture()
+  sendError(res, 400, 'bad-request', { message: '自定义', hint: '自定义提示' })
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.error.message, '自定义')
+  assert.equal(payload.error.hint, '自定义提示')
+})
+
+console.log('\n[2] 变更结果：ok 不能只看 error（行为测试，真调 handler）')
+check('ok 在 application:"failed" 时为 false，且 cancelled 带 error 时仍为 true', () => {
+  // 只 grep 源码形状测不出行为（等价的写法改一下顺序就会假红）。这里直接调真实的
+  // sendChangeResult 路径：用假 res 捕获响应体，逐种 application 核对 ok。
+  // 错过的样子：`ok: error === null`——宿主的 ChangeResult 里 error 是可选的，
+  // `application:'failed'` 不带 error 时被报成 ok:true，客户端渲染绿色「已安装」并计为成功。
+  const cases = [
+    // [application, error, 期望 ok]
+    ['applied', null, true],
+    ['restart-required', null, true],
+    ['failed', null, false],
+    ['failed', { code: 'operation-error' }, false],
+    // cancelled 是用户自己取消的：即便宿主带一个 error 说明原因，也要 ok:true，
+    // 否则 requestJSON 抛错、客户端「已取消」文案永远不可达。
+    ['cancelled', { code: 'operation-error' }, true],
+    ['cancelled', null, true],
+  ]
+  for (const [application, error, expected] of cases) {
+    const res = capture()
+    sendChangeResult(res, { changed: true, application, error }, 'install')
+    const payload = JSON.parse(res.body)
+    assert.equal(
+      payload.ok,
+      expected,
+      `application=${application} error=${error ? 'set' : 'null'} → ok 应为 ${expected}`
+    )
+  }
+})
+
+console.log('\n[3] 重名插件：不猜，报歧义')
+check('findCatalogItem 分身份层与显示名层（源码不变量）', () => {
+  // 错过的样子：id/npm/url/name 混在一个 Array.find 里 → 第一个匹配就装。
+  assert.match(indexSource, /function findCatalogItem\(items, name\)/, '必须仍是这个函数')
+  assert.match(indexSource, /byIdentity/, '身份层单独查')
+  assert.match(indexSource, /byName\.length > 1/, '显示名多个候选要判歧义')
+  assert.match(indexSource, /ambiguous: true/, '歧义要有显式标记')
+})
+check('install 路由遇到歧义回 400 bad-request，而不是随便装一个', () => {
+  assert.match(indexSource, /found\.ambiguous/, 'install 路由必须检查歧义')
+  assert.match(indexSource, /市场不猜/, '要给用户一句可照做的说明')
+})
+
+console.log('\n[4] 重启端点：先安排退出，再写响应')
+check('setTimeout(process.exit) 出现在 sendJson 之前（源码顺序）', () => {
+  // 错过的样子：先 sendJson 再 setTimeout——响应写失败（客户端切走/代理断开）时
+  // 异常被外层吞掉，退出永远不会被安排，而 restart.js 已置 requested，
+  // 之后每次点击都回 already:true 并跳过安排 → 重启功能永久失效。
+  const at = indexSource.indexOf('async restart(req, res) {')
+  assert.ok(at > 0, '找得到 restart handler')
+  const body = indexSource.slice(at, at + 1400)
+  const exitAt = body.indexOf('process.exit(0)')
+  const sendAt = body.indexOf('sendJson(res, 200')
+  assert.ok(exitAt > 0 && sendAt > 0, '两处都要在')
+  assert.ok(exitAt < sendAt, `安排退出必须先于写响应（exit@${exitAt} send@${sendAt}）`)
+})
+
+console.log('\n[5] 宿主错误码映射表：原型键不能穿过去')
+check('MANAGEMENT_MESSAGE / MANAGEMENT_HINT 是 Map（不是对象字面量）', () => {
+  // 错过的样子：对象字面量 + `TABLE[code]`，`code='__proto__'` 拿到 Object.prototype
+  // 的对象，`code='constructor'` 拿到函数——契约要求 message 是字符串。
+  assert.match(indexSource, /const MANAGEMENT_MESSAGE = new Map\(Object\.entries\(\{/)
+  assert.match(indexSource, /const MANAGEMENT_HINT = new Map\(Object\.entries\(\{/)
+  assert.match(indexSource, /MANAGEMENT_MESSAGE\.get\(code\)/)
+  assert.match(indexSource, /MANAGEMENT_HINT\.get\(code\)/)
+})
+
+console.log('\n[6] 重启助手：' + "'error' 监听先于任何提早返回")
+check('spawn 之后立刻挂 error 监听（源码顺序）', () => {
+  const source = readFileSync(new URL('../plugin-market/lib/restart.js', import.meta.url), 'utf8')
+  const spawnAt = source.indexOf('built.spawnImpl(')
+  const onErrorAt = source.indexOf("child.on('error'")
+  const pidCheckAt = source.indexOf('if (pid <= 0)')
+  assert.ok(spawnAt > 0 && onErrorAt > spawnAt, "error 监听要在 spawn 之后")
+  assert.ok(onErrorAt < pidCheckAt, "error 监听必须在 pid<=0 那条提早返回之前（否则未处理的 'error' 会崩宿主）")
+})
+check('payload 校验：非法 pid / execPath / args 一律拒绝，不 spawn', () => {
+  assert.equal(buildRestartPayload({ pid: 0, execPath: 'x', args: [] }), null)
+  assert.equal(buildRestartPayload({ pid: 1, execPath: '', args: [] }), null)
+  assert.equal(buildRestartPayload({ pid: 1, execPath: 'x', args: [1] }), null)
+  assert.ok(buildRestartPayload({ pid: 1, execPath: 'x', args: [] }) !== null)
+})
+check('助手脚本缺失时在 spawn 之前就拒绝', () => {
+  const built = buildHelperCommand({ pid: 1, execPath: 'node', args: [], helperFile: 'no/such/helper.cjs', existsSyncImpl: () => false })
+  assert.equal(built.ok, false)
+})
+check('spawn 返回没有 pid 时不抛错（异步 ENOENT 形状）且状态不置位', () => {
+  // 真 spawn 一个不存在的可执行文件：pid 是 undefined 且错误是异步事件。
+  // 这里只验返回值（不真的等事件）——事件监听顺序由上面那条源码断言钉住。
+  const state = { requested: false, pid: null }
+  const result = spawnRestartHelper({
+    state,
+    pid: process.pid,
+    execPath: 'E:/definitely/not/here/dsh-helper-missing.exe',
+    args: [],
+    spawnImpl: () => ({ pid: undefined, on() {}, unref() {} })
+  })
+  assert.equal(result.ok, false)
+  assert.equal(state.requested, false, '启动失败不得把 requested 置位（否则重试拿到 already:true）')
+})
+
+console.log('\n[7] 目录响应带上过期原因：/catalog 必须给 error')
+check('catalog 响应里有 error 字段（客户端靠它显示过期原因）', () => {
+  // 客户端 staleSource 优先取 /catalog 的 catalog 对象；如果这里不带 error，
+  // 「目录已过期」横幅的原因就永远是「原因未知」——只有 /status 那份带 error（字符串错误码）。
+  assert.match(
+    indexSource,
+    /source: cache\.source,\s*\n\s*stale: cache\.stale === true,\s*\n\s*(?:\/\/[^\n]*\n\s*)*error: cache\.error \?\? null/,
+    'catalog 响应必须带 error: cache.error ?? null'
+  )
+  assert.match(indexSource, /requestedPage: pageInfo\.requestedPage/, 'page 里要有 requestedPage')
+})
+
+console.log('\n[8] 路由表：重复注册的行为是明确的')
+check('同一路径再注册会覆盖（所以 GET/POST 必须合并成一个 handler）', () => {
+  // 这不是 bug，是必须被记住的约束：index.js 的 /self-update 因此合并成一个 handler。
+  const table = createRouteTable()
+  table.on('/x', ['GET'], () => {})
+  table.on('/x', ['POST'], () => {})
+  assert.deepEqual(table.paths(), ['/x'])
+})
+check('/self-update 在 index.js 里只注册一次且含 GET/POST', () => {
+  assert.match(indexSource, /\.on\(`\$\{ROUTE_PREFIX\}\/self-update`, \['GET', 'POST'\]/)
+})
+
+console.log('')
+if (failures.length > 0) {
+  console.log(`host 契约回归：${passed}/${passed + failures.length} 通过，${failures.length} 失败`)
+  process.exitCode = 1
+} else {
+  console.log(`host 契约回归：${passed}/${passed} 全通过`)
+}

@@ -156,19 +156,38 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 2. `npm view deepseek-harness-market version` 返回 404（名字仍可用）；
 3. `npm publish --access public`（公开包需要显式指定 access）。
 
-> **⚠ OIDC 首次实战失败（v1.1.6，2026-10-07 实测）——需要人工去 npmjs.com 配一次。**
-> v1.1.6 的 `pack` job（门禁 → 打包 → 建 Release 并传附件）**成功**，但 `publish-npm`
-> 的 `Publish to npm` 步骤**失败**，npm 上仍然只有 1.1.3 / 1.1.4 / 1.1.5。
-> 时间线说明这不是代码回归：`abb9c78`（2026-10-06 02:39）才把凭据迁到 OIDC，
-> 而 1.1.4 / 1.1.5 是由**旧的 token 方式**发的（两次 `Publish to npm` 成功记录都在迁移之前）；
-> 迁移之后 `pack-release.yml` 那次是 `skipped`（该版本已在 npm）。**所以 v1.1.6 是 OIDC
-> 路径的第一次真正执行，即失败**——最可能就是 npmjs.com 上还没给本包添加 Trusted publisher。
-> 处理：在 npmjs.com → 本包 → Settings → Trusted Publisher 添加
-> repository=`Winnie-0721/dsh-plugin-market`、workflow=`pack-release.yml`（以及
-> `publish-npm.yml`，两条通道都要加），然后 `gh workflow run "Publish to npm"` 补发。
-> 备选：给发布步骤加回 `env: NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`。
-> **注意 Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
+> **⚠ v1.1.6 的 npm 自动发布失败——真因是 `npm@latest` 装不上，与 Trusted Publisher 无关（2026-10-07 实测）。**
+> v1.1.6 的 `pack` job（门禁 → 打包 → 建 Release 并传附件）**成功**，但 `pack-release.yml` 里
+> `publish-npm` job 的 `Publish to npm` 步骤**失败**，npm 上仍然只有 1.1.3 / 1.1.4 / 1.1.5。
+>
+> **我先后给过两个错结论，都记在这里以正视听**：① 「npmjs.com 上没配 Trusted publisher」——
+> 错，包设置页里**有**一条；② 「登记的 workflow 是 `publish-npm.yml`、与 `pack-release.yml`
+> 对不上」——**也错**。真因在 CI 日志里（用本机 git 凭据读到了 job 日志，其余猜测全部作废）：
+>
+> ```
+> npm error code EBADENGINE
+> npm error Not compatible with your version of node/npm: npm@12.2.0
+> npm error Required: {"node":"^22.22.2 || ^24.15.0 || >=26.0.0"}
+> npm error Actual:   {"npm":"10.9.2","node":"v22.14.0"}
+> ```
+>
+> 两个 workflow 都写着 `npm install -g npm@latest`，而 **npm 12 起要求 node ≥22.22.2**，
+> 本仓库钉的却是 **node 22.14.0** → 这一步直接 EBADENGINE 退出，**`npm publish` 根本没执行**，
+> OIDC 连试都没试到。这是个「上游发了大版本、把我们的 `@latest` 变成不可满足」的漂移，
+> 与凭据配置无关。
+>
+> **修法**（已改在两个 workflow 里）：把 `npm@latest` 换成 **`npm@^11.5.1`** ——
+> 既满足 OIDC 的 ≥11.5.1，又只需 node ≥22.9.0，与 node 22.14.0 相容。
+> 若将来要上 npm 12，必须**同时**把 `node-version` 提到 22.22.2+ 或 24.15+。
+>
+> **补发**：GitHub → Actions → **Publish to npm** → *Run workflow*（该文件的 `workflow_dispatch`，
+> 检出默认分支、`package.json` 已是 1.1.6）。这也是包设置页那句
+> 「Pending validation…Publish once before Oct 7, 2026, 6:06 PM UTC」转正的时机。
+>
+> **Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
 > 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的。
+
+
 
 
 ### 4.3 真要发 npm 时的检查单

@@ -34,10 +34,13 @@ jobs:
           # 故意不写 registry-url：npmjs 是默认 registry；写它反而会让 setup-node
           # 注入 NODE_AUTH_TOKEN=github.token（对 npm 无效），可能盖过 OIDC。
 
-      # OIDC 要求 npm ≥ 11.5.1（Node 自带的 npm 不够新），先升到最新。
+      # OIDC 要求 npm ≥ 11.5.1（Node 自带的 10.x 不够新）。
+      # **不要写 `npm@latest`**：npm 12 起要求 node ^22.22.2 || ^24.15.0 || >=26，
+      # 而这里钉的是 node 22.14.0 → `npm install -g npm@latest` 会 EBADENGINE 失败，
+      # publish 根本没跑到（v1.1.6 就是这么挂的）。钉 11.x：够 OIDC，且 node ≥22.9.0 即可。
       # 本包无依赖、无构建：不跑 npm ci（没有 package-lock.json 会直接失败），
       # checkout 下来就是发布内容。
-      - run: npm install -g npm@latest
+      - run: npm install -g "npm@^11.5.1"
 
       # 若本包在 npmjs 上启用的是 staged publishing（staged token + 人工 2FA 审批后才公开），
       # 把下行换成：npm stage publish

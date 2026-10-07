@@ -6,6 +6,7 @@
 
 - 包目录：`plugin-market/`（包名 `deepseek-harness-market`）
 - 接口契约：`docs/API-CONTRACT.md`
+- **功能开发方向：`docs/ROADMAP.md`**（下一步做什么、不做什么，含证据与代价）
 - 团队共享事实：`docs/TEAM-BRIEF.md`
 - 安装脚本：`scripts/install-into-profile.ps1`
 - 验收报告：`verify/REPORT.md`

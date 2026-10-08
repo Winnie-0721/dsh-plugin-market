@@ -29,6 +29,45 @@ export const RESTART_HELPER_WAIT_MS = 60 * 1000
 /** 助手的轮询间隔。 */
 export const RESTART_HELPER_POLL_MS = 300
 
+/**
+ * 本进程是否是**官方桌面壳（Electron）管理的宿主子进程**。
+ *
+ * 这个判定是「一键重启」在桌面端**必须被拒绝**的依据，也是本模块最重要的一个前提。
+ * 桌面端的真实拓扑（从活动进程表 + `app.asar/lib/main.js` 核实）：
+ *
+ *   7872  `DeepSeek Harness.exe`                ← GUI 主进程，持有 Electron 单实例锁
+ *   19496 `DeepSeek Harness.exe --expose-internals <entry> …`  ← 宿主，7872 的子进程
+ *
+ * 7872 用 `spawn(node, ['--expose-internals', entry, …], { stdio: ['ignore','pipe','pipe','ipc'],
+ * env: desktopNodeEnvironment(...) })` 拉起 19496，也就是：
+ *   - `ELECTRON_RUN_AS_NODE=1`（Electron 以 node 模式跑这个子进程）；
+ *   - **带一个 IPC 通道**（`stdio` 最后一项 `'ipc'`）——所以宿主的 `process.connected` 为 true。
+ *
+ * 为什么重启在桌面端不可能成功（我实测 + 读壳内源码确认）：
+ * 助手拿到的是**宿主**的 `execPath`/`argv`，它会先删掉 `ELECTRON_RUN_AS_NODE` 再拉起同一个 exe
+ * ——那是**启动 GUI 应用**，而不是以 node 跑那个入口。新进程执行
+ * `claimDesktopSingleInstance()` → `requestSingleInstanceLock()` **失败**（7872 还活着持锁）
+ * → 直接 `application.quit()`，毫秒级静默退出（实测 exit=0、无输出、231–391ms）。
+ * 结果就是：19496 被自己的 `process.exit(0)` 结束，替代品起不来，**GUI 什么都不剩**
+ * （壳随后弹「DeepSeek Harness 无法使用」致命对话框）。而 `restart-helper.cjs` 注释里写的
+ * 「新宿主必须以正常身份启动」在桌面端恰好是致命的那一步。
+ *
+ * 参考实现（`_ref/dsh-market/src/restart.ts` 的 `restartAllowed`/`detectedSupervisor`）
+ * 对同类问题的结论是同一句话：**有监管者的部署里，「重启」不属于这个插件**——
+ * systemd 下它会连助手一起杀掉，桌面壳下它会把自己锁在门外。所以这里也不猜、不半修，
+ * 而是**如实拒绝**并告诉用户用壳自带的入口。
+ *
+ * 为什么用「IPC 通道 + node 模式」两个信号：单独看 `ELECTRON_RUN_AS_NODE` 不够——
+ * 本模块自己的助手也会设它；而终端里 `dsh web` 启动的宿主没有 IPC 通道（`process.connected` 为 false），
+ * 那条路径的重启是**正常可用**的，不能被这个判定误伤。
+ */
+export function isDesktopManagedHost(options = {}) {
+  const env = options.env ?? process.env
+  const connected = options.connected ?? (typeof process.connected === 'boolean' ? process.connected : false)
+  const hasSend = options.hasSend ?? typeof process.send === 'function'
+  return env.ELECTRON_RUN_AS_NODE === '1' && connected === true && hasSend === true
+}
+
 /** 助手脚本：与本模块同目录，随包发布（package.json files 含 lib/）。 */
 export function helperPath() {
   return fileURLToPath(new URL('./restart-helper.cjs', import.meta.url))
@@ -103,6 +142,22 @@ export function spawnRestartHelper(options = {}) {
   if (state.requested === true) {
     // 幂等：上一次请求已经把助手安排好了，回 already 而不是再拉一个（双助手 = 双宿主）。
     return { ok: true, pid: state.pid, already: true }
+  }
+  // 桌面壳管理的宿主**拒绝一键重启**（见 isDesktopManagedHost 的完整推理）：
+  // 这条路上「重启」不可能成功，只会让宿主退出、替代品被单实例锁挡在门外，
+  // 把用户留在一个没有任何界面、还弹致命对话框的状态里——比不做更糟。
+  // 所以这里如实报错并给出正确入口，而不是先退出再赌运气。
+  // 单测/脚本可用 options.desktopManaged 显式覆盖（默认读真实进程状态）。
+  const desktopManaged = options.desktopManaged ?? isDesktopManagedHost()
+  if (desktopManaged === true) {
+    return {
+      ok: false,
+      code: 'desktop-managed',
+      message: '桌面版不能在市场里一键重启。',
+      hint: '当前宿主由 DeepSeek Harness 桌面壳启动，它自己持有单实例锁——从市场拉起的替代进程会被锁挡下、然后静默退出，'
+        + '结果是应用整个关掉且不会自己回来。请用桌面壳自己的入口重启（关掉窗口再打开应用），'
+        + '或在应用内安装完插件后按提示手动重启。'
+    }
   }
   // 默认参数就是**当前宿主进程自己**：端点调用就是 spawnRestartHelper()（不带参数）。
   // 这里必须给默认值——早先版本没给，结果真实调用 100% 落进「重启参数不合法」，

@@ -1329,6 +1329,58 @@ sha256 一致，`git status` 只有预期的两个文件。
    **先跑基线、基线不通过就拒绝继续**；`try/finally` 保证还原；结束后**复跑基线**确认干净。
    教训：**任何「改文件再还原」的自动化，都必须有一个独立于被改文件的基准。**
 
+### 12.25 第三轮审查：桌面版一键重启会把应用整个杀掉（HIGH）
+
+第四个独立审计（读 `self-update.js` / `restart.js` / `restart-helper.cjs` / `http.js`）报了一条 HIGH：
+**桌面端点「重启 DSH」会杀掉宿主且不会有替代品起来**。这条涉及我自己写的功能，所以我先核对再动手。
+
+**先自己确认拓扑**（活动进程表）：
+
+```
+7872  "…\DeepSeek Harness.exe"                                    ← GUI 主进程
+19496 "…\DeepSeek Harness.exe" --expose-internals <entry> <asarDsh> <profile> …  ← 宿主，7872 的子进程
+```
+
+**再从壳内源码拿流程证据**（`app.asar/lib/main.js`）：
+- 第 3674–3691 行：壳用 `spawn(this.node, ['--expose-internals', entry, …],
+  { stdio: ['ignore','pipe','pipe','ipc'], env: desktopNodeEnvironment(...) })` 拉起宿主
+  ——**最后一个 stdio 项是 `'ipc'`**，所以宿主是**受 IPC 管理的子进程**；
+- 第 3529–3538 行：`desktopNodeEnvironment` 设 `ELECTRON_RUN_AS_NODE: '1'`；
+- 第 6870–6877 行：`if (!application.requestSingleInstanceLock()) { application.quit(); }`。
+
+**机制**：助手拿到的是**宿主**的 `execPath`/`argv`，删掉 `ELECTRON_RUN_AS_NODE` 再拉起同一个 exe
+= **启动 GUI**（不是以 node 跑那个入口）→ `requestSingleInstanceLock()` 失败（7872 还持锁）
+→ 立刻 `application.quit()`（实测 exit=0、无输出、231–391ms）→ 宿主已退出、替代品也死了
+→ **整个应用什么都不剩**，壳随后弹「DeepSeek Harness 无法使用」。
+
+**为什么不是「某个变量写错」**：参考实现里 `restartAllowed()`/`detectedSupervisor()` 对同类问题的
+结论是同一句话——**有监管者的部署里，「重启」不属于这个插件**（systemd 下 `KillMode` 会把 detached
+助手一起杀掉，桌面壳下会被单实例锁挡在门外）。所以**如实拒绝、不半修**：
+`isDesktopManagedHost()` 用「node 模式 **且** 有 IPC 通道」两个信号（终端 `dsh web` 的宿主没有 IPC
+通道，不能被误伤）→ `/status` 报 `restart.available:false`、`POST /restart` 回 `409 restart-unsupported`
+且不 spawn、不置 `requested`；客户端据此**不弹重启询问窗、不给重启按钮**，改说「关掉窗口再打开」。
+
+**这一轮最值得记的一条：审计的第一版假设是错的，而它自己证伪了。**
+
+它最初以为 bug 是「删掉 `ELECTRON_RUN_AS_NODE` 导致 node 启动失败」，隔离实验
+（`exp-reboot2.mjs`）显示那个 exe 其实**成功启动了一个 GUI**，它才改成「单实例锁」。
+**这个改口是整件事的关键**：如果按第一版假设去修（保留那个变量），桌面端会变成
+「以 node 模式再起一个宿主」，同样起不来——**结论对而机制错，修法就会错**。
+我复核后独立确认了机制（先看进程表，再读壳源码三处），才动手。
+
+**同时修的另外 4 处**（都在 `self-update.js`，用真实 `apply()` + 假 manager 实测）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| 失败丢 `diagnostic` 与顶层 `code` | EPERM 被报成「插件市场内部出错了，稍后重试」 | 两个字段都透传 |
+| `ok` 规则与 `sendChangeResult` 漂移 | `pendingBuilds` 非空时报失败（批准入口成死代码） | 补上放行并透传 `pendingBuilds` |
+| 空结果算成功 | 宿主回 `{}` → `applied`/`ok:true` → 客户端亮绿灯 | 与 `index.js` 同判 `failed` |
+| `managerOf` 抛错冒出 `apply()` | 500 internal + 通用句（安装抛错却是折叠的） | 折成 `manager-unavailable` |
+
+**验证**：门禁 PASS（17 套件；self-update 46→**50**、restart-helper 8→**10**）；
+真实浏览器 e2e **82/82**。
+
+
 
 
 

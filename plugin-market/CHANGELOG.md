@@ -2,6 +2,50 @@
 
 ## 1.2.0
 
+- **修 5 处缺陷，其中一条是「桌面版一键重启会把应用杀掉且不会有替代品起来」**（第四轮独立审计
+  读 self-update / restart / http，我自己核对了壳内源码与活动进程表）。
+
+  1. **桌面端一键重启是「删掉 `ELECTRON_RUN_AS_NODE` 后启动 GUI」**——HIGH。
+     真实拓扑（活动进程表 + `app.asar/lib/main.js` 核实）：
+     `7872 DeepSeek Harness.exe`（GUI 主进程，持 Electron 单实例锁）
+     ← `19496 …exe --expose-internals <entry>`（宿主，7872 用 `stdio: […,'ipc']` 拉起的子进程，
+     环境里带 `ELECTRON_RUN_AS_NODE=1`）。宿主半跑在 19496 里，助手拿到它的 `execPath`/`argv`、
+     **删掉那个变量**再拉起同一个 exe —— 那是**启动 GUI**：新进程执行
+     `claimDesktopSingleInstance()` → `requestSingleInstanceLock()` 失败（7872 还持锁）→ 立刻
+     `application.quit()`（实测 exit=0、无输出、231–391ms）。于是宿主已退出、替代品也死了，
+     **整个应用什么都不剩**，壳随后弹「DeepSeek Harness 无法使用」。
+     这不是某个变量写错——参考实现（`_ref/dsh-market/src/restart.ts` 的
+     `restartAllowed`/`detectedSupervisor`）对同类问题的结论一样：**有监管者的部署里，
+     「重启」不属于这个插件**（systemd 下会连助手一起被杀，桌面壳下会被锁挡在门外）。
+     所以**如实拒绝而不是半修**：`isDesktopManagedHost()`（node 模式 **且** 有 IPC 通道两个信号，
+     避免误伤终端 `dsh web` 的宿主）→ `spawnRestartHelper` 拒绝、`POST /restart` 回
+     `409 restart-unsupported`、`/status` 带 `restart.available:false`，客户端据此
+     **不弹重启询问窗、显示「请关掉窗口再打开」而不是一个点了会出事的按钮**。
+  2. **自更新失败丢字段，一律报成「插件市场内部出错了」**——MEDIUM。宿主把可读细节放在
+     `diagnostic`、常常没有 `message`；`apply()` 只抄 code+message，于是 message 变空串、
+     diagnostic 丢掉、顶层也没有 code，`index.js` 的 `result.code ?? 'internal'` 就把
+     「文件被占用 / 连不上源」说成「内部出错，稍后重试」。同一类失败走安装端点时字段是齐的
+     （`projectChangeError` 会透传 code+diagnostic），自更新是唯一丢字段的路。两个字段都透传，
+     并补顶层 `code`。
+  3. **`apply()` 的 ok 规则与 `sendChangeResult` 漂移**——MEDIUM。契约 §18/§20 要求三处完全一致：
+     补上 `pendingBuilds` 非空放行（并把 `pendingBuilds` 透传出去，客户端才可能显示批准入口），
+     以及**空结果不算 applied**（`{}` 以前会得到 `applied`/`ok:true` → 客户端亮绿灯，
+     而宿主从没确认过这次安装；`index.js` 对同样输入判失败）。
+  4. **`managerOf` 抛错会冒出 `apply()`**——LOW。安装抛错是被正确折叠的（`install-failed`），
+     读 manager 抛错却直接冒成 500 `internal`——同一类失败两种形状。折成 `manager-unavailable`。
+  5. 客户端补 `err.restart-unsupported.*`、`restart.manualBody`、`restart-available` 判定；
+     `/status` 新增 `restart.available`。
+
+  **验证**：门禁 PASS（17 套件；self-update 46→**50**、restart-helper 8→**10**）；
+  真实浏览器 e2e **82/82**。
+
+  **本轮记一条方法论**：审计 F1 的第一版**假设是错的**（它以为 bug 是「删掉变量导致 node 启动失败」），
+  是它自己用隔离实验证伪后才改成「单实例锁」——而**这个改口正是关键**：如果按第一版假设去修
+  （保留 `ELECTRON_RUN_AS_NODE`），桌面端会变成「以 node 模式再起一个宿主」，
+  同样起不来。**结论对而机制错，修法就会错。**
+
+  **本次不递增版本、不打包、不发布。**
+
 - **修 4 个稳健性缺陷 + 3 个客户端缺陷，其中一条把上一轮的修复整个抵消了**（第二轮独立审计：
   3 个并行只读审计分别读 catalog / self-update+restart / client 数据层与渲染层，
   我自己读 host 路由与 `http.js`）。**每条都先用真函数复现、再改、再做变异测试**

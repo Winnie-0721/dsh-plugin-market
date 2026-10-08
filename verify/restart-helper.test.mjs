@@ -20,6 +20,7 @@ import {
   buildHelperCommand,
   buildRestartPayload,
   helperPath,
+  isDesktopManagedHost,
   spawnRestartHelper
 } from '../plugin-market/lib/restart.js'
 
@@ -56,6 +57,53 @@ async function waitFor(predicate, timeoutMs, message) {
 }
 
 console.log('\n[1] 启动规格（纯函数）')
+
+check('**桌面壳管理的宿主必须拒绝一键重启**（否则杀掉应用且不会有替代品起来）', () => {
+  // 第四轮独立审计报的 HIGH，我核对了壳内源码与活动进程表确认：
+  //   7872  `DeepSeek Harness.exe`                        ← GUI 主进程，持有 Electron 单实例锁
+  //   19496 `…exe --expose-internals <entry> …`           ← 宿主，7872 用 stdio 末项 'ipc' 拉起的子进程
+  // 壳源码（app.asar/lib/main.js）：`spawn(this.node, ['--expose-internals', entry, …],
+  //   { stdio: ['ignore','pipe','pipe','ipc'], env: desktopNodeEnvironment(...) })`，
+  // 而 desktopNodeEnvironment 设 `ELECTRON_RUN_AS_NODE: '1'`；
+  // `claimDesktopSingleInstance()` 里 `if (!application.requestSingleInstanceLock()) application.quit()`。
+  // 助手删掉那个变量后拉起同一个 exe = **启动 GUI**，它拿不到锁 → 立刻 quit（实测 exit=0、无输出、231–391ms），
+  // 于是 19496 已退出、替代品也死了，**整个应用什么都不剩**。
+  // 所以这条路必须**提前拒绝**，而不是先退出再赌。
+  const isDesktop = isDesktopManagedHost({ env: { ELECTRON_RUN_AS_NODE: '1' }, connected: true, hasSend: true })
+  assert.equal(isDesktop, true, 'node 模式 + IPC 通道 = 桌面壳管理的宿主')
+
+  // 判定的两个必要条件缺一不可，避免误伤：
+  // 终端里 `dsh web` 的宿主没有 IPC 通道（process.connected 为 false），重启是正常可用的。
+  assert.equal(isDesktopManagedHost({ env: { ELECTRON_RUN_AS_NODE: '1' }, connected: false, hasSend: false }), false,
+    '没有 IPC 通道 ⇒ 不是桌面壳管理的宿主（终端启动的宿主不能被误伤）')
+  assert.equal(isDesktopManagedHost({ env: {}, connected: true, hasSend: true }), false,
+    '没有 ELECTRON_RUN_AS_NODE ⇒ 不是桌面端（普通 node 宿主）')
+
+  // 而且真的拒绝，且**不 spawn**、不置 requested（否则第二次点击会回 already:true 却不重启）。
+  const spawns = []
+  const outcome = spawnRestartHelper({
+    state: {},
+    desktopManaged: true,
+    spawnImpl: () => { spawns.push(1); return { pid: 123, on() {}, unref() {} } }
+  })
+  assert.equal(outcome.ok, false, '桌面端必须拒绝')
+  assert.equal(outcome.code, 'desktop-managed')
+  assert.match(outcome.hint, /关掉窗口再打开|单实例锁/, '要给出正确的入口，而不是「重试」')
+  assert.equal(spawns.length, 0, '拒绝时绝不能 spawn 助手（否则宿主仍会退出）')
+
+  // 反向保证：非桌面端必须照常工作（收紧不能把正常路径一起掐掉）。
+  const okSpawns = []
+  const ok = spawnRestartHelper({
+    state: {},
+    desktopManaged: false,
+    pid: process.pid,
+    execPath: process.execPath,
+    args: ['-e', '0'],
+    spawnImpl: () => { okSpawns.push(1); return { pid: 456, on() {}, unref() {} } }
+  })
+  assert.equal(ok.ok, true, '非桌面端仍要能重启')
+  assert.equal(okSpawns.length, 1)
+})
 
 check('helper 脚本文件存在（随包发布：package.json files 含 lib/）', () => {
   assert.ok(existsSync(helperPath()), `找不到 ${helperPath()}`)

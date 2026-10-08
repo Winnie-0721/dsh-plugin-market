@@ -210,6 +210,12 @@ window.__ModuleLoader__.load({
         "err.restart-failed.title": "重启没能开始",
         "err.restart-failed.why": "宿主没能启动重启助手，DSH 还在原来的进程里（没有半途退出）。",
         "err.restart-failed.next": "看宿主日志里 deepseek-harness-market 的记录；仍不行就手动重启 DSH。",
+        // v1.2.0：桌面端一键重启**必然失败**（壳持有单实例锁，替代进程会被挡下并静默退出，
+        // 结果是应用整个关掉且不会自己回来）。这不是「重启失败」，是「这个环境不支持」，
+        // 所以给一套单独的、说清正确入口的文案。
+        "err.restart-unsupported.title": "桌面版不能用一键重启",
+        "err.restart-unsupported.why": "当前宿主是桌面壳启动的子进程，壳自己持有应用的单实例锁——从这里拉起的替代进程会被锁直接挡下、然后静默退出，结果是整个应用关掉且不会自己回来。",
+        "err.restart-unsupported.next": "用桌面壳自己的入口重启：关掉应用窗口再打开即可；或按页面提示手动重启 DSH。",
         "err.aborted.title": "请求已取消",
         "err.aborted.why": "你切换了页签或开始了新的搜索，之前的请求不再需要。",
         "err.aborted.next": "无需处理，重新操作即可。",
@@ -285,6 +291,7 @@ window.__ModuleLoader__.load({
         "notice.restartTimeout": "等了一会儿宿主还没回来：手动刷新页面确认，仍不行就自己重启一次 DSH。",
         "restart.bannerTitle": "有改动待重启生效",
         "restart.bannerBody": "更新（插件或市场自更新）已经把新代码写到磁盘，但宿主进程还在跑旧代码。点「重启 DSH」让新代码生效。",
+        "restart.manualBody": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。桌面版不能用一键重启（壳持有应用的单实例锁，从这里拉起的进程会被挡下）：请关掉应用窗口再打开，新代码就会生效。",
         "restart.title": "立刻重启 DSH：正在流式输出的回复会被截断；桌面上应用窗口会重新打开。",
         "action.restart": "重启 DSH",
         "action.restarting": "正在重启…",
@@ -489,6 +496,9 @@ window.__ModuleLoader__.load({
         "err.restart-failed.title": "The restart did not start",
         "err.restart-failed.why": "The host could not launch the restart helper; DSH is still running its original process (it did not exit halfway).",
         "err.restart-failed.next": "Check the deepseek-harness-market entries in the host log; if it keeps failing, restart DSH yourself.",
+        "err.restart-unsupported.title": "One-click restart is unavailable in the desktop app",
+        "err.restart-unsupported.why": "This host is a child of the desktop shell, and the shell holds the app's single-instance lock. A replacement launched from here is refused by that lock and exits silently — leaving the whole app closed with nothing to bring it back.",
+        "err.restart-unsupported.next": "Restart through the shell itself: close the app window and open it again, or restart DSH manually as the page suggests.",
         "err.aborted.title": "The request was cancelled",
         "err.aborted.why": "You switched tabs or started a new search, so the earlier request is no longer needed.",
         "err.aborted.next": "Nothing to do; just continue.",
@@ -563,6 +573,7 @@ window.__ModuleLoader__.load({
         "notice.restartTimeout": "The host has not come back yet: refresh the page to check, or restart DSH yourself.",
         "restart.bannerTitle": "Changes pending a restart",
         "restart.bannerBody": "An update (a plugin or the market itself) has written the new code to disk, but the host process is still running the old code. Restart DSH to apply it.",
+        "restart.manualBody": "The update has written the new code to disk, but the host process is still running the old code. One-click restart is unavailable in the desktop app (the shell holds the app's single-instance lock, so a process launched from here would be refused): close the app window and open it again to apply the new code.",
         "restart.title": "Restart DSH right now: replies still streaming will be cut off, and the desktop app reopens its window.",
         "action.restart": "Restart DSH",
         "action.restarting": "Restarting…",
@@ -900,6 +911,7 @@ window.__ModuleLoader__.load({
       "self-update-integrity": true,
       "self-update-download": true,
       "restart-failed": true,
+      "restart-unsupported": true,
       "bad-request": true,
       "method-not-allowed": true,
       "not-found": true,
@@ -2815,6 +2827,18 @@ function errorCopy(error) {
       restartAskRef.current = restartAsk;
 
       /**
+       * 宿主能不能一键重启（`/status` 的 `restart.available`）。
+       *
+       * 桌面壳管理的宿主里一键重启**必然失败**且代价是「应用整个关掉、不会自己回来」
+       * （壳持有单实例锁，替代进程被挡下后静默退出 —— 见 restart.js 的完整推理）。
+       * 所以判定为不可用时：**不弹询问窗、不显示重启横幅按钮**，改为直接告诉用户
+       * 「这个改动要重启才生效，桌面版请关掉窗口再打开」。把不可能的动作摆给用户点，
+       * 比不给按钮更糟。
+       * 默认 true（读不到 /status 时保持旧行为）；只有宿主明确说 false 才降级。
+       */
+      var restartAvailable = !(status.data && status.data.restart && status.data.restart.available === false);
+
+      /**
        * 记一笔「这个改动要重启才生效」，并在**合适的时机**弹一次询问。
        *
        * 为什么要 `defer`：`noteRestartFrom` 有 5 个调用点，其中安装那个是安装/更新/
@@ -2843,6 +2867,10 @@ function errorCopy(error) {
        */
       function maybeAskRestart(marketVersion) {
         if (restartAskRef.current !== null) return; // 已经开着，不重复弹
+        // 宿主自己说了不能一键重启（桌面壳持有单实例锁）：这里**不弹**「立即重启」。
+        // 弹了就等于把一个必然失败、且失败代价是「应用整个关掉不回来」的动作摆给用户点。
+        // 改为走下面的横幅/提示文案说明「手动重启」。
+        if (!restartAvailable) return;
         var fresh = [];
         var names = restartNamesRef.current;
         for (var i = 0; i < names.length; i++) {
@@ -3767,24 +3795,29 @@ function errorCopy(error) {
           : null,
         // 重启横幅：有待重启的改动就常驻（回答「为什么还没生效」+ 给一键动作）。
         // 重启中按钮进入忙碌态；探活回路见 beginRestartProbe——宿主死过一次才刷新页面。
+        // **宿主说不能一键重启时不给按钮**（桌面壳持有单实例锁，点了必然失败且代价是应用
+        // 整个关掉不回来）：横幅照留（用户仍需要知道「要重启才生效」），但正文改成
+        // 「请关掉窗口再打开」，不再摆一个点了会出事的按钮。
         restart && restart.pending
           ? el(Banner, {
             kind: "warn",
             title: t("restart.bannerTitle"),
             body: restart.phase === "restarting"
               ? t("notice.restartQueued")
-              : t("restart.bannerBody")
-          }, el("div", { className: "dshpm-bannerActions" },
-            el("button", {
-              type: "button",
-              className: "dshpm-btn dshpm-btn--primary dshpm-restartBtn",
-              disabled: restart.phase === "restarting",
-              "aria-busy": restart.phase === "restarting" ? "true" : "false",
-              "data-phase": restart.phase || "idle",
-              title: t("restart.title"),
-              onClick: startRestart
-            }, restart.phase === "restarting" ? el(IconSpinner, { size: 13 }) : el(IconUpgrade, { size: 13 }),
-              restart.phase === "restarting" ? t("action.restarting") : t("action.restart"))))
+              : restartAvailable ? t("restart.bannerBody") : t("restart.manualBody")
+          }, restartAvailable
+            ? el("div", { className: "dshpm-bannerActions" },
+              el("button", {
+                type: "button",
+                className: "dshpm-btn dshpm-btn--primary dshpm-restartBtn",
+                disabled: restart.phase === "restarting",
+                "aria-busy": restart.phase === "restarting" ? "true" : "false",
+                "data-phase": restart.phase || "idle",
+                title: t("restart.title"),
+                onClick: startRestart
+              }, restart.phase === "restarting" ? el(IconSpinner, { size: 13 }) : el(IconUpgrade, { size: 13 }),
+                restart.phase === "restarting" ? t("action.restarting") : t("action.restart")))
+            : null)
           : null,
         readOnly ? el(Banner, { kind: "warn", title: t("readonly.title"), body: t("readonly.body") }) : null,
         status.phase === "error"

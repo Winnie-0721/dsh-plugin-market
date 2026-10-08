@@ -34,7 +34,7 @@
   只发 10 字节后保持连接不动，会让这个 Promise **永不 settle**——handler 与 socket 一起
   无限期挂着（宿主默认 `requestTimeout` 300s 也只是把「永远」变成「五分钟」）。
   到点按 `bad-request` 明确回错。
-- 错误码清单：`bad-request`、`cross-origin`、`method-not-allowed`、`not-found`、`catalog-unavailable`、`catalog-timeout`、`manager-unavailable`、`not-in-catalog`、`install-failed`、`remove-failed`、`toggle-failed`、`restart-failed`、`not-allowed`、`internal`。
+- 错误码清单：`bad-request`、`cross-origin`、`method-not-allowed`、`not-found`、`catalog-unavailable`、`catalog-timeout`、`manager-unavailable`、`not-in-catalog`、`install-failed`、`remove-failed`、`toggle-failed`、`restart-failed`、`restart-unsupported`、`not-allowed`、`internal`。
 - 面向用户的 `message`/`hint` 用中文短句，遵守「发生了什么 / 为什么 / 现在怎么办」。
 
 ## 2. host 路由
@@ -337,6 +337,10 @@ Query 参数（全部可选，未知参数忽略）：
 
 一键重启：把「重启 DSH」从一句提示变成真动作（detached wait-and-relaunch，v1.1.6 起）。
 
+**能力探测**：`GET /status` 带 `restart: { available: boolean }`。`available:false` 表示**当前环境
+里一键重启不可能成功**，客户端必须**不显示重启按钮、不弹重启询问窗**，改为告诉用户在监管它的
+那个入口里重启。判定与 `POST /restart` 用的是同一个函数，两处不会漂移。
+
 请求体：`{}`（无字段）。要求来源判定通过（§1）。
 
 响应（**先 spawn 助手、拿到 pid 才回 200**）：`{ "ok": true, "pid": 12345, "already": false, "delayMs": 900 }`。
@@ -347,9 +351,27 @@ Query 参数（全部可选，未知参数忽略）：
   1. 端点 spawn 一个 **detached** 的等待助手（`ELECTRON_RUN_AS_NODE=1`，让它在桌面端也以 node 身份跑脚本）；
   2. 宿主延迟 `delayMs` 后 `process.exit(0)`；
   3. 助手每 300ms 轮询宿主 pid，**进程真的死掉才**用原 `execPath` + `argv` 拉起；有界等待 60s，到点没死就放弃——绝不无父拉起（双实例会撞单实例锁与端口）；
-  4. 拉起前删除 `ELECTRON_RUN_AS_NODE`（否则桌面端会以 node 模式黑窗启动），且子进程必须 `detached`——Windows 上非 detached 的子进程会随创建者退出一起被带走（本仓库 `verify/restart-helper.test.mjs` 的探针实测：detached 活、非 detached 灭）。
+  4. 拉起前删除 `ELECTRON_RUN_AS_NODE`，且子进程必须 `detached`——Windows 上非 detached 的子进程会随创建者退出一起被带走（本仓库 `verify/restart-helper.test.mjs` 的探针实测：detached 活、非 detached 灭）。
+     **注意这条删除的作用范围（v1.2.0 更正）**：它只对「以 node 身份重跑同一个入口」的场景正确。
+     早先这里的注释写「否则桌面端会以 node 模式黑窗启动」，那个理由**是错的**——桌面端根本
+     走不到这一步（见下一条）。
+- **桌面壳管理的宿主必须拒绝（v1.2.0，HIGH）**。真实拓扑（活动进程表 + `app.asar/lib/main.js`）：
+  `DeepSeek Harness.exe`（GUI 主进程，持 Electron 单实例锁）← 宿主是它的子进程，由
+  `spawn(node, ['--expose-internals', entry, …], { stdio: […, 'ipc'], env: desktopNodeEnvironment(...) })`
+  拉起，环境里带 `ELECTRON_RUN_AS_NODE=1`。
+  助手拿到的是**宿主**的 `execPath`/`argv`，删掉该变量后拉起同一个 exe = **启动 GUI**：新进程执行
+  `claimDesktopSingleInstance()` → `requestSingleInstanceLock()` 失败（GUI 主进程还持锁）→
+  立刻 `application.quit()`（实测 exit=0、无输出、231–391ms）。结果是**宿主已退出、替代品也死了，
+  整个应用什么都不剩**（壳随后弹致命对话框）。
+  **这不是某个变量写错**：`restartAllowed` 式的结论是「有监管者的部署里，重启不属于这个插件」
+  （systemd 下助手会连坐被杀，桌面壳下会被单实例锁挡在门外）。所以本插件**如实拒绝**，
+  不尝试半修：`isDesktopManagedHost()` 以「`ELECTRON_RUN_AS_NODE=1` **且** 有 IPC 通道
+  （`process.connected` + `process.send`）」两个信号判定（终端 `dsh web` 的宿主没有 IPC 通道，
+  不能被误伤），命中则 `/status` 报 `available:false`、`POST /restart` 回
+  `409 restart-unsupported` 且**不 spawn、不置 `requested`**。
 - 客户端契约：探活必须先观察到 `/status` **失败一次**（证明旧进程死了），之后恢复成功才 `location.reload()`——没有这道闸，旧进程还没退出时的 200 会被误判成新进程。60s 等不到就如实提示手动刷新，不假装成功。
-- 失败：`500 restart-failed`（助手没起来，宿主**没有**退出，可以原地重试）。
+- 失败：`500 restart-failed`（助手没起来，宿主**没有**退出，可以原地重试）；
+  `409 restart-unsupported`（环境不支持，**不是**失败，别重试——重试也只会失败）。
 - **顺序要求（v1.1.6）**：`setTimeout(process.exit)` 必须排在 `sendJson` **之前**。响应写失败
   （客户端切走、代理断开、socket 关闭）时 `sendJson` 抛错并被外层 handler 吞掉，若退出还没安排，
   而 `restart.js` 已置 `requested`，之后每次点击都回 `already:true` 并跳过安排——

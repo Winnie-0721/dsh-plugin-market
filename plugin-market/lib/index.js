@@ -31,7 +31,7 @@ import {
   sortPlugins
 } from './catalog.js'
 import { createSelfUpdater } from './self-update.js'
-import { RESTART_EXIT_DELAY_MS, spawnRestartHelper } from './restart.js'
+import { RESTART_EXIT_DELAY_MS, isDesktopManagedHost, spawnRestartHelper } from './restart.js'
 
 const PLUGIN_NAME = 'deepseek-harness-market'
 /**
@@ -567,6 +567,11 @@ function createHandlers(ctx, catalog, selfUpdate) {
         plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION },
         host: hostInfo(ctx),
         manager: { available, registries },
+        // 一键重启能不能用，必须**提前**告诉客户端：桌面壳管理的宿主里它是必然失败的，
+        // 让用户先看到「重启 DSH」按钮、点完才报错，等于把一个不可能的动作摆在他面前
+        // （而且这一步的代价是整个应用关掉且不会自己回来，见 restart.js 的 isDesktopManagedHost）。
+        // 与 POST /restart 用同一个判定，两处不会漂移。
+        restart: { available: isDesktopManagedHost() !== true },
         catalog:
           cache === null
             ? null
@@ -936,7 +941,10 @@ function createHandlers(ctx, catalog, selfUpdate) {
       if (!requireSameOrigin(req, res)) return
       const outcome = spawnRestartHelper()
       if (outcome.ok !== true) {
-        sendError(res, 500, 'restart-failed', { message: outcome.message, hint: outcome.hint })
+        // 桌面壳管理的宿主走 `restart-unsupported`：这不是「重启失败了」，而是
+        // 「这个环境里一键重启不可能成功」——用不同的码，客户端才能给出正确的下一步。
+        const code = outcome.code === 'desktop-managed' ? 'restart-unsupported' : 'restart-failed'
+        sendError(res, 409, code, { message: outcome.message, hint: outcome.hint })
         return
       }
       // **先排退出、再写响应**：两条都无害，但顺序上更稳——`sendJson` 同步写，退出在

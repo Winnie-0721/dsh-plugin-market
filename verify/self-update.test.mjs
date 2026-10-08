@@ -717,6 +717,99 @@ await checkAsync('没有 fetch 的运行环境：如实报不可用', async () =
   }
 })
 
+// ── 6. apply() 的失败形状：错误码/诊断必须透传，不许一律折成 internal ──
+// 第四轮独立审计（读 self-update.js + index.js 后实测）：
+// 宿主的 ManagementError 把可读细节放在 diagnostic、常常没有 message；apply() 只抄
+// code+message → message 变空串、diagnostic 丢掉、顶层也没有 code，于是
+// index.js 的 `result.code ?? 'internal'` 把**文件被占用 / 连不上源**这类真实原因
+// 一律报成「插件市场内部出错了」+「稍后重试」。同一类宿主失败走安装端点时字段是齐的
+// （projectChangeError 会透传 code+diagnostic），自更新是唯一丢字段的那条路。
+console.log('\n[6] apply() 的失败形状：code/diagnostic 透传、空结果不谎报成功')
+
+await checkAsync('宿主失败带 diagnostic 而无 message ⇒ 顶层 code 与 diagnostic 都要透传', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-fail-'))
+  try {
+    const manager = managerReturning({
+      application: 'failed',
+      changed: false,
+      // 宿主的真实形状：message 缺席，细节在 diagnostic
+      error: { code: 'operation-error', diagnostic: 'ERR_PNPM_EPERM: operation not permitted, scandir D:\\x' }
+    })
+    const updater = createSelfUpdater({ fetchImpl: applyFetch(), current: '1.0.0', manager, downloadDir: dir, cacheMs: 0, logger: { warn() {} } })
+    const result = await updater.apply()
+    assert.equal(result.ok, false)
+    // 这一条是关键：没有它，index.js 会回 'internal'（「插件市场内部出错了」）
+    assert.equal(result.code, 'operation-error', '顶层必须透传宿主的 code，否则报成 internal')
+    assert.equal(result.error.code, 'operation-error')
+    assert.equal(result.error.diagnostic, 'ERR_PNPM_EPERM: operation not permitted, scandir D:\\x', 'diagnostic 不许丢')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('宿主回空结果（{}）⇒ 不能算 applied（与 index.js 一致，不谎报成功）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-empty-'))
+  try {
+    // 宿主从没确认过这次安装。index.js:437 用 `optionalText(value.application) ?? 'failed'`
+    // 把它判成失败；apply() 以前会写 applied → ok:true → 客户端亮绿色「已更新到 vX」。
+    const manager = managerReturning({})
+    const updater = createSelfUpdater({ fetchImpl: applyFetch(), current: '1.0.0', manager, downloadDir: dir, cacheMs: 0, logger: { warn() {} } })
+    const result = await updater.apply()
+    assert.equal(result.ok, false, '宿主没给任何字段 ⇒ 不能算成功')
+    assert.equal(result.application, 'failed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('pendingBuilds 非空 ⇒ 放行（与 sendChangeResult 同一条规则，批准构建脚本那条路）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-pending-'))
+  try {
+    // 宿主把「pnpm 忽略了未批准的构建脚本」折成 application:'failed' + error + pendingBuilds。
+    // 契约 §18/§20 要求这条 ok 规则在 self-update.js / sendChangeResult / toggle 三处**完全一致**。
+    const manager = managerReturning({
+      application: 'failed',
+      changed: false,
+      error: { code: 'operation-error', message: 'Ignored build scripts' },
+      pendingBuilds: ['cloudflared']
+    })
+    const updater = createSelfUpdater({ fetchImpl: applyFetch(), current: '1.0.0', manager, downloadDir: dir, cacheMs: 0, logger: { warn() {} } })
+    const result = await updater.apply()
+    assert.equal(result.ok, true, 'pendingBuilds 非空是「只差批准」，不是失败到底')
+    assert.deepEqual(result.pendingBuilds, ['cloudflared'], 'pendingBuilds 也要透传出去，客户端才可能显示批准入口')
+    // 脏数据要过滤掉（与 sendChangeResult 同样只留字符串）
+    const dirty = managerReturning({ application: 'failed', error: { code: 'operation-error' }, pendingBuilds: ['ok-pkg', 42, null, ''] })
+    const updater2 = createSelfUpdater({ fetchImpl: applyFetch(), current: '1.0.0', manager: dirty, downloadDir: dir, cacheMs: 0, logger: { warn() {} } })
+    const result2 = await updater2.apply()
+    assert.deepEqual(result2.pendingBuilds, ['ok-pkg'], '非字符串/空串要过滤')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('managerOf 抛错 ⇒ 折成 manager-unavailable，不许把异常冒出 apply()', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshpm-selfupdate-throw-'))
+  try {
+    // 以前这里没有 try/catch：异常从 apply() 冒出 → index.js 外层 handler 变成
+    // 500 internal + 通用句；而 installBundle 抛错是**被正确折叠**的（install-failed），
+    // 同一类失败两种形状本身就是缺陷。
+    const updater = createSelfUpdater({
+      fetchImpl: applyFetch(),
+      current: '1.0.0',
+      managerOf: () => { throw new Error('managerOf boom') },
+      downloadDir: dir,
+      cacheMs: 0,
+      logger: { warn() {} }
+    })
+    const result = await updater.apply()
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'manager-unavailable')
+    assert.match(result.message, /managerOf boom/, '要把真实原因带出来，而不是一句「内部出错」')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ── 汇总 ────────────────────────────────────────────────────────────
 console.log('')
 if (failures.length > 0) {

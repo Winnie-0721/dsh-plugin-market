@@ -599,7 +599,22 @@ export function createSelfUpdater(options = {}) {
         hint: '这一版可能只发了 Release 附件；在终端按 Release 页面的命令升级。'
       }
     }
-    const manager = managerOf()
+    // managerOf 是宿主服务，读它本身也可能抛（注入式/自定义实现）。以前这里没有保护：
+    // 异常直接冒出 apply() → index.js 的外层 handler 把它变成 500 `internal` + 一句
+    // 「插件市场内部出错了」，而实际上这只是「拿不到 manager」——与下面 installBundle
+    // 抛错被折成 install-failed 的处理方式也不一致（同一类失败两种形状）。
+    // 折成 manager-unavailable，与「没有 pluginManager」走同一条文案与出口。
+    let manager
+    try {
+      manager = managerOf()
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'manager-unavailable',
+        message: `读取插件管理服务失败：${shortError(error)}`,
+        hint: '当前进程可能拿不到 pluginManager；用终端 dsh plugin 升级，或重启 DSH 后重试。'
+      }
+    }
     if (manager === null || typeof manager.installBundle !== 'function') {
       return { ok: false, code: 'manager-unavailable' }
     }
@@ -620,9 +635,29 @@ export function createSelfUpdater(options = {}) {
     // 自更新被渲染成成功**。这条规则与 index.js 的 sendChangeResult 必须一致
     //（那里 `cancelled` 单独放行：用户自己取消的，客户端要靠 application 渲染「已取消」，
     //  ok:false 会让 requestJSON 直接抛错，那条文案就永远不可达）。
-    const application = typeof value.application === 'string' ? value.application : failure === null ? 'applied' : 'failed'
+    //
+    // v1.2.0 补齐两处与 sendChangeResult 的漂移（独立审计实测）：
+    //   ① `pendingBuilds` 非空也要放行——见 index.js:455 的长注释（批准构建脚本那条路径）。
+    //   ② 宿主回一个**空/非对象**结果（`{}` / `undefined`）时不能算 applied：
+    //      index.js 的 `optionalText(value.application) ?? 'failed'` 把它判成失败，
+    //      这里以前会写 applied → ok:true → 客户端亮绿灯，而宿主从没确认过这次安装。
+    const pending = Array.isArray(value.pendingBuilds)
+      ? value.pendingBuilds.filter((item) => typeof item === 'string' && item !== '')
+      : []
+    // 空结果（宿主的 change() 没给出任何字段）：既没有 application 也没有 error，
+    // 无法证明装上了。application 直接判 'failed'（**与 index.js 的
+    // `optionalText(value.application) ?? 'failed'` 逐字一致**）——不能只在 ok 上收紧，
+    // 否则会出现「application:'applied' 但 ok:false」这种自相矛盾的结果，
+    // 客户端拿 application 渲染文案时又会回到「成功」。
+    const confirmed = typeof value.application === 'string' || failure !== null
+    const application = typeof value.application === 'string'
+      ? value.application
+      : 'failed'
+    const ok = application === 'cancelled' || pending.length > 0
+      ? true
+      : (failure === null && application !== 'failed' && confirmed)
     return {
-      ok: application === 'cancelled' ? true : failure === null && application !== 'failed',
+      ok,
       application,
       from: status.current,
       to: status.latest,
@@ -630,7 +665,23 @@ export function createSelfUpdater(options = {}) {
       requiresRestart: true,
       tarball: downloaded.path,
       bytes: downloaded.bytes,
-      error: failure === null ? null : { code: typeof failure.code === 'string' ? failure.code : 'install-failed', message: typeof failure.message === 'string' ? failure.message : '' },
+      // 宿主的 ManagementError 把**可读细节放在 `diagnostic`**、常常没有 `message`
+      //（index.js 的 projectChangeError 就是照这个形状投影的）。以前只抄 code+message：
+      // message 变空串、diagnostic 整个丢掉，用户只拿到一句「插件市场内部出错了」，
+      // 而真实原因是文件被占用 / 连不上源 —— 客户端那套按 code+diagnostic 选文案的逻辑
+      // （errorCopy）在自更新这条路上永远拿不到证据。两个字段都透传。
+      error: failure === null ? null : {
+        code: typeof failure.code === 'string' ? failure.code : 'install-failed',
+        message: typeof failure.message === 'string' ? failure.message : '',
+        ...(typeof failure.diagnostic === 'string' && failure.diagnostic !== ''
+          ? { diagnostic: failure.diagnostic }
+          : {})
+      },
+      pendingBuilds: pending,
+      // 顶层 `code`：index.js 的 applySelfUpdate 用 `result.code ?? 'internal'` 决定
+      // 回给客户端的错误码；不透传的话每次失败都变成「插件市场内部出错了」+「稍后重试」，
+      // 而真正该说的是「文件被占用，关掉占用的进程」。
+      ...(failure !== null && typeof failure.code === 'string' ? { code: failure.code } : {}),
       warnings: Array.isArray(value.warnings) ? value.warnings.filter((item) => typeof item === 'string') : []
     }
   }

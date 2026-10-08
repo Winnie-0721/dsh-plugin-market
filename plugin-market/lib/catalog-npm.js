@@ -100,9 +100,19 @@ export function fileFromTarBuffer(buffer, wanted) {
   return null
 }
 
-/** gunzip 后再取条目；gzip 损坏会抛错，交给调用方判为该源失败。 */
+/** gunzip 后再取条目；gzip 损坏会抛错，交给调用方判为该源失败。
+ *
+ *  **必须给解压设输出上限**：`gunzipSync` 默认无上限，而 tarball 的 `dist.integrity`
+ *  是**同一份元数据**给的——一个恶意/被劫持的镜像可以自洽地声明一个「压缩 255 KiB、
+ *  解压 256 MB」的炸弹，integrity 校验照样通过（它校验的是压缩字节），
+ *  然后在**宿主事件循环**上同步吃掉 256 MB；再大就直接 OOM 掉整个 DSH 进程。
+ *  这里按「目录 tarball 绝不可能超过 8 MB」设上限：正常目录的 tarball 只有几十 KB，
+ *  8 MB 留了 100 倍余量，同时把炸弹挡在分配之前。
+ *  独立审计实测：255 KiB → 256 MB（`p49_gzipbomb.mjs`）。 */
+export const MAX_TARBALL_BYTES = 8 * 1024 * 1024
+
 export function fileFromTarball(gzipBytes, wanted) {
-  return fileFromTarBuffer(gunzipSync(gzipBytes), wanted)
+  return fileFromTarBuffer(gunzipSync(gzipBytes, { maxOutputLength: MAX_TARBALL_BYTES }), wanted)
 }
 
 // ── 完整性校验 ─────────────────────────────────────────────────────────────

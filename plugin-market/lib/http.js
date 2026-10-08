@@ -217,16 +217,42 @@ export function requireSameOrigin(req, res) {
 /**
  * 读请求体：上限 64 KiB，超过就停下不再累积（把响应交给调用方写）。
  * 返回 `{ ok:true, value }` 或 `{ ok:false, status, code, message, hint }`。
+ *
+ * **必须有读取超时**（v1.2.0 修）：原来只有 `end` 与 `error` 两个出口，所以一个客户端
+ * 发了 `Content-Length: 100`、只给 10 字节就**保持连接不动**时，这个 Promise 永远不 settle
+ * ——handler 和 socket 一起无限期挂着（独立审计实测：卡住 2.5s 也不 settle，
+ * `p58_stall.mjs`）。宿主默认 `requestTimeout` 是 300s，靠它兜底也意味着一个连接
+ * 能占住 handler 五分钟。这里自己给 10 秒上限：写操作（安装/开关/刷新）的请求体
+ * 只有几百字节，正常客户端在毫秒级就发完了，10 秒只可能命中「坏了/被掐住」的连接。
+ * 到点按 `bad-request` 明确回错，而不是让调用方一直等。
  */
-export function readJsonBody(req, limit = MAX_BODY_BYTES) {
+export const BODY_READ_TIMEOUT_MS = 10_000
+
+export function readJsonBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_READ_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const chunks = []
     let size = 0
     let settled = false
+    let timer = null
     const finish = (result) => {
       if (settled) return
       settled = true
+      if (timer !== null) clearTimeout(timer)
       resolve(result)
+    }
+
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        finish({
+          ok: false,
+          status: 408,
+          code: 'bad-request',
+          message: '请求体读到一半就超时了。',
+          hint: '网络可能不稳定；重新提交一次。'
+        })
+      }, timeoutMs)
+      // 定时器不该自己拖住进程退出（宿主还有 HTTP server 在跑，unref 无副作用）。
+      if (typeof timer.unref === 'function') timer.unref()
     }
 
     req.on('data', (chunk) => {

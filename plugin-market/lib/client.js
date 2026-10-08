@@ -118,6 +118,12 @@ window.__ModuleLoader__.load({
         "fiber.unknown": "未知",
         "readonlyReason.management-required": "由宿主基础设施管理，市场不能开关或卸载",
         "readonlyReason.unaddressable": "宿主无法定位这个包，市场不能操作它",
+        // 宿主的 READ_ONLY_CODES 有三个码（management-required / unaddressable / not-removable），
+        // 少这一个会让 t() 返回原始 key；而且下面 `hostReason === hostReasonKey` 会把「查不到文案」
+        // 当成「没有原因」→ 开关被解锁，但宿主其实会 400 拒绝（v1.2.0 补）。
+        "readonlyReason.not-removable": "这个包不允许卸载，市场不能操作它",
+        "installed.noEntryId": "宿主没给出这个条目的 id，无法在这里开关",
+        "updates.staleFailure": "下面这份列表是上次读到的，这次读取失败：{reason}",
         "pending.title": "该插件需要执行构建脚本",
         "pending.body": "安装 {name} 前，包管理器要执行这些构建脚本：{builds}。它们会在你的机器上运行。确认后市场会带着你的批准重新提交安装。",
         "pending.approve": "允许并安装",
@@ -131,7 +137,7 @@ window.__ModuleLoader__.load({
         "notice.removeRestart": "已卸载 {name}，重启 DSH 后生效",
         "notice.removeCancelled": "{name} 的卸载已取消",
         "notice.toggleEnabled": "已启用 {name}",
-        "notice.toggleDisabled": "已停用 {name}",
+        "notice.toggleCancelled": "{name} 的开关已取消",        "notice.toggleDisabled": "已停用 {name}",
         "notice.refreshOk": "已刷新 {count} 个插件",
         "notice.noChange": "本次操作没有产生变更（宿主可能正在执行同一操作）",
         "notice.buildsPending": "{name} 需要先执行构建脚本，请在下方确认条里批准",
@@ -166,7 +172,7 @@ window.__ModuleLoader__.load({
         "err.catalog-unavailable.why": "目录源没有可用缓存，本次抓取也失败了。",
         "err.catalog-unavailable.next": "稍后点「刷新目录」重试，并确认这台机器能访问 awesome-dsh-plugin.com。",
         "err.catalog-timeout.title": "目录源响应超时",
-        "err.catalog-timeout.why": "15 秒内没有收到目录源的完整响应。",
+        "err.catalog-timeout.why": "目录源没有按时响应（镜像约 15 秒、官方源约 30 秒）。",
         "err.catalog-timeout.next": "稍后点「刷新目录」重试；其它功能不受影响。",
         "err.manager-unavailable.title": "宿主没有插件管理服务",
         "err.manager-unavailable.why": "当前 DSH 运行环境没有提供 pluginManager，市场不能安装或卸载插件。",
@@ -393,6 +399,9 @@ window.__ModuleLoader__.load({
         "fiber.unknown": "Unknown",
         "readonlyReason.management-required": "Managed by host infrastructure; the market cannot toggle or remove it",
         "readonlyReason.unaddressable": "The host cannot address this package, so the market cannot change it",
+        "readonlyReason.not-removable": "This package cannot be removed, so the market cannot change it",
+        "installed.noEntryId": "The host did not provide an id for this entry, so it cannot be toggled here",
+        "updates.staleFailure": "This list was read earlier; the latest read failed: {reason}",
         "pending.title": "This plugin needs install scripts",
         "pending.body": "Before installing {name}, the package manager wants to run these install scripts: {builds}. They run on your machine. Approve to resubmit the install with your approval.",
         "pending.approve": "Allow and install",
@@ -406,6 +415,7 @@ window.__ModuleLoader__.load({
         "notice.removeRestart": "Removed {name}; restart DSH to apply",
         "notice.removeCancelled": "The removal of {name} was cancelled",
         "notice.toggleEnabled": "Enabled {name}",
+        "notice.toggleCancelled": "The toggle of {name} was cancelled",
         "notice.toggleDisabled": "Disabled {name}",
         "notice.refreshOk": "Refreshed: {count} plugins",
         "notice.noChange": "This operation made no change (the host may already be running it)",
@@ -441,7 +451,7 @@ window.__ModuleLoader__.load({
         "err.catalog-unavailable.why": "No cached catalog exists and this fetch failed too.",
         "err.catalog-unavailable.next": "Retry with Refresh catalog in a moment, and check that this machine can reach awesome-dsh-plugin.com.",
         "err.catalog-timeout.title": "The catalog source timed out",
-        "err.catalog-timeout.why": "No complete response arrived within 15 seconds.",
+        "err.catalog-timeout.why": "The catalog source did not respond in time (about 15 seconds for a mirror, 30 for the official source).",
         "err.catalog-timeout.next": "Retry with Refresh catalog later; nothing else is affected.",
         "err.manager-unavailable.title": "The host has no plugin management service",
         "err.manager-unavailable.why": "This DSH runtime provides no pluginManager, so the market cannot install or remove plugins.",
@@ -721,9 +731,52 @@ window.__ModuleLoader__.load({
       return "badResponse";
     }
 
+    /**
+     * 把**孤立代理项**（unpaired surrogate）换成 U+FFFD。
+     *
+     * 为什么必须有：`encodeURIComponent` 遇到孤立代理项会**抛 URIError: URI malformed**。
+     * 而 search 框的值来自系统剪贴板——上游程序把 emoji 从中间截断就会留下半个代理对
+     * （实测 Edge 里粘贴 `"abc\uD83D"` 会原样进入输入框，`encodeURIComponent` 立刻抛错）。
+     * 抛错点在 `commitQueryInput → loadCatalog → catalog useEffect` 里，**没有 try/catch**，
+     * 而整个 bundle 也没有 error boundary，于是 React 会把市场面板整棵子树卸载——
+     * 用户只是在搜索框里粘贴了一下，市场页就空白了。
+     * 孤立代理项在 URL 里本来也无法表示，替换掉比抛错/useless 空白更合理。
+     * （普通输入与浏览器 maxlength 不会产生孤立代理项，只有剪贴板/上游数据会。）
+     */
+    function sanitizeUrlText(value) {
+      var text = String(value);
+      var needsWork = false;
+      for (var i = 0; i < text.length; i += 1) {
+        var code = text.charCodeAt(i);
+        if (code >= 0xD800 && code <= 0xDFFF) {
+          // 高代理项必须紧跟着低代理项才成对；否则就是孤立代理项。
+          if (code <= 0xDBFF && i + 1 < text.length) {
+            var next = text.charCodeAt(i + 1);
+            if (next >= 0xDC00 && next <= 0xDFFF) { i += 1; continue; }
+          }
+          needsWork = true;
+          break;
+        }
+      }
+      if (!needsWork) return text;
+      var out = "";
+      for (var j = 0; j < text.length; j += 1) {
+        var unit = text.charCodeAt(j);
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+          var low = j + 1 < text.length ? text.charCodeAt(j + 1) : -1;
+          if (low >= 0xDC00 && low <= 0xDFFF) { out += text[j] + text[j + 1]; j += 1; continue; }
+          out += "\uFFFD";
+          continue;
+        }
+        if (unit >= 0xDC00 && unit <= 0xDFFF) { out += "\uFFFD"; continue; }
+        out += text[j];
+      }
+      return out;
+    }
+
     function appendParam(parts, key, value) {
       if (value === undefined || value === null || value === "") return;
-      parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(value)));
+      parts.push(encodeURIComponent(sanitizeUrlText(key)) + "=" + encodeURIComponent(sanitizeUrlText(value)));
     }
 
     function requestJSON(path, options) {
@@ -960,7 +1013,16 @@ function errorCopy(error) {
         message: locked || unreachable || message,
         hint: error && error.hint ? String(error.hint) : ""
       };
-      if (!locked && !known && message) copy.why = message;
+      // 兜底：`known` 之外的未知码把宿主原话塞进 why，避免「原因未知」。
+      // **但命中 registry-unreachable 时绝不能覆盖**（v1.2.0 修）：宿主把「连不上 npm 源」
+      // 归成 `operation-error`，而 `operation-error` **不在** ERROR_PREFIXES 里 →
+      // known=false → 这行会把刚选好的专属解释（「pnpm 拉包时连不上它配置的 npm 源…
+      // 浏览目录走的是镜像，所以『能看能点、一下载就失败』正是这个现象」）覆盖成宿主的通用句
+      // 「宿主执行这个操作时报错。」——那正是 76110d9 要消灭的那句话，等于把那次修复抵消掉。
+      // 用真实 errorCopy 实测过：operation-error + ECONNRESET 诊断为
+      // why="宿主执行这个操作时报错。"（错），而同样诊断走 install-failed 时 why 正确
+      // ——差别只在 known，与是否识别出网络问题无关。
+      if (!locked && unreachable === "" && !known && message) copy.why = message;
       return copy;
     }
 
@@ -1296,6 +1358,12 @@ function errorCopy(error) {
 .dshpm-updateVersions { display:flex; align-items:center; gap:6px; font-size:.82em; color:var(--dsw-alias-label-secondary,#6b6b6b); }
 .dshpm-versionFrom { text-decoration:line-through; opacity:.75; }
 .dshpm-versionTo { color:var(--dsw-alias-state-success-primary,#1f9d55); font-weight:600; }
+/* 箭头此前只有类名没有样式（引入了类名却漏了规则），会继承整行的字号与颜色，
+   与两侧的版本号不一致。显式给它次要色 + 稍小字号。 */
+.dshpm-versionArrow { color:var(--dsw-alias-label-tertiary,#8a8a8a); font-size:.9em; }
+/* 有旧数据但这次读取失败时的提示条：黄色、一行、带重试。 */
+.dshpm-staleNote { display:flex; align-items:center; gap:6px; box-sizing:border-box; padding:8px 10px; border:1px solid var(--dsw-alias-state-warn-primary,#b7791f); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-state-warn-primary,#b7791f); font-size:.82em; }
+.dshpm-staleNote .dshpm-btn { margin-left:auto; flex:none; }
 .dshpm-updateDesc { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; overflow-wrap:anywhere; }
 .dshpm-updateActions { flex:none; display:flex; align-items:center; gap:8px; }
 .dshpm-updateResult { display:flex; align-items:center; gap:5px; font-size:.8em; color:var(--dsw-alias-state-success-primary,#1f9d55); }
@@ -1326,6 +1394,12 @@ function errorCopy(error) {
 .dshpm-row { transition:border-color .18s ease, box-shadow .2s ease; animation:dshpm-rise .28s cubic-bezier(.22,1,.36,1) backwards; }
 .dshpm-row:hover { box-shadow:0 4px 14px rgba(0,0,0,.07); }
 .dshpm-updateRow { animation:dshpm-rise .26s cubic-bezier(.22,1,.36,1) backwards; transition:border-color .18s ease, transform .16s ease, box-shadow .2s ease; }
+/* ghost（加载占位）必须用**更高特异性**压过上面那条 .dshpm-updateRow 的入场动画：
+   两条规则都是单类选择器（特异性 0,1,0）时，靠后的赢——下面那条 .dshpm-updateRow
+   会把 ghost 的 dshpm-shimmer 无限扫光覆盖成 dshpm-rise 一次性 0.26s 淡入，
+   于是两行骨架屏同时淡入一次就不动了，不再表示「正在加载」。
+   用双类选择器（0,2,0）把这条钉死，不依赖规则先后顺序。 */
+.dshpm-updateRow.dshpm-updateRow--ghost { animation:dshpm-shimmer 1.3s linear infinite; }
 .dshpm-updateRow:hover { transform:translateX(2px); }
 .dshpm-chip { transition:background-color .16s ease, color .16s ease, border-color .16s ease, transform .14s ease; }
 .dshpm-chip:hover { transform:translateY(-1px); }
@@ -2044,7 +2118,7 @@ function errorCopy(error) {
           el(SkeletonGrid, null));
       }
       if (state.phase === "error" && !state.data) {
-        return el(ErrorState, { error: state.error, onRetry: props.onRetry, retrying: state.phase === "loading" });
+        return el(ErrorState, { error: state.error, onRetry: props.onRetry });
       }
       var payload = state.data || {};
       var items = payload.items || [];
@@ -2259,14 +2333,22 @@ function errorCopy(error) {
                   return el("div", { className: "dshpm-rowHead", key: entry.entryId || entry.moduleName },
                     el("span", null, entry.entryId || entry.moduleName || ""),
                     el("span", { className: "dshpm-rowMeta" }, t("installed.fiber", { phase: formatPhaseLabel(entry.fiberPhase) })),
-                    entry.enabled === undefined ? null : el(Switch, {
-                      checked: entry.enabled !== false,
-                      disabled: locked || props.entryBusyKey === "toggle:" + entry.entryId,
-                      label: entry.enabled === false
-                        ? t("action.enable") + " " + (entry.entryId || entry.moduleName || "")
-                        : t("action.disable") + " " + (entry.entryId || entry.moduleName || ""),
-                      onToggle: function () { props.onToggleEntry(entry); }
-                    }));
+                    // 开关的可用性必须与「点了会不会真做事」一致：toggleEntry 用 `entryId`
+                    // 发请求（`if (!id) return`），所以 entryId 缺失时这颗开关是**假的**——
+                    // 看起来能点，点下去静默返回：没有请求、没有回执、状态也不变。
+                    // 宿主允许 entryId 为空（index.js 用 optionalText）。缺 id 就不渲染开关，
+                    // 改为如实说明「这个条目不能在这里开关」。
+                    entry.enabled === undefined ? null
+                      : entry.entryId
+                        ? el(Switch, {
+                            checked: entry.enabled !== false,
+                            disabled: locked || props.entryBusyKey === "toggle:" + entry.entryId,
+                            label: entry.enabled === false
+                              ? t("action.enable") + " " + (entry.entryId || entry.moduleName || "")
+                              : t("action.disable") + " " + (entry.entryId || entry.moduleName || ""),
+                            onToggle: function () { props.onToggleEntry(entry); }
+                          })
+                        : el("span", { className: "dshpm-rowMeta" }, t("installed.noEntryId")))
                 }))
                 : el("span", null, t("installed.noPlugins"))))
           )
@@ -2285,6 +2367,14 @@ function errorCopy(error) {
       var payload = state.data || {};
       var bundles = payload.bundles || [];
       var plugins = payload.plugins || [];
+      // **顺序要紧：先报错，再判空**。原来只有 `if (!bundles.length) return EmptyState`，
+      // 而失败路径会保留上一次的数据（`{phase:"error", data:{bundles:[]}}`）——
+      // 于是「本来就没装插件 + 这次刷新失败」会走到空列表分支，界面写
+      // 「这个 profile 还没有装过市场目录里的插件」+「去发现页」，**把断网说成没装插件**，
+      // 而且没有重试入口。真正的错误分支（下面的 ErrorState）在有数据时才可达。
+      if (state.phase === "error" && bundles.length === 0) {
+        return el(ErrorState, { error: state.error, onRetry: props.onRetry });
+      }
       if (!bundles.length) {
         return el(EmptyState, {
           title: t("installed.empty.title"),
@@ -2374,8 +2464,7 @@ function errorCopy(error) {
         base = { kind: "warn", applied: true, text: t("notice.installOverridden", { name: name }) };
       } else {
         base = { kind: "success", applied: true, text: kind === "remove" ? t("notice.removeApplied", { name: name }) : t("notice.installApplied", { name: name }) };
-      }
-      // 激活回读**覆盖**默认那句「已安装」：默认那句是在没证据的情况下说的，
+      }      // 激活回读**覆盖**默认那句「已安装」：默认那句是在没证据的情况下说的，
       // 现在有证据了（或有「读不到」的证据），就该按证据说。
       // 唯一例外：`changed === false`（宿主说这次什么都没改）时保留「没有产生变更」——
       // 那句本身是重要信息，用「并已在运行」盖掉就等于把「你的更新其实没落地」瞒下来了。
@@ -2385,6 +2474,26 @@ function errorCopy(error) {
       if (detailed !== null && (changed !== false || mismatch)) base = detailed;
       if (warnings) base.text = base.text + " · " + t("notice.installWarnings", { warnings: warnings });
       return base;
+    }
+
+    /**
+     * 开关结果 → 回执。**必须看 `changed` / `application`，不能只看有没有 `error`**：
+     * 宿主的 `/toggle` 用 `ok = application === 'cancelled' ? true : (error === null && application !== 'failed')`，
+     * 所以 `{application:'cancelled'}`（不带 error）会**正常 resolve**，`changed:false` 也一样。
+     * 以前两条开关路径各自手写 `kind: payload.error ? "error" : "success"` 且文案恒为
+     * 「已启用/已停用 {name}」——于是宿主明明说「什么都没改 / 已取消」，界面照样报绿色成功；
+     * 而带 error 的 cancelled 还会渲染成「红壳 + 成功文案」（级别与正文自相矛盾）。
+     * 安装/卸载早就走 noticeFromResult 处理这两种情况，开关是唯一漏掉的两处。
+     */
+    function toggleNotice(payload, name, next) {
+      var application = payload && payload.application ? String(payload.application) : "applied";
+      var changed = !payload || payload.changed !== false;
+      var successText = next ? t("notice.toggleEnabled", { name: name }) : t("notice.toggleDisabled", { name: name });
+      if (application === "cancelled") {
+        return { kind: "info", applied: false, text: t("notice.toggleCancelled", { name: name }) };
+      }
+      if (!changed) return { kind: "info", applied: false, text: t("notice.noChange") };
+      return { kind: "success", applied: true, text: successText };
     }
 
     var SORTS = [
@@ -2421,6 +2530,12 @@ function errorCopy(error) {
           ? t("updates.subtitle", { installed: props.installedCount || 0, count: props.count || 0 })
           : t("updates.subtitleEmpty", { installed: props.installedCount || 0 });
 
+      // 「有旧数据 + 这次读取失败」的提示。**必须声明在组件作用域**：它被 body() 与
+      // 下面的 return 共用；写在 body() 里会让外层读到 undefined（`undefined !== null`
+      // 成立）→ `staleFailure.message` 抛 TypeError，整个「可更新」页渲染不出来
+      // ——我第一版就犯了这个错，靠真实浏览器 e2e 的 [2c]/[4b] 才抓到。
+      var staleFailure = state.phase === "error" && state.data ? errorCopy(state.error) : null;
+
       function body() {
         if (state.phase === "loading" && !state.data) {
           return el("div", { className: "dshpm-drawerList" },
@@ -2433,6 +2548,20 @@ function errorCopy(error) {
           return el(EmptyState, {
             title: t("updates.failed.title"),
             body: t("updates.failed.body", { reason: failure.message || failure.title }),
+            actionLabel: t("action.retry"),
+            onAction: props.onReload
+          });
+        }
+        // **保留旧数据时的失败也要说出来**（v1.2.0 修）：这个页签此前**没有任何**
+        // 「有数据 + 出错」分支（发现页与已安装页都有）。`loadInstalled` 失败时会保留
+        // 上一次的 data，于是界面上看不出这次读取失败：要么继续显示过期的可更新列表，
+        // 要么——数据本来是空的时候——显示绿色语气的「全部都是最新」，
+        // **把一次网络失败说成「检查过了，没有更新」**，而且这个页签也没有重试入口。
+        // 有旧数据但这次读取失败、且列表为空：不显示「全部都是最新」（那是失败被说成成功）。
+        if (staleFailure !== null && bundles.length === 0) {
+          return el(EmptyState, {
+            title: t("updates.failed.title"),
+            body: t("updates.failed.body", { reason: staleFailure.message || staleFailure.title }),
             actionLabel: t("action.retry"),
             onAction: props.onReload
           });
@@ -2534,6 +2663,21 @@ function errorCopy(error) {
                   : el(IconUpgrade, { size: 13 }),
               self.label || t("action.checkSelf")))),
         el("div", { className: "dshpm-drawerHint" }, t("updates.hint")),
+        // 有旧数据且这次读取失败：列表还用旧的，但必须明说「这是旧的、这次没读到」，
+        // 否则用户会以为看到的是刚才那次「检查更新」的结果。
+        staleFailure !== null
+          ? el("div", {
+              className: "dshpm-staleNote",
+              role: "status"
+            },
+            el(IconAlert, { size: 12 }),
+            el("span", null, t("updates.staleFailure", { reason: staleFailure.message || staleFailure.title })),
+            el("button", {
+              type: "button",
+              className: "dshpm-btn dshpm-btn--quiet",
+              onClick: props.onReload
+            }, t("action.retry")))
+          : null,
         el("div", { className: "dshpm-drawerBody" }, body()));
     };
 
@@ -2823,6 +2967,8 @@ function errorCopy(error) {
 
       /** 「发现 N 个可更新」每次挂载只提示一次，别在每次重读列表时重复弹。 */
       var announcedRef = React.useRef(false);
+      // 待触发的「检查更新」回调；见 loadInstalled。跨请求保留，成功时消费一次。
+      var pendingInstalledDoneRef = React.useRef(null);
 
       var mountedRef = React.useRef(true);
       var registryRef = React.useRef({});
@@ -2931,6 +3077,13 @@ function errorCopy(error) {
        */
       function loadInstalled(options) {
         var announce = !!(options && options.announce);
+        // 「检查更新」的回调要能挺过一次被顶替的重读（v1.2.0 修）：
+        // startRequest 会 abort 掉同 key 的上一个请求，而 abort 路径在 isCurrent 处
+        // 直接 return，**永远走不到下面的 onDone**。于是「点了检查更新，紧接着又点
+        // 可更新页签」会让按钮永远停在「检查更新」，而 toast 已经说了有几个新版本
+        // ——回执与按钮状态自相矛盾。
+        // 把待执行的回调挂在这里，由**最终完成的那次**请求统一触发。
+        if (options && typeof options.onDone === "function") pendingInstalledDoneRef.current = options.onDone;
         var bag = startRequest("installed");
         setInstalled(function (previous) {
           return { phase: "loading", data: previous.data, error: null };
@@ -2942,7 +3095,9 @@ function errorCopy(error) {
           // 「检查更新」按钮等这个回调才能切换三态（检查过 → 一键更新 / 重新检查）。
           // 失败路径不回调：按钮留在「检查更新」，错误回执已经另发了。
           // options 在挂载时的无参调用里是 undefined——必须先判再取。
-          if (options && typeof options.onDone === "function") options.onDone(count);
+          var onDone = pendingInstalledDoneRef.current;
+          pendingInstalledDoneRef.current = null;
+          if (typeof onDone === "function") onDone(count);
           if (announce) {
             announcedRef.current = true;
             var installedTotal = payload && payload.bundles ? payload.bundles.length : 0;
@@ -2958,6 +3113,9 @@ function errorCopy(error) {
         }).catch(function (error) {
           if (error && error.aborted) return;
           if (!isCurrent("installed", bag.token)) return;
+          // 读失败就把待触发的回调丢掉：否则它会被**下一次**无关的成功重读消费掉，
+          // 于是「检查更新」按钮会在一次跟它无关的刷新后突然变成「一键更新」。
+          pendingInstalledDoneRef.current = null;
           setInstalled(function (previous) {
             return { phase: "error", data: previous.data, error: error };
           });
@@ -3252,10 +3410,7 @@ function errorCopy(error) {
           if (!mountedRef.current) return;
           clearJob(key);
           noteRestartFrom(payload, { label: bundle.name });
-          setNotice({
-            kind: payload && payload.error ? "error" : "success",
-            text: next ? t("notice.toggleEnabled", { name: bundle.name }) : t("notice.toggleDisabled", { name: bundle.name })
-          });
+          setNotice(toggleNotice(payload, bundle.name, next));
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;
@@ -3274,7 +3429,7 @@ function errorCopy(error) {
           if (!mountedRef.current) return;
           clearJob(key);
           noteRestartFrom(payload, { label: id });
-          setNotice({ kind: "success", text: next ? t("notice.toggleEnabled", { name: id }) : t("notice.toggleDisabled", { name: id }) });
+          setNotice(toggleNotice(payload, id, next));
           bumpTick();
         }).catch(function (error) {
           if (!mountedRef.current) return;

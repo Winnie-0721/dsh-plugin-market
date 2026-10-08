@@ -131,8 +131,37 @@ check('重名仓库（同一 repo 名有两个 owner）不再乱认其中一个'
   const byOwnerRepo = joinInstalled(dup, [{ name: '@aaa/dup-repo', version: '1.0.0' }])
   assert.deepEqual(byOwnerRepo.map((i) => i.installed), [true, false], '@owner/repo 必须能精确认回')
 })
-check('同一仓库的多个子插件：装了该仓库就该全部认回（不是歧义）', () => {
-  // monorepo 里 `name` 形如 `repo#sub`（`#` 后是子目录），多条共用一个仓库身份——
+check('**一方有 npm 时不判歧义是正确行为**（判成歧义会制造假阴性，不是修 bug）', () => {
+  // 第二轮独立审计把它报成 BUG B：「一个条目带 npm 就 `continue`，从不进 putBareName，
+  // 于是另一个 owner 的 git-only 同名条目静默胜出、不判歧义」。
+  // **实测后判定：这不是 bug，观察到的行为是对的。** 理由是身份归属：
+  //   aaa 的 npm 是 `@aaa/dup-repo` → 装 aaa 的插件，宿主回报的 bundle 名就是
+  //   `@aaa/dup-repo`，它走 **npmKeys 精确命中**，根本不经过裸名查找；
+  //   bbb 没有 npm（只能从 git 装）→ 它的包名才可能是裸的 `dup-repo`。
+  // 所以裸名 `dup-repo` **只可能来自 bbb**，命中 bbb 是唯一正确答案。
+  // 若按审计建议把这种情况标成 AMBIGUOUS，bbb 的用户会丢掉「已安装 / 可更新」角标
+  // ——把一次正确匹配改成假阴性，正是本文件注释反复禁止的「宁可不说」用错地方。
+  // （审计自己也复核到：真实快照上 105 个此类命中 **全部** 由已文档化的 npm 优先规则解释，
+  //   非 npm 路径 0 个，所以它没有把它们报成 bug。这个断言把该结论钉住。）
+  const mixed = [
+    normalizeItem({ name: 'dup-repo', owner: 'aaa', npm: '@aaa/dup-repo', version: '0.1.0', url: 'https://github.com/aaa/dup-repo', category: 'other' }),
+    normalizeItem({ name: 'dup-repo', owner: 'bbb', version: '0.2.0', url: 'https://github.com/bbb/dup-repo', category: 'other' })
+  ]
+  // 裸名 → 只可能来自 bbb（0.2.0），且 updateAvailable 必须为 true。
+  const bare = joinBundles([{ name: 'dup-repo', version: '0.1.0', enabled: true }], mixed)
+  assert.equal(bare[0].latest, '0.2.0', '裸名应命中 bbb（唯一可能是它的条目的那个）')
+  assert.equal(bare[0].updateAvailable, true)
+  // 带 scope 的 npm 名 → 精确命中 aaa，绝不被裸名规则抢走。
+  const scoped = joinBundles([{ name: '@aaa/dup-repo', version: '0.0.1', enabled: true }], mixed)
+  assert.equal(scoped[0].latest, '0.1.0', '@aaa/dup-repo 必须命中 aaa')
+  // 而**两边都无 npm** 时才是真歧义（上一条断言已覆盖 → latest=null）。两者必须有区别。
+  const bothGitOnly = [
+    normalizeItem({ name: 'dup-repo', owner: 'aaa', url: 'https://github.com/aaa/dup-repo', category: 'other' }),
+    normalizeItem({ name: 'dup-repo', owner: 'bbb', url: 'https://github.com/bbb/dup-repo', category: 'other' })
+  ]
+  assert.equal(joinBundles([{ name: 'dup-repo', version: '0.1.0' }], bothGitOnly)[0].latest, null, '双方都无 npm 才是真歧义')
+})
+check('同一仓库的多个子插件：装了该仓库就该全部认回（不是歧义）', () => {  // monorepo 里 `name` 形如 `repo#sub`（`#` 后是子目录），多条共用一个仓库身份——
   // 这是**正确**身份而非重名。真实目录里 50 个仓库有 2 条以上（共 463 条带 `#`）。
   const multi = [
     normalizeItem({ name: 'studio#panel-a', owner: 'acme', url: 'https://github.com/acme/studio/tree/main/packages/panel-a', category: 'other' }),
@@ -170,6 +199,27 @@ check('缺字段仍然被拒', () => {
   assert.equal(validateCatalogPayload(null).ok, false)
   assert.equal(validateCatalogPayload({ plugins: [] }).ok, false)
   assert.equal(validateCatalogPayload({ count: 1 }).ok, false)
+})
+check('**count 必须是非负整数**（负数/小数的坏数据不得清空好缓存）', () => {
+  // 本条来自第二轮独立审计（BUG A）的真实复现：核对式 `declared > 0 && actual === 0`
+  // **只挡得住正数**。上游（或坏掉的 CDN 缓存 / 恶意镜像）回一份 count 是负数或小数的
+  // 结构合法正文时，`declared > 0` 不成立 → 直接放行：
+  //
+  //   {count:-1,  plugins:[]} → ok:true  → 以 stale:false、error:null 覆盖好缓存
+  //
+  // 结果是市场整个变空、分类 chips 消失、连「缓存可能过期」的横幅都不显示，
+  // 看起来就像「真的一共有 0 个插件」——正是上面那条注释写明要挡住的形态。
+  // 复现（真实目录 4412 条先入缓存，再喂坏数据）：好目录 count=2 → 坏数据后 count=0、stale=false。
+  //
+  // 小数同理：tolerance 有 5 条余量，`{count:1.5, plugins:[{}]}` 的差值 0.5 < 5 也会被放行。
+  // 负数/小数的「条数」根本不是合法目录，判它无效不需要任何容差。
+  assert.equal(validateCatalogPayload({ count: -1, plugins: [] }).ok, false, '负数 count 必须拒')
+  assert.equal(validateCatalogPayload({ count: -3, plugins: [] }).ok, false)
+  assert.equal(validateCatalogPayload({ count: 1.5, plugins: [{}] }).ok, false, '小数 count 必须拒')
+  assert.equal(validateCatalogPayload({ count: 0.4, plugins: [] }).ok, false)
+  // 反向保证：**合法的空目录仍要放行**（既有语义，不能因为收紧而误伤）。
+  assert.equal(validateCatalogPayload({ count: 0, plugins: [] }).ok, true, 'count 为 0 的合法空目录仍放行')
+  assert.equal(validateCatalogPayload({ count: 3, plugins: [{}, {}, {}] }).ok, true)
 })
 
 console.log('\n[4] 搜索：只搜用户看得到的字段')

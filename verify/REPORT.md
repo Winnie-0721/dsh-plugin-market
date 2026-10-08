@@ -1259,6 +1259,77 @@ sha256 一致，`git status` 只有预期的两个文件。
 （e2e 第一次跑 exit=1 且输出被 wrapper 吞掉；清掉 `%TEMP%\dshpm-cdp-*` 后重跑 **exit=0、82/82**
 ——仍是上一条记的那个已知环境抖动，不是代码问题。）
 
+### 12.24 第二轮审查（并行审计）：9 处修复，其中一条把上一轮的修复整个抵消了
+
+用户第二次要求「再次审查代码 找出bug并修复」。这轮换了方法：**并行派 3 个只读独立审计**
+（catalog / self-update+restart / client 数据层与渲染层），我自己读 host 路由、`http.js`
+与进程管理。**审计这次真的返回了完整报告**（上一轮那 4 个没返回，我在结论里明确说过它们不算数），
+但我**没有直接采信**——9 条修复里每一条都先用**真函数**复现、再改、再做变异测试。
+
+**最该记住的一条：我上一轮的修复被自己抵消了（F-HIGH）**
+
+`errorCopy` 最后有一句兜底：未知错误码时把宿主原话塞进「为什么」，免得写「原因未知」。
+条件原本是 `if (!locked && !known && message)`。而我上一轮给「连不上 npm 源」加的识别依赖
+`unreachable`——**它没有被这个条件排除**：
+
+- 宿主把 pnpm 非 0 退出归成 `operation-error`；
+- `operation-error` **不在** `ERROR_PREFIXES` 里 → `known === false`；
+- → 这句兜底生效，把刚选好的专属解释覆盖成宿主的通用句「宿主执行这个操作时报错。」
+
+于是用户看到标题和「下一步」都在说「去配镜像」，**唯独「为什么」那一句退回了无效信息**
+——`76110d9` 那次修复的**全部价值就在那一句上**。修法：条件补 `unreachable === ""`。
+
+**为什么上一轮 18 条断言全绿也没拦住**：`error-classify.test.mjs` 只**直接调用**
+`fileLockedDetail` / `registryUnreachableDetail` / `shortFailureText`，并用正则断言 `message:`
+那一行。而 `errorCopy`——**真正决定用户看到哪段文案的那个函数**——在 `verify/` 里
+**从未被执行过**。两轮下来同一个教训重复出现两次：**测了零件，没测把零件组装起来的那个函数。**
+
+这条现在有牙了：新增 `verify/client-errorcopy.test.mjs`，把真 `errorCopy` 抠出来**真调**，
+断言 `operation-error + ECONNRESET 诊断` 时 `why` 必须仍是网络专属解释；
+并带三条对照（未知码仍要兜底、占用类优先、known 码不被覆盖），**变异 1/1 抓到**。
+
+**关于「谁对谁错」的两处判断（我把审计的结论改掉了一处）**
+
+- 审计把「一个条目带 npm 就 `continue`、另一个 owner 的 git-only 同名条目不判歧义」报成
+  **BUG B（HIGH）**。**我实测后判定它不是 bug，行为是对的**：`aaa` 的 npm 是
+  `@aaa/dup-repo` → 装 `aaa` 得到的是带 scope 的 bundle 名，走 npm 精确命中，**根本不经过裸名**；
+  裸名 `dup-repo` 只可能来自 `bbb`（它没有 npm）。按审计的建议改成歧义，会让 `bbb` 用户
+  **丢掉一次正确的匹配**（假阴性）。我用测试把结论钉住：混合场景下裸名必须命中 `bbb`
+  （`latest=0.2.0`），而**两边都无 npm** 时才是真歧义（`latest=null`）。
+- 审计还报 `count:1.5` 与 `count:-1` 都能通过校验——**方向对，但描述不准**：我实测
+  `{count:1.5, plugins:[]}` **是**被拒的（`declared > 0 && actual === 0` 命中），
+  漏的是 `{count:1.5, plugins:[{}]}`（差值 0.5 落在 5 条容差内）与所有负数。修法按实际漏洞写。
+
+**9 处修复（按发现顺序，全部有复现证据）**
+
+| # | 缺陷 | 复现方式 |
+|---|---|---|
+| 1 | `errorCopy` 覆盖专属解释（**抵消上一轮修复**） | 真调 `errorCopy`：修前 why=通用句，修后=网络解释 |
+| 2 | `validateCatalogPayload` 只挡正数 → 坏数据清空好缓存 | 真调：`count:-1` 放行；好目录 2 条 → 变 0 条 |
+| 3 | `readJsonBody` 无读取超时 → handler 无限期挂着 | 真起 http server + 发一半卡住：修前 2.5s 不 settle |
+| 4 | `gunzipSync` 无上限 → 解压炸弹 | 255 KiB 压缩 → 256 MB 解压；`maxOutputLength` 生效 |
+| 5 | 孤立代理项 → `URIError` → 面板整棵卸载 | 真调 `appendParam('abc\uD83D')`：修前抛 URIError |
+| 6 | 两条开关路径只看 `error` → cancelled 报成功 | 真调 `toggleNotice`：cancelled ⇒ info，不再绿色 |
+| 7 | `readOnlyReason.not-removable` 无文案 → 开关被误解锁 | 宿主的 `READ_ONLY_CODES` 三个码 vs 表里两个 |
+| 8 | `onDone` 被顶替的请求吞掉 → 按钮停在「检查更新」 | abort 路径在 `isCurrent` 处 return，走不到回调 |
+| 9 | CSS 层叠覆盖骨架屏 shimmer；一处死条件 | 同特异性、后者赢；`retrying` 写在 error 分支里恒 false |
+
+**新增两个门禁套件**（这些模块此前 `verify/` 里**一条断言都没有**）：
+`verify/robustness.test.mjs`（**9 条**）与 `verify/client-errorcopy.test.mjs`（**14 条**）。
+门禁 15 → **17 套件**；真实浏览器 e2e **82/82**；**变异 4/4 + 1/1 全捕获**。
+
+**我自己这轮犯的两个错（都留痕，因为都是方法论级别的）**
+
+1. **把反引号写进 CSS 注释**——而那整段 CSS 是 JS 的**模板字面量**，反引号直接把字符串截断，
+   `client.js` 立即语法错误。所幸门禁第一步就是 `node --check`，秒级抓到。
+   教训：**往模板字面量里写注释时，别用反引号。**
+2. **变异测试脚本被 kill 时把变异留在了磁盘上**（`http.js` 里留了个 `if (false)`），
+   而我的「还原校验」拿的**正是已被污染的内容**当基准——于是**自己认证自己通过**，
+   还把随后的失败误读成「没抓到」。修完才发现。改造后的做法：
+   **先跑基线、基线不通过就拒绝继续**；`try/finally` 保证还原；结束后**复跑基线**确认干净。
+   教训：**任何「改文件再还原」的自动化，都必须有一个独立于被改文件的基准。**
+
+
 
 
 

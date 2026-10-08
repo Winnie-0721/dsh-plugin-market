@@ -138,6 +138,16 @@ export function validateCatalogPayload(raw) {
   }
   const declared = raw.count
   const actual = raw.plugins.length
+  // count 是**条数**，必须是非负整数。负数/小数不是「目录很小」，是坏数据（或者坏掉的
+  // CDN 缓存/镜像）。这条必须**先**判：下面的核对式是 `declared > 0 && actual === 0`，
+  // 只挡得住正数——`{count:-1, plugins:[]}` 会让 `declared > 0` 不成立而直接放行，
+  // 再以 `stale:false`、`error:null` 覆盖掉好缓存：市场变空、分类消失、**连过期横幅都不显示**，
+  // 看起来就像「真的一共 0 个插件」。小数同理（tolerance 有 5 条余量，
+  // `{count:1.5, plugins:[{}]}` 的差值 0.5 < 5 也会被放行）。
+  // 合法的空目录（count:0, plugins:[]）不受影响。
+  if (!Number.isInteger(declared) || declared < 0) {
+    return { ok: false, message: `count 必须是 ≥0 的整数，收到 ${declared}。` }
+  }
   // count 声明有内容却给不出条目：这不是「目录很小」，是坏数据（截断/清空）。
   if (declared > 0 && actual === 0) {
     return { ok: false, message: `count 声明 ${declared} 个插件，但 plugins 是空的。` }
@@ -151,9 +161,15 @@ export function validateCatalogPayload(raw) {
   return { ok: true }
 }
 
-/** 分类标签表：源里是 { id: { zh, en } }，也容忍纯字符串。 */
+/** 分类标签表：源里是 { id: { zh, en } }，也容忍纯字符串。
+ *
+ *  用 `Object.create(null)` 而不是 `{}`：键来自上游 JSON，`__proto__` 这个键在普通对象上
+ *  会走**原型 setter**——声明的那条标签被当原型赋值吃掉（不成为 own key），
+ *  同时把对象的原型换成上游给的值；`categoryCounts` 随后 `labels[id] ?? {}` 读它时
+ *  就可能渲染出注入的文案（独立审计实测）。换成无原型对象后 `__proto__` 只是一个
+ *  普通 own key，行为与其它分类 id 完全一致。（已确认没有污染到 Object.prototype。） */
 export function normalizeLabels(raw) {
-  const labels = {}
+  const labels = Object.create(null)
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return labels
   for (const [id, value] of Object.entries(raw)) {
     if (id === '') continue
@@ -392,7 +408,12 @@ export function sortPlugins(plugins, sort = 'top') {
     downloads: (a, b) => numberDesc(a.downloads, b.downloads) || numberDesc(a.stars, b.stars) || byName(a, b),
     name: (a, b) => byName(a, b) || compareText(a.owner, b.owner)
   }
-  const comparator = comparators[sort]
+  // `comparators[sort]` 是**原型链**查找：`sort='constructor'` / `'toString'` 会命中原型上的
+  // 函数，于是 `=== undefined` 这道守卫被绕过，Array.sort 收到一个返回字符串的假比较器
+  // （排序结果无意义）；`'valueOf'` 还会抛一个与「未知排序」无关的 TypeError。
+  // 用 `Object.hasOwn` 限定成**自有键**（列出的四种），未知值一律走到下面那句明确报错。
+  // HTTP 路径上 index.js 已用 pickQueryEnum 校验过，这里是纵深防御 + 让错误信息可读。
+  const comparator = Object.hasOwn(comparators, sort) ? comparators[sort] : undefined
   if (comparator === undefined) {
     throw new Error(`未知排序：${sort}（只能是 top / new / downloads / name）`)
   }

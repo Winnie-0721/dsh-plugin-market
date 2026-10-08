@@ -2,6 +2,66 @@
 
 ## 1.2.0
 
+- **修 4 个稳健性缺陷 + 3 个客户端缺陷，其中一条把上一轮的修复整个抵消了**（第二轮独立审计：
+  3 个并行只读审计分别读 catalog / self-update+restart / client 数据层与渲染层，
+  我自己读 host 路由与 `http.js`）。**每条都先用真函数复现、再改、再做变异测试**
+  （变异 4/4 + 2/2 全捕获，每次按字节还原；两个新套件共 23 条断言）。
+
+  1. **`errorCopy` 把「连不上 npm 源」的专属解释覆盖回宿主的通用句**——**这一条把上一轮
+     `76110d9` 的修复整个抵消掉了**，是这轮最该记住的一条。命中 `registry-unreachable` 之后，
+     末尾那句 `if (!locked && !known && message) copy.why = message` 仍然生效：宿主把 pnpm
+     非 0 退出归成 `operation-error`，而它**不在** `ERROR_PREFIXES` 里 → `known=false` →
+     why 被写成「宿主执行这个操作时报错。」。于是用户看到标题和「下一步」都在说「去配镜像」，
+     **唯独「为什么」那一句退回了无效信息**。条件补上 `unreachable === ""`。
+     用真 `errorCopy` 实测：修前 `why=宿主执行这个操作时报错。`，修后是网络专属解释。
+     **为什么上一轮没测出来**：`error-classify.test.mjs` 只**直接调用**两个 detail 函数、
+     用正则断言 `message:` 那一行；而 `errorCopy`（真正决定用户看到哪段文案的函数）
+     在 `verify/` 里**从未被执行过**。
+  2. **`validateCatalogPayload` 的核对只挡正数**：`if (declared > 0 && actual === 0)` 对
+     `{count:-1, plugins:[]}`、`{count:1.5, plugins:[{}]}` 全部放行（前者 `declared > 0`
+     不成立，后者的差值落在 5 条容差内）。后果正是这条校验存在的理由：以
+     `stale:false, error:null` **覆盖掉好缓存** → 市场变空、分类消失、连过期横幅都不显示。
+     改为先要求 `Number.isInteger(count) && count >= 0`（合法的 `count:0` 空目录仍放行）。
+     实测：好目录 count=2 → 喂坏数据后 count=0；修后坏数据被拒。
+  3. **`readJsonBody` 没有读取超时**：只有 `end`/`error` 两个出口，客户端声明
+     `Content-Length: 100`、只发 10 字节后**保持连接不动**时 Promise 永不 settle，
+     handler 与 socket 一起无限期挂着（宿主默认 `requestTimeout` 300s 也只是把「永远」
+     变成「五分钟」）。加 10 秒上限（可注入便于测试），到点按 `bad-request` 明确回错。
+  4. **`gunzipSync` 无输出上限（解压炸弹）**：tarball 的 `dist.integrity` 来自**同一份元数据**，
+     挡不住「自洽地声明 255 KiB 压缩 / 256 MB 解压」的炸弹，而解压**同步**跑在宿主事件循环上，
+     再大就 OOM 掉整个 DSH。加 `maxOutputLength: 8 MB`（正常目录 tarball 只有几十 KB）。
+  5. **孤立代理项让整个市场面板崩掉**：剪贴板里被上游截断的半个 emoji（`"abc\uD83D"`）会让
+     `encodeURIComponent` 抛 `URIError: URI malformed`，抛点在 catalog `useEffect` 里、
+     **没有 try/catch**，bundle 也没有 error boundary → React 卸载整棵子树：用户只是粘贴了
+     一下，市场页就空白了。URL 构建前把孤立代理项换成 U+FFFD（成对 emoji 不动）。
+  6. **两条开关路径只看有没有 `error`**：宿主的 `/toggle` 让 `{application:'cancelled'}`
+     （不带 error）与 `changed:false` **正常 resolve**，于是「宿主说什么都没改」照样报绿色
+     「已启用」；带 error 的 cancelled 还会渲染成「红壳 + 成功文案」。改为统一的
+     `toggleNotice()`，与安装/卸载的 `noticeFromResult` 同一套语义。
+  7. **`readOnlyReason.not-removable` 在两张表里都没文案**：宿主的 `READ_ONLY_CODES` 有三个码，
+     客户端只有两个。查不到文案时 `hostReason === hostReasonKey` 会把「没有文案」当成
+     「没有原因」→ **开关被误解锁**（宿主其实会 400 拒绝）。补齐 zh/en。
+  8. **`onDone` 被顶替的请求吞掉**：`startRequest` 会 abort 同 key 的上一个请求，而 abort 路径
+     在 `isCurrent` 处就 return、**永远走不到 `onDone`**。于是「点检查更新 → 紧接着点可更新
+     页签」会让按钮永远停在「检查更新」，而 toast 已经说了有几个新版本。改为把回调挂在 ref 上、
+     由最终完成的那次请求消费一次（失败时丢弃，免得被下一次无关的成功消费）。
+  9. **CSS 层叠把骨架屏的 shimmer 覆盖掉**：`.dshpm-updateRow--ghost` 与 `.dshpm-updateRow`
+     都是单类选择器（特异性相同），靠后的赢 → 加载占位播的是 `.26s` 一次性淡入而不是无限扫光。
+     用双类选择器（0,2,0）钉死。另删一处**可证明不可达**的死条件
+     （`retrying: state.phase === "loading"` 写在 `phase === "error"` 分支里，恒为 false）。
+
+  **新增两个门禁套件**（这些模块此前在 `verify/` 里一条断言都没有）：
+  `verify/robustness.test.mjs`（**9 条**）与 `verify/client-errorcopy.test.mjs`（**14 条**）。
+  门禁 15 → **17 套件**；真实浏览器 e2e **82/82**。
+
+  **顺带记两条我自己的错**（都留了痕）：① 我把反引号写进 CSS 注释，而那整段 CSS 是 JS 的
+  模板字面量——直接把 `client.js` 的语法打断（靠 `node --check` 立刻抓到）；② 变异测试脚本
+  被 kill 时**把变异留在磁盘上**（`http.js` 里留了个 `if (false)`），而我的「还原校验」拿的
+  正是已被污染的内容当基准，**自己认证自己通过**。后续版本改为：先跑**基线**、基线不通过就
+  拒绝继续；用 `try/finally` 保证还原；结束后**复跑基线**确认回到干净状态。
+
+  **本次不递增版本、不打包、不发布。**
+
 - **修「更新已装插件后激活状态被误判成 unknown」**：`verifyActivation` 的候选名没去重，
   同一个字符串出现多次被当成「多个候选都命中」→ 一律报 `ambiguous-bundle`。
   真实链路：客户端「更新」发的是 `submitInstall({ name: bundle.name, spec: bundle.name })`，

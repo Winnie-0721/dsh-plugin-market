@@ -30,6 +30,10 @@
   `Host`、`Origin`、`Cookie`、`Sec-Fetch-Site`（再补上宿主 cookie），所以桌面端写请求天然不带这两个头；
   早期把它当跨站，导致 Electron 里的安装/卸载/开关/刷新全部 403。
   同时 `Content-Type` 必须是 `application/json`，请求体上限 64 KiB。
+  **读取有 10 秒上限**（v1.2.0）：只挂 `end`/`error` 时，客户端声明 `Content-Length: 100`、
+  只发 10 字节后保持连接不动，会让这个 Promise **永不 settle**——handler 与 socket 一起
+  无限期挂着（宿主默认 `requestTimeout` 300s 也只是把「永远」变成「五分钟」）。
+  到点按 `bad-request` 明确回错。
 - 错误码清单：`bad-request`、`cross-origin`、`method-not-allowed`、`not-found`、`catalog-unavailable`、`catalog-timeout`、`manager-unavailable`、`not-in-catalog`、`install-failed`、`remove-failed`、`toggle-failed`、`restart-failed`、`not-allowed`、`internal`。
 - 面向用户的 `message`/`hint` 用中文短句，遵守「发生了什么 / 为什么 / 现在怎么办」。
 
@@ -368,10 +372,18 @@ Query 参数（全部可选，未知参数忽略）：
 
 - **URL 源**：`GET <url>`，超时 30s，校验响应必须是 JSON 对象、`plugins` 为数组、`count` 为数字；拒绝 HTML（含 `<html`）或非 JSON 正文。
 - **npm 源**：`GET <registry>/dsh-plugin-catalog/latest`（15s）→ 读 `version` / `dist.tarball` / `dist.integrity`；`GET dist.tarball`（30s）→ gzip 字节；`dist.integrity` **必填**（v1.1.6 起）——元数据本身也来自网络，只信「元数据说没问题」等于没校验，缺字段即整源失败并退到下一个源；不匹配即该源失败。`node:zlib` 解压后用最小 USTAR 解析取出包内 `package/plugins.json`，**`trimStart()` 后再 `JSON.parse`**（包内文件可能带 UTF-8 BOM；URL 那条路走 `response.text()` 已被 fetch 规范自动剥掉，只有这里需要显式处理），再做同样的 JSON 结构校验。
-- **内容校验交叉核对条数**（v1.1.6）：除「对象 + `plugins` 数组 + `count` 数字」外，还要求
-  `plugins.length` 与 `count` 相差不超过 1%（`count>0` 而 `plugins` 为空一律拒绝）。
-  否则结构合法但被截断/清空的正文会以 `stale:false` 覆盖好缓存——市场整个变空、分类消失，
-  且不显示过期横幅，看起来像「真的一共 0 个插件」。
+- **内容校验交叉核对条数**（v1.1.6；v1.2.0 补漏）：除「对象 + `plugins` 数组 + `count` 数字」外，
+  还要求 `count` 是 **≥0 的整数**，且 `plugins.length` 与该 `count` 相差不超过容差
+  （`count>0` 而 `plugins` 为空一律拒绝）。否则结构合法但被截断/清空的正文会以
+  `stale:false` 覆盖好缓存——市场整个变空、分类消失，且不显示过期横幅，
+  看起来像「真的一共 0 个插件」。
+  **`count` 的整数/非负判断必须放在条数核对之前**：那条核对是 `declared > 0 && actual === 0`，
+  只挡得住正数，`{count:-1, plugins:[]}` 会让它不成立而直接放行；小数也躲得过 5 条容差
+  （`{count:1.5, plugins:[{}]}`）。合法的 `count:0` 空目录仍然放行。
+- **npm 源解压必须有输出上限**（v1.2.0）：`gunzipSync` 默认不限长，而 `dist.integrity` 来自
+  **同一份元数据**，挡不住「自洽地声明 255 KiB 压缩 / 256 MB 解压」的炸弹；解压又是**同步**
+  跑在宿主事件循环上，再大就 OOM 掉整个进程。按 `maxOutputLength = 8 MiB` 限制
+  （正常目录 tarball 只有几十 KB）。
 - 全部源都失败：无缓存 → `502 catalog-unavailable`（超时导致时 `504 catalog-timeout`），文案说明尝试过哪些源，以及可以设 `DSHM_REGISTRY_URL` / `DSHM_NPM_MIRROR`；有缓存 → 200 + `stale: true`。
 
 其它：

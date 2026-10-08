@@ -637,9 +637,16 @@ window.__ModuleLoader__.load({
     比现状更糟。真要支持这条路，必须同时给自更新加激活校验与批准入口（记在
     `docs/ROADMAP.md`），属于独立改动，不在本轮做。
 19. **错误归类行为回归**（`verify/error-classify.test.mjs` 18 条，v1.2.0 新增）：
-    **不是源码形状断言**——把真 bundle 里的 `fileLockedDetail` / `registryUnreachableDetail` /
-    `shortFailureText` 抠出来**在同一作用域求值**（后者内部调用前两者，分开求值会得到未定义），
-    再喂**从用户真实 pnpm 日志逐字抄下来的原文**。钉的是两类原因不许互相抢：
+    **不是源码形状断言**——把真 bundle 里的 `fileLockedDetail` / `supplyChainDetail` /
+    `registryUnreachableDetail` / `shortFailureText` 抠出来**在同一作用域求值**（后两者内部调用前两者，
+    分开求值会得到未定义），再喂**从用户真实 pnpm 日志逐字抄下来的原文**。钉的是三类原因不许互相抢，
+    优先级固定为 **供应链策略 > 文件占用 > 网络**：
+    ⓪ **被 pnpm 供应链策略拦下**（`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` /
+    `failed supply-chain polic` / `minimumReleaseAge cutoff`）命中 `err.supply-chain.*`，
+    且**优先于网络判定**——这类失败的日志里必然带着 pnpm 放弃下载留下的 `UND_ERR_DESTROYED`
+    与镜像 URL，网络正则会**误命中**，判成「连不上源」会让用户去配镜像而真正原因在发布冷静期上。
+    文案必须**显式排除网络方向**（zh 的 next 里不许出现 `.npmrc`/`registry=`），并把
+    「同一个包只能写一条规则」这个坑写进去；
     ① **连不上 npm 源**（`ECONNRESET` / `ETIMEDOUT` / `ENOTFOUND` / `EAI_AGAIN` / `ECONNREFUSED` /
     `UND_ERR` / `socket hang up` / `Request took Nms` / `ERR_PNPM_FETCH*` / `ERR_PNPM_META_FETCH*`）
     命中并把错误气泡切到 `err.registry-unreachable.*`（下一步给「在 profile 目录建 `.npmrc` 写
@@ -652,6 +659,21 @@ window.__ModuleLoader__.load({
     行内不报镜像 / 详情行不露诊断），变异后按字节还原。
     一条教训：**「变异没被捕获」先怀疑测试，而不是急着加断言**——第一版「行内短句不报镜像」
     没被捕获，查下来是我根本没测 `shortFailureText`，补上行为断言后才 6/6。
+    另一条（v1.2.0 末轮）：加 `supplyChainDetail` 时套用同一套抠函数写法，**忘了把它加进
+    求值 bundle**，门禁立刻报 16/18 失败、错误信息全是 `supplyChainDetail is not defined`
+    ——这类「测试替身没跟上被测代码」的失误必须靠门禁兜住，不能靠记性。
+19b. **`errorCopy` 与开关回执的行为回归**（`verify/client-errorcopy.test.mjs` 22 条，v1.2.0 新增）：
+    `error-classify` 只调三个 detail 函数 + 正则断言 `message:` 那一行，**从不执行 `errorCopy`**
+    ——而 `errorCopy` 才是真正决定用户看到哪段文案的函数，它把「选中哪个 prefix」和「兜底是否覆盖
+    why」这两件事组合起来。第二轮审计正是钻了这个空子：命中 registry-unreachable 之后 why 被宿主
+    通用句覆盖，把 `76110d9` 那次修复整个抵消。（**测试了零件 ≠ 测试了装配。**）
+    做法同样是抠真函数同作用域求值（`t` 桩返回 key 本身，选中哪个前缀直接体现在结果里）。
+    v1.2.0 末轮补 8 条，其中 2 条来自**本次用户报的真实故障**：
+    ① 用从 `operation-CQMIcN/pnpm.log` 逐字抄下的原文喂 `errorCopy`，必须得到
+    `err.supply-chain.*`（修复前实测是 `err.registry-unreachable.*` + `next=配镜像`）；
+    ② 补一条**直接调用** `registryUnreachableDetail` 的断言——它原本是 M2 变异测试里
+    **唯一没被捕获**的那条（两条调用路径都先判了供应链，所以那段自让开代码当时不承重）。
+    保留它是因为将来任何新调用点都可能直接用；补上断言让这份意图变成可验证的。
 20. **构建脚本待批准的批准路径**（`verify/build-approval.test.mjs` 9 条，v1.2.0 新增）：
     这条契约此前**只写在宿主那一侧**、插件这边漏了，漏的后果是**批准入口完全不可达**。
     宿主把「pnpm 因未批准的构建脚本非零退出」折成

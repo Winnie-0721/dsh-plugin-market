@@ -159,6 +159,10 @@ window.__ModuleLoader__.load({
         "err.registry-unreachable.why": "pnpm 在拉包时连不上它配置的 npm 源（registry.npmjs.org 在国内经常超时或被重置）。浏览目录走的是镜像，所以「能看能点、一下载就失败」正是这个现象——两件事走的不是同一条通道。",
         "err.registry-unreachable.next": "给这个 profile 配一个可用的镜像：在 profile 目录（DSH_HOME/profiles/<profile>，Windows 上通常是 %USERPROFILE%\\.dsh\\profiles\\<profile>）新建 .npmrc，写一行 registry=https://registry.npmmirror.com；然后完全退出 DSH（含托盘）再重试。",
         "err.registry-unreachable.row": "npm 源连不上，配镜像后重试",
+        "err.supply-chain.title": "被供应链策略拦下了（不是网络问题）",
+        "err.supply-chain.why": "pnpm 11 默认开了 24 小时冷静期：lockfile 里有包是 24 小时内刚发布的，它按安全策略拒绝整个 lockfile。日志末尾那几行 UND_ERR_DESTROYED / 「Will retry」是**结果不是原因**——校验一失败 pnpm 就放弃下载了。所以配镜像、换源都不会好。",
+        "err.supply-chain.next": "要么等那个包满 24 小时后再更新；要么在 profile 目录的 pnpm-workspace.yaml 里把它的**确切版本**加进 minimumReleaseAgeExclude（例如 dsh-context@0.65.0）。注意同一个包**只能写一条规则**，pnpm 匹配到第一个同名规则就返回、后面的会失效——要放行多个版本得写成一条 `dsh-context@0.64.0 || 0.65.0`。改完完全退出 DSH 再重试。",
+        "err.supply-chain.row": "被 24 小时发布冷静期拦下，见说明",
         "err.network.title": "无法连接宿主的市场接口",
         "err.network.why": "浏览器到本地宿主的请求失败，宿主可能已退出或连接被拦截。",
         "err.network.next": "确认 DSH 窗口仍在运行，然后点「重试」。",
@@ -445,6 +449,10 @@ window.__ModuleLoader__.load({
         "err.registry-unreachable.why": "pnpm could not reach the npm registry it is configured with while downloading (registry.npmjs.org frequently times out or is reset from some networks). The catalog is fetched through a mirror, which is why browsing and clicking work but the download fails — they do not use the same channel.",
         "err.registry-unreachable.next": "Configure a working mirror for this profile: create .npmrc in the profile directory (DSH_HOME/profiles/<profile>, typically %USERPROFILE%\\.dsh\\profiles\\<profile> on Windows) containing registry=https://registry.npmmirror.com, then quit DSH completely (including the tray) and retry.",
         "err.registry-unreachable.row": "npm registry unreachable — configure a mirror",
+        "err.supply-chain.title": "Blocked by a supply-chain policy (not a network problem)",
+        "err.supply-chain.why": "pnpm 11 enforces a 24-hour release cool-off by default: the lockfile contains a package published less than 24 hours ago, so pnpm rejects the whole lockfile as a safety policy. The trailing UND_ERR_DESTROYED / \"Will retry\" lines are a consequence, not the cause — pnpm abandons the download once verification fails. So configuring a mirror or switching registries will not help.",
+        "err.supply-chain.next": "Either wait for that package to age past 24 hours, or add its exact version to minimumReleaseAgeExclude in the profile's pnpm-workspace.yaml (e.g. dsh-context@0.65.0). Note that a package may only appear in one rule: pnpm returns at the first rule whose name matches and ignores the later ones — to allow several versions, write one rule such as `dsh-context@0.64.0 || 0.65.0`. Quit DSH completely after changing it, then retry.",
+        "err.supply-chain.row": "Blocked by the 24-hour release cool-off — see details",
         "err.network.title": "Cannot reach the host market endpoint",
         "err.network.why": "The request from the browser to the local host failed; the host may have exited or the connection is blocked.",
         "err.network.next": "Make sure the DSH window is still running, then retry.",
@@ -937,6 +945,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 识别「被 pnpm 供应链策略拦下」类失败（v1.2.0 新增）。
+     *
+     * 为什么必须有：pnpm 11.7 把 `minimum-release-age` 的默认值设成了 1440 分钟
+     * （src: dist/pnpm.mjs `"minimum-release-age": 24 * 60`）。lockfile 里只要有**一个**
+     * 包是 24 小时内发布的，整个 lockfile 校验就失败并抛
+     * ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION——**与 registry 通不通毫无关系**。
+     *
+     * 真实案例（用户报「dsh-mobile 更新失败」）：profile 的 pnpm-workspace.yaml 里
+     * 写了 `dsh-context@0.64.0` 和 `dsh-context@0.65.0` **两条同名规则**，而 pnpm 的
+     * evaluateVersionPolicy 匹配到第一个同名规则就 `return`，规则里的精确版本列表
+     * 不包含 0.65.0 ⇒ 0.65.0 未被豁免 ⇒ 每次都失败。三条日志全停在
+     * 「Will retry … 2 retries left」且以 UND_ERR_DESTROYED 结尾。
+     *
+     * **这个判定必须优先于 registryUnreachableDetail**：那段日志里同时有
+     * `UND_ERR_DESTROYED` 和 `https://registry.npmmirror.com/...`，网络正则照样命中，
+     * 于是会被判成「连不上 npm 源」并建议「配镜像」——方向完全错，会让人白折腾。
+     * 实测：修复前 errorCopy 对这条真实日志给出 title=连不上源 / next=配镜像。
+     *
+     * 只认 pnpm 的策略错误码/字样，不认裸词 `lockfile`（太泛）。
+     * @returns 命中时返回诊断原文，未命中返回空串。
+     */
+    function supplyChainDetail(error) {
+      if (!error) return "";
+      // 命中优先用 ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION；其次认它的人话标题。
+      var pattern = /ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION|failed supply-chain polic|minimumReleaseAge cutoff|MINIMUM_RELEASE_AGE_DENIED|ERR_PNPM_MINIMUM_RELEASE_AGE/i;
+      var diagnostic = error.diagnostic ? String(error.diagnostic) : "";
+      var message = error.message ? String(error.message) : "";
+      if (diagnostic && pattern.test(diagnostic)) return diagnostic;
+      if (message && pattern.test(message)) return message;
+      return "";
+    }
+
+    /**
      * 识别「连不上 npm 源」类失败（pnpm 的网络错误）。
      *
      * 为什么必须有：市场的**目录抓取走镜像**（catalog-npm.js 镜像优先，实测 366ms），
@@ -960,6 +1001,10 @@ window.__ModuleLoader__.load({
       var message = error.message ? String(error.message) : "";
       // 文件占用优先：那种诊断里也可能混着 registry 字样，不能被这条抢走。
       if (fileLockedDetail(error) !== "") return "";
+      // 供应链策略优先（v1.2.0 修）：策略失败的日志里必然带着 pnpm 放弃下载留下的
+      // UND_ERR_DESTROYED / 镜像 URL，网络正则会**误命中**。判成「连不上源」会让用户
+      // 去配镜像，而真正的原因在 lockfile 的发布冷静期上，怎么配都不会好。
+      if (supplyChainDetail(error) !== "") return "";
       if (diagnostic && pattern.test(diagnostic)) return diagnostic;
       if (message && pattern.test(message)) return message;
       return "";
@@ -969,9 +1014,10 @@ window.__ModuleLoader__.load({
      * 行内/短回执用的一句话失败说明：三段式放不下，只给一句能照做的短话。
      * 抽成一个函数是因为**两个调用点原本各写了一遍同样的三元表达式**——那种重复一旦
      * 只改一处，就又是一次「两处规则漂移」（本文件里已经栽过同样的跟头）。
-     * 占用的判定优先于网络判定（更具体）。
+     * 三个判定从具体到笼统：供应链策略 > 占用 > 网络。
      */
     function shortFailureText(error) {
+      if (supplyChainDetail(error) !== "") return t("err.supply-chain.row");
       if (fileLockedDetail(error) !== "") return t("err.file-locked.row");
       if (registryUnreachableDetail(error) !== "") return t("err.registry-unreachable.row");
       if (error && error.message) return String(error.message);
@@ -1003,11 +1049,16 @@ function errorCopy(error) {
       var code = error && error.code ? String(error.code) : "unknown";
       var known = !!ERROR_PREFIXES[code];
       var locked = fileLockedDetail(error);
+      // 被 pnpm 供应链策略拦下（24h 发布冷静期）：**优先于一切**（v1.2.0 新增）。
+      // 这类失败的日志里必然带着 UND_ERR_DESTROYED / 镜像 URL，网络正则会误命中，
+      // 于是给出「配镜像」的错误方向。必须排在 locked 与 unreachable 之前。
+      var supply = supplyChainDetail(error);
       // 连不上 npm 源：**优先于** `known`。宿主把它归成 operation-error（因为 pnpm 非 0 退出），
       // 而 operation-error 的通用文案是「看宿主日志里的 pnpm 输出」——对用户没有可操作性。
       // 这个判定也刻意排在 locked 之后（locked 更具体，且诊断里可能混着 registry 字样）。
-      var unreachable = locked ? "" : registryUnreachableDetail(error);
-      var prefix = locked ? "err.file-locked"
+      var unreachable = locked || supply ? "" : registryUnreachableDetail(error);
+      var prefix = supply ? "err.supply-chain"
+        : locked ? "err.file-locked"
         : unreachable !== "" ? "err.registry-unreachable"
         : known ? "err." + code : "err.unknown";
       var status = error && error.status !== undefined ? error.status : "";
@@ -1022,19 +1073,18 @@ function errorCopy(error) {
         // 详情行露出**诊断原文**：占用路径一直这么做，网络路径同样需要——
         // 否则用户看到的是宿主的通用句「宿主执行这个操作时报错。」，而不是
         // 「GET https://registry.npmjs.org/... ECONNRESET」这种能直接拿去搜的线索。
-        message: locked || unreachable || message,
+        message: supply || locked || unreachable || message,
         hint: error && error.hint ? String(error.hint) : ""
       };
       // 兜底：`known` 之外的未知码把宿主原话塞进 why，避免「原因未知」。
-      // **但命中 registry-unreachable 时绝不能覆盖**（v1.2.0 修）：宿主把「连不上 npm 源」
-      // 归成 `operation-error`，而 `operation-error` **不在** ERROR_PREFIXES 里 →
-      // known=false → 这行会把刚选好的专属解释（「pnpm 拉包时连不上它配置的 npm 源…
-      // 浏览目录走的是镜像，所以『能看能点、一下载就失败』正是这个现象」）覆盖成宿主的通用句
+      // **但命中 registry-unreachable 或 supply-chain 时绝不能覆盖**（v1.2.0 修）：
+      // 宿主把这两类都归成 `operation-error`，而 `operation-error` **不在** ERROR_PREFIXES 里 →
+      // known=false → 这行会把刚选好的专属解释覆盖成宿主的通用句
       // 「宿主执行这个操作时报错。」——那正是 76110d9 要消灭的那句话，等于把那次修复抵消掉。
       // 用真实 errorCopy 实测过：operation-error + ECONNRESET 诊断为
       // why="宿主执行这个操作时报错。"（错），而同样诊断走 install-failed 时 why 正确
       // ——差别只在 known，与是否识别出网络问题无关。
-      if (!locked && unreachable === "" && !known && message) copy.why = message;
+      if (!supply && !locked && unreachable === "" && !known && message) copy.why = message;
       return copy;
     }
 

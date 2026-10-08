@@ -2,6 +2,70 @@
 
 ## 1.2.0
 
+- **修 2 处缺陷（1 条 HIGH）+ 一个真实环境故障的根因：用户报「dsh-mobile 更新失败」**
+  （第五轮：从 `.plugin-manager/logs` 的真实失败日志倒推，逐条用 pnpm 复现，
+  修前修后都跑了**变异测试**）。
+
+  0. **「dsh-mobile 更新失败」的真根因不在插件里，在 profile 的 `pnpm-workspace.yaml`**——
+     同时暴露了插件自身 1 处 HIGH 文案缺陷（见第 1 条）。
+
+     **根因**：pnpm 11.7.0 把 `minimum-release-age` 的默认值设成 **1440 分钟（24 小时）**
+     （`dist/pnpm.mjs:145910` `"minimum-release-age": 24 * 60`，注释写着 `// 1 day`）。
+     lockfile 里只要有**一个**包是 24 小时内发布的，**整个 lockfile** 就校验失败并抛
+     `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`——与 registry 通不通无关。
+     用户的 profile 里 `dsh-context@0.65.0`（发布于故障前 19 小时）正卡在这个窗口内。
+
+     **为什么「已经加过豁免」却还是失败**：profile 里写了
+     `- dsh-context@0.64.0` 和 `- dsh-context@0.65.0` **两条同名规则**，而 pnpm 的
+     `evaluateVersionPolicy`（`pnpm.mjs:64074`）是「**匹配到第一个同名规则就 `return`**」：
+     ```js
+     for (const { nameMatcher, exactVersions } of rules) {
+       if (!nameMatcher(pkgName)) continue;
+       if (exactVersions.length === 0) return true;   // 裸包名 = 全放行
+       return exactVersions;                          // ← 只返回第一条，后面的被忽略
+     }
+     ```
+     第一条只含 0.64.0 ⇒ **0.65.0 拿不到豁免** ⇒ 每次都失败。
+     实测规律（各跑 2–3 次确认）：`0.64.0 + 0.65.0`（失败）/ `0.65.0 + 0.64.0`（**通过**）
+     ——同样的两条内容，**只改顺序结果就不同**，正是「只认第一条」的直接证据。
+
+     **修法**：把两条并成一条版本并集 `dsh-context@0.64.0 || 0.65.0`
+     （`parseExactVersionsUnion` 支持 `||`）。**刻意不用裸包名 `dsh-context`**——
+     那等于永久关掉这个包的发布冷静期保护，为修一次更新而拆掉一道供应链闸门不划算。
+     已备份原文件为 `pnpm-workspace.yaml.bak-minage-*`，改后实测真实 `pnpm add dsh-mobile@0.6.1`
+     **exit=0，dsh-mobile 0.5.5 → 0.6.1 落盘**。
+
+     **顺带确认的一件事**：我第一次复现时看到「移除豁免反而通过」，差点据此写结论——
+     核实后那是 **pnpm 把上一次的校验结果缓存了**（输出里的 `verified 8m ago`）。
+     清掉 cache/store 重跑后 A/B 稳定复现。**缓存会让错误结论看起来可复现。**
+
+  1. **「供应链策略拦下」被误报成「连不上 npm 源」，劝用户去配镜像**——HIGH。
+     真实的失败日志同时含 `[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION]` **和**
+     `GET https://registry.npmmirror.com/… error (UND_ERR_DESTROYED)`。后一行是**结果不是原因**
+     （校验一失败 pnpm 就放弃下载），但网络正则会命中它 ⇒ 修复前 `errorCopy` 给出
+     `title=连不上源 / next=配镜像`。**配镜像、换源都不可能修好**——这是「自信地指错方向」，
+     比不说话更糟：用户会照做、浪费时间，然后更困惑。
+     做法：新增 `supplyChainDetail()`（认 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` /
+     `failed supply-chain polic` / `minimumReleaseAge cutoff`），优先级排为
+     **供应链 > 占用 > 网络**（三处：`errorCopy` 的 prefix、`registryUnreachableDetail`
+     的自让开、`shortFailureText`），并新增 zh/en 的 `err.supply-chain.{title,why,next,row}`，
+     文案里**明确说了「这不是网络问题」+ 同一个包只能写一条规则**这个坑。
+     用**真实日志原文**跑修复后的 `errorCopy` 验证：`err.supply-chain.*`。
+
+  **验证**：门禁 PASS（**17 套件**；client-errorcopy **14→22**、client-copy **35→36**、
+  error-classify 18→18）；真实浏览器 e2e **82/82**。
+  新增断言全部过了**变异测试**（4/4 CAUGHT，还原后 sha256 逐字节一致）。
+  其中一条 M2 一开始是 **MISSED**——删掉 `registryUnreachableDetail` 里的供应链自让开，
+  整套测试依然全绿（两条调用路径都先判了供应链），说明那条断言当时**不承重**。
+  要么删掉那段代码，要么补一条直接调用它的断言；我选了后者（纵深防御 + 让意图可验证）。
+
+  **本轮记两条方法论**：
+  1. **「预期 vs 实际」的差要一直追到机制层**：一开始怀疑是网络（日志末尾全是 UND_ERR），
+     实测才定位到「同包名的第二条规则被 pnpm 忽略」。**看错误信息要分清哪些是被打印出来的原因、
+     哪些只是被打印出来的后果。**
+  2. **同一个包的过滤规则有顺序语义**——`minimumReleaseAgeExclude` 不是集合，是**有序规则表**。
+     这类「看起来像集合、实际是短路的规则链」的配置，顺序就是一种隐性契约。
+
 - **修 5 处缺陷，其中一条是「桌面版一键重启会把应用杀掉且不会有替代品起来」**（第四轮独立审计
   读 self-update / restart / http，我自己核对了壳内源码与活动进程表）。
 

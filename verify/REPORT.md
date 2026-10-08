@@ -1380,6 +1380,109 @@ sha256 一致，`git status` 只有预期的两个文件。
 **验证**：门禁 PASS（17 套件；self-update 46→**50**、restart-helper 8→**10**）；
 真实浏览器 e2e **82/82**。
 
+### 12.26 「dsh-mobile 更新失败」：真根因在 profile 配置，插件侧另有一个 HIGH 文案缺陷
+
+用户报「dsh-mobile 更新失败 找出问题 并解决」。从 `.plugin-manager/logs` 里最近三条失败日志
+（`operation-5Dsbrc` / `uW8mwG` / `CQMIcN`，12:34–12:35）入手，逐条用 pnpm 复现。
+
+**现象与第一直觉的偏差**：三条日志都以下面这行失败，**且末尾全都带一行网络错误**：
+
+```
+✗ Lockfile failed supply-chain policy check (72 entries in 153ms)
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:
+  dsh-context@0.65.0 was published at 2026-10-07T09:44:32.122Z, within the minimumReleaseAge cutoff (…)
+[WARN] GET https://registry.npmmirror.com/dsh-mobile/-/dsh-mobile-0.6.0.tgz error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.
+```
+
+**末尾那行是结果不是原因**：策略校验一失败，pnpm 就放弃下载，于是留下 `UND_ERR_DESTROYED`。
+
+**根因 1（环境侧）**：pnpm **11.7.0** 把 `minimum-release-age` 的**默认值**设成
+**1440 分钟（24 小时）**——`dist/pnpm.mjs:145910`：
+
+```js
+"minimum-release-age": 24 * 60,
+// 1 day
+```
+
+`pnpm config get minimumReleaseAge` 在 profile 里返回 `undefined`（没人显式配过），
+但 `node_modules/.pnpm-workspace-state-v1.json` 的 `settings.minimumReleaseAge` 是 **1440**
+——那是 pnpm 把这个默认值固化进状态缓存了。lockfile 里只要有**一个**包是 24 小时内发布的，
+**整个 lockfile** 就校验失败。`dsh-context@0.65.0`（发布于故障前 19 小时）正卡在窗口内。
+
+**根因 2（真正让用户反复失败的那一个）**：profile 的 `pnpm-workspace.yaml` 里
+写了**两条同名规则**：
+
+```yaml
+minimumReleaseAgeExclude:
+  - dsh-context@0.64.0
+  - '@furongjun1999/dsh-memory@0.8.1'
+  - dsh-context@0.65.0      # ← 这条永远不生效
+```
+
+pnpm 的 `evaluateVersionPolicy`（`pnpm.mjs:64074`）**匹配到第一个同名规则就 `return`**：
+
+```js
+for (const { nameMatcher, exactVersions } of rules) {
+  if (!nameMatcher(pkgName)) continue;
+  if (exactVersions.length === 0) return true;   // 裸包名 = 全放行
+  return exactVersions;                          // ← 只返回第一条，后面同名规则被忽略
+}
+```
+
+第一条只含 `0.64.0` ⇒ `0.65.0` **拿不到豁免** ⇒ 每次更新都失败。
+**用户其实「已经加过豁免」，只是加的那条被 pnpm 忽略了。**
+
+**实测（同一份 lockfile，只改 yaml）**：
+
+| 配置 | 结果（各跑 2–3 次） |
+|---|---|
+| `0.64.0` + `0.65.0`（原状） | FAIL |
+| `0.65.0` + `0.64.0`（**只换顺序**） | PASS |
+| `0.65.0`（删掉没用的第一条） | PASS |
+| `0.64.0 \|\| 0.65.0`（版本并集） | PASS |
+| 无豁免 | FAIL |
+
+同样的两条内容，**只改顺序结果就不同**——这是「只认第一条」最直接的证据。
+
+**一次差点写错结论的插曲**：最初复现时看到「移除 `0.65.0` 豁免反而通过」，与预期相反。
+核实后是 **pnpm 缓存了上一次的校验结果**（输出里的 `verified 8m ago`）。清掉 cache/store
+重跑后 A/B 才稳定。**缓存会让错误结论看起来可复现。**
+
+**修法**：按**最小放宽**原则修配置——写成版本并集 `dsh-context@0.64.0 || 0.65.0`
+（`parseExactVersionsUnion` 支持 `||`），**刻意不用裸包名 `dsh-context`**：那等于永久关掉
+这个包的发布冷静期保护，为修一次更新拆掉一道供应链闸门不划算。原文件备份为
+`pnpm-workspace.yaml.bak-minage-20261008-125851`。改后实测真实
+`pnpm add dsh-mobile@0.6.1` **exit=0**，`dsh-mobile 0.5.5 → 0.6.1` 落盘，manifest 同步更新。
+
+**根因 3（插件自身，HIGH）**：上面那段日志里同时有策略错误码和镜像 URL，
+而 `registryUnreachableDetail` 的正则认 `UND_ERR` ⇒ **网络判定抢走了这个失败**。
+用真实日志原文跑修复前的 `errorCopy`：
+
+```json
+{ "title": "err.registry-unreachable.title",
+  "next":  "err.registry-unreachable.next" }   // ←「配镜像」
+```
+
+**配镜像、换源都不可能修好**——这是「自信地指错方向」，比不说话更糟：用户会照做、
+浪费时间、然后更困惑。修法：新增 `supplyChainDetail()`，优先级排成
+**供应链 > 占用 > 网络**（三处一致），新增 zh/en 的 `err.supply-chain.{title,why,next,row}`，
+文案显式说明「这不是网络问题」并写进「同一个包只能写一条规则」这个坑。
+修后用**同一条真实日志**验证：`err.supply-chain.*`。
+
+**验证**：门禁 PASS（**17 套件**；client-errorcopy **14→22**、client-copy **35→36**）；
+真实浏览器 e2e **82/82**。新断言全部**变异测试 4/4 CAUGHT**，还原后 sha256 逐字节一致。
+
+其中 **M2 一开始是 MISSED**：删掉 `registryUnreachableDetail` 里的供应链自让开，
+整套测试依然全绿——说明那条断言当时**不承重**（两条调用路径都先判了供应链）。
+我选择补一条**直接调用**它的断言（纵深防御 + 让意图可验证），而不是直接删那段代码。
+
+**这一轮的两条方法论**：
+1. **分清「被打印出来的原因」和「被打印出来的后果」**：日志末尾的 `UND_ERR_DESTROYED`
+   看起来最像原因，实际是校验失败后的副产品；只盯着最后一行会修错方向。
+2. **`minimumReleaseAgeExclude` 不是集合，是有序规则表**——「看起来像集合、实际是短路的
+   规则链」的配置，顺序本身就是一份隐性契约。
+
+
 
 
 

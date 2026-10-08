@@ -102,7 +102,8 @@ check('更新失败的「文件被占用」类错误有可操作回执（照 dsh
   assert.match(source, /t\("installed\.rowError", \{ message: shortFailureText\(bundle\.error\)/, '已安装行错误走同一个短句函数')
   assert.match(source, /text: shortFailureText\(error\)/, '可更新行内失败走同一个短句函数')
   // 3) 详情行要露出诊断原文（此前 EPERM 与网络失败都只显示宿主通用句）
-  assert.match(source, /message: locked \|\| unreachable \|\| message/, '命中时详情行用诊断原文（占用与网络两种都算）')
+  // v1.2.0 起供应链策略失败也走这条路（它排在占用之前）：三级串联，缺一级就退回通用句。
+  assert.match(source, /message: supply \|\| locked \|\| unreachable \|\| message/, '命中时详情行用诊断原文（供应链、占用、网络三种都算）')
 })
 check('连不上 npm 源要给出「配镜像」的可操作回执（浏览走镜像、安装走 pnpm 的 registry）', () => {
   // 真实案例：用户报「装了俩个插件都没成功」。其中一个的 pnpm 日志里 34 次请求全是
@@ -131,6 +132,39 @@ check('连不上 npm 源要给出「配镜像」的可操作回执（浏览走�
   // 文案里不许出现渲染给用户的字面占位符（宿主只暴露 profile 名字，不给目录）
   assert.equal(source.includes('{profileDir}'), false, '不许有渲染不出来的占位符')
   assert.match(zhBlock, /DSH_HOME\/profiles\/<profile>/, '中文要给出可自行代入的路径形式')
+})
+check('被 pnpm 供应链策略拦下 ≠ 连不上源：不许再劝人配镜像（v1.2.0 修）', () => {
+  // 真实案例：用户报「dsh-mobile 更新失败」。三条日志都以
+  // ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION 失败，且末尾都带
+  // `GET https://registry.npmmirror.com/....tgz error (UND_ERR_DESTROYED)`。
+  // 那一行是**结果**（校验一失败 pnpm 就放弃下载），不是原因；但网络正则会命中它，
+  // 于是修复前 errorCopy 给出 title=连不上源 / next=配镜像——方向完全错。
+  assert.match(source, /function supplyChainDetail\(error\)/, '要有供应链策略识别函数')
+  assert.match(source, /ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION/, '要认 pnpm 的策略错误码')
+  assert.match(source, /minimumReleaseAge cutoff/, '要认它的英文说明')
+  // 优先级：network 路径必须先把自己让开，否则供应链失败仍会被判成网络
+  assert.match(source, /if \(supplyChainDetail\(error\) !== ""\) return "";/, '网络路径要先排除供应链失败')
+  assert.match(source, /var prefix = supply \? "err\.supply-chain"/, 'errorCopy 命中供应链时要切到专属文案')
+  // 三档顺序：供应链 > 占用 > 网络
+  const shortFn = source.slice(source.indexOf('function shortFailureText'), source.indexOf('function shortFailureText') + 500)
+  const iSupply = shortFn.indexOf('err.supply-chain.row')
+  const iLocked = shortFn.indexOf('err.file-locked.row')
+  const iNet = shortFn.indexOf('err.registry-unreachable.row')
+  assert.ok(iSupply >= 0 && iLocked >= 0 && iNet >= 0, '三档都要在短句函数里')
+  assert.ok(iSupply < iLocked && iLocked < iNet, '顺序必须是供应链 > 占用 > 网络')
+  // 中英都要有，且 next 不许再指向 .npmrc/镜像（那对这个问题无效）
+  for (const block of [zhBlock, enBlock]) {
+    assert.match(block, /"err\.supply-chain\.title"/, '缺 title')
+    assert.match(block, /"err\.supply-chain\.why"/, '缺 why')
+    assert.match(block, /"err\.supply-chain\.next"/, '缺 next')
+    assert.match(block, /"err\.supply-chain\.row"/, '缺 row')
+  }
+  const zhSupplyNext = /"err\.supply-chain\.next": "([^"]+)"/.exec(zhBlock)
+  assert.ok(zhSupplyNext, 'zh 的 supply-chain.next 应存在')
+  assert.equal(/\.npmrc|registry=/.test(zhSupplyNext[1]), false, '供应链的 next 不许再劝人配镜像')
+  assert.match(zhSupplyNext[1], /minimumReleaseAgeExclude/, '要给出真正的解法（豁免清单）')
+  // 同一个包只能写一条规则：这是本次故障根因，必须在文案里提醒
+  assert.match(zhSupplyNext[1], /只能写一条规则/, '要提醒同名规则只有第一条生效')
 })
 check('回执文案精简（用户反馈：toast 尽量短）', () => {
   assert.match(zhBlock, /"notice\.refreshOk": "已刷新 \{count\} 个插件"/, '刷新回执只留计数')

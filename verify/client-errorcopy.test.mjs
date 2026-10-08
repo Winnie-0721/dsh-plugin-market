@@ -50,18 +50,20 @@ function grab(signature) {
   throw new Error(`括号不配平：${signature}`)
 }
 
-// errorCopy 依赖 ERROR_PREFIXES + 两个 detail 函数（它们互相调用，必须同作用域）
+// errorCopy 依赖 ERROR_PREFIXES + 三个 detail 函数（它们互相调用，必须同作用域）
 const bundle = [
   grab('var ERROR_PREFIXES = {') + ';',
   grab('function fileLockedDetail('),
+  grab('function supplyChainDetail('),
   grab('function registryUnreachableDetail('),
   grab('function shortFailureText('),
   grab('function errorCopy(')
 ].join('\n')
-const built = new Function('t', `${bundle}\nreturn { errorCopy, fileLockedDetail, registryUnreachableDetail, shortFailureText, ERROR_PREFIXES };`)
+const built = new Function('t', `${bundle}\nreturn { errorCopy, fileLockedDetail, supplyChainDetail, registryUnreachableDetail, shortFailureText, ERROR_PREFIXES };`)
 // t 桩返回 key 本身：结果里出现 "err.registry-unreachable.why" 就说明选中了那段文案
 const api = built((key) => key)
 assert.equal(typeof api.errorCopy, 'function', '前置条件：必须抠到真实的 errorCopy')
+assert.equal(typeof api.supplyChainDetail, 'function', '前置条件：必须抠到真实的 supplyChainDetail')
 
 console.log('\n[1] errorCopy：命中的专属解释不得被宿主的通用句覆盖（HIGH，v1.2.0 修）')
 check('operation-error + 网络诊断 ⇒ why 仍是「连不上源」的专属解释', () => {
@@ -100,7 +102,93 @@ check('对照：known 的码仍走自己的文案，why 不被宿主原话覆盖
   assert.equal(plain.why, 'err.install-failed.why')
 })
 
-console.log('\n[2] 开关回执必须看 changed / application，不能只看有没有 error（MEDIUM-HIGH，v1.2.0 修）')
+console.log('\n[2] 供应链冷静期失败不得被误判成「连不上 npm 源」（HIGH，v1.2.0 修）')
+// 这是从真实失败日志 operation-CQMIcN/pnpm.log 里抄下来的原文（用户报「dsh-mobile 更新失败」）。
+// 关键点：这段日志**同时**含 UND_ERR_DESTROYED 和 registry.npmmirror.com —— 网络正则必然命中。
+// 修复前实测：title=err.registry-unreachable.title、next=err.registry-unreachable.next，
+// 也就是让用户去「配镜像」，而真正原因是 pnpm 11 默认 24h 发布冷静期拒了整个 lockfile。
+// 配镜像、换源都不可能修好，属于「自信地指错方向」。
+const REAL_SUPPLY_CHAIN_LOG = [
+  '? Verifying lockfile against supply-chain policies (72 entries)...',
+  'Progress: resolved 1, reused 0, downloaded 0, added 0',
+  '✗ Lockfile failed supply-chain policy check (72 entries in 153ms)',
+  '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:',
+  '  dsh-context@0.65.0 was published at 2026-10-07T09:44:32.122Z, within the minimumReleaseAge cutoff (2026-10-07T04:35:12.281Z)',
+  '[WARN] Issues with peer dependencies found. Run "pnpm peers check" to list them.',
+  '[WARN] GET https://registry.npmmirror.com/dsh-mobile/-/dsh-mobile-0.6.0.tgz error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left.'
+].join('\n')
+
+check('真实失败日志 ⇒ 供应链文案，不是「连不上源」', () => {
+  const copy = api.errorCopy({
+    code: 'operation-error',
+    message: '宿主执行这个操作时报错。',
+    diagnostic: REAL_SUPPLY_CHAIN_LOG
+  })
+  assert.equal(copy.title, 'err.supply-chain.title', '标题必须指向供应链策略')
+  assert.equal(copy.why, 'err.supply-chain.why', 'why 必须解释发布冷静期')
+  assert.equal(copy.next, 'err.supply-chain.next', 'next 不能是「配镜像」')
+  assert.notEqual(copy.next, 'err.registry-unreachable.next', '绝不能建议配镜像')
+  assert.match(String(copy.message), /ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION/, '详情行保留 pnpm 原文')
+})
+check('只用错误码也能认（诊断被截断时仍要认得出）', () => {
+  const copy = api.errorCopy({ code: 'install-failed', message: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION' })
+  assert.equal(copy.title, 'err.supply-chain.title')
+})
+check('对照：真正的网络故障仍然报「连不上源」（不能因为收紧而误伤）', () => {
+  const copy = api.errorCopy({
+    code: 'operation-error',
+    message: '宿主执行这个操作时报错。',
+    diagnostic: 'ERR_PNPM_FETCH_404 GET https://registry.npmjs.org/x: ECONNRESET (Request took 72331ms)'
+  })
+  assert.equal(copy.title, 'err.registry-unreachable.title', '没有策略码时必须仍是网络文案')
+  assert.equal(copy.next, 'err.registry-unreachable.next')
+})
+check('对照：占用类仍优先于供应链与网络', () => {
+  const copy = api.errorCopy({
+    code: 'operation-error',
+    diagnostic: 'EPERM: operation not permitted, scandir D:\\x'
+  })
+  assert.equal(copy.title, 'err.file-locked.title')
+})
+check('短回执也要用供应链那句（shortFailureText 三条路径一致）', () => {
+  assert.equal(api.shortFailureText({ diagnostic: REAL_SUPPLY_CHAIN_LOG }), 'err.supply-chain.row')
+  assert.equal(api.shortFailureText({ diagnostic: 'EPERM: x' }), 'err.file-locked.row')
+  assert.equal(api.shortFailureText({ diagnostic: 'ECONNRESET' }), 'err.registry-unreachable.row')
+})
+check('registryUnreachableDetail 自身也要拒绝供应链诊断（纵深防御）', () => {
+  // 这条断言是被**变异测试**逼出来的：原本我只断言 errorCopy 的结果，于是把
+  // `if (supplyChainDetail(error) !== "") return "";` 这一行删掉，整套测试依然全绿
+  // ——说明它当时并不是「承重」的（两条调用路径都先判了供应链）。
+  // 保留它是纵深防御：将来任何新调用点只要直接用 registryUnreachableDetail，
+  // 就不会把策略失败重新说成「连不上源」。这条断言让这份意图变成可验证的。
+  assert.equal(
+    api.registryUnreachableDetail({ diagnostic: REAL_SUPPLY_CHAIN_LOG }),
+    '',
+    '供应链诊断不得被网络路径认领'
+  )
+  assert.notEqual(
+    api.registryUnreachableDetail({ diagnostic: 'ECONNRESET' }),
+    '',
+    '真正的网络诊断仍要认领'
+  )
+})
+check('三档优先级在源码里是「供应链 > 占用 > 网络」（顺序写错就会退回误判）', () => {
+  const body = api.shortFailureText.toString()
+  const iSupply = body.indexOf('supply-chain.row')
+  const iLocked = body.indexOf('file-locked.row')
+  const iNet = body.indexOf('registry-unreachable.row')
+  assert.ok(iSupply >= 0 && iLocked >= 0 && iNet >= 0, '三档都要在')
+  assert.ok(iSupply < iLocked && iLocked < iNet, `顺序应为供应链<占用<网络，实际 ${iSupply}/${iLocked}/${iNet}`)
+})
+check('zh/en 两张表都有 supply-chain 三条文案（缺 en 会显示 key）', () => {
+  for (const suffix of ['title', 'why', 'next', 'row']) {
+    const needle = `"err.supply-chain.${suffix}":`
+    const count = source.split(needle).length - 1
+    assert.equal(count, 2, `err.supply-chain.${suffix} 应在 zh/en 各有一条，实际 ${count}`)
+  }
+})
+
+console.log('\n[3] 开关回执必须看 changed / application，不能只看有没有 error（MEDIUM-HIGH，v1.2.0 修）')
 // toggleNotice 与 SORTS 同级，是 var/function 声明；单独抠出来。
 const toggleSrc = grab('function toggleNotice(')
 const toggleApi = new Function('t', `${toggleSrc}\nreturn { toggleNotice };`)((key, vars) =>
@@ -138,7 +226,7 @@ check('两条开关路径都改用了这个函数（源码形状：不得再手�
   assert.equal(uses.length, 2, `toggleBundle 与 toggleEntry 都应改用 toggleNotice，实际 ${uses.length} 处`)
 })
 
-console.log('\n[3] readOnlyReason.not-removable 必须有文案（否则开关被误解锁）')
+console.log('\n[4] readOnlyReason.not-removable 必须有文案（否则开关被误解锁）')
 check('zh/en 两张表都定义了 not-removable', () => {
   const code = source
   // zh 表与 en 表各一次
@@ -156,7 +244,7 @@ check('宿主的三个 READ_ONLY_CODES 在客户端都有文案（不许漏）',
   }
 })
 
-console.log('\n[4] 请求 URL 构建：孤立代理项不得让整个面板崩掉（HIGH，v1.2.0 修）')
+console.log('\n[5] 请求 URL 构建：孤立代理项不得让整个面板崩掉（HIGH，v1.2.0 修）')
 const sanitizeSrc = grab('function sanitizeUrlText(')
 const appendSrc = grab('function appendParam(')
 const urlApi = new Function(`${sanitizeSrc}\n${appendSrc}\nreturn { appendParam, sanitizeUrlText };`)()

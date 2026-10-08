@@ -44,21 +44,24 @@ function extractFunction(name) {
 }
 
 // 只依赖彼此，不依赖 t()/STRINGS（t 用桩），可以独立求值。
-// registryUnreachableDetail 内部会调 fileLockedDetail（占用优先），shortFailureText 又会调
-// 前两者，所以**必须在同一个作用域**里求值——分开求值会让依赖在前者的闭包里变成未定义
-// （我第一次就是这么写错的）。
+// registryUnreachableDetail 内部会调 fileLockedDetail（占用优先）**和**
+// supplyChainDetail（策略优先），shortFailureText 又会调前三者+errorCopy，
+// 所以**必须在同一个作用域**里求值——分开求值会让依赖在前者的闭包里变成未定义
+// （我第一次就是这么写错的；v1.2.0 加 supplyChainDetail 时又踩了一次同样的坑，
+//  被门禁抓出来：16/18 失败，报错全是 "supplyChainDetail is not defined"）。
 const STRINGS_STUB = {
-  zh: { 'err.file-locked.row': '文件被 DSH 占用，退出后重试', 'err.registry-unreachable.row': 'npm 源连不上，配镜像后重试' },
-  en: { 'err.file-locked.row': 'In use by DSH — quit and retry', 'err.registry-unreachable.row': 'npm registry unreachable — configure a mirror' }
+  zh: { 'err.file-locked.row': '文件被 DSH 占用，退出后重试', 'err.registry-unreachable.row': 'npm 源连不上，配镜像后重试', 'err.supply-chain.row': '被 24 小时发布冷静期拦下，见说明' },
+  en: { 'err.file-locked.row': 'In use by DSH — quit and retry', 'err.registry-unreachable.row': 'npm registry unreachable — configure a mirror', 'err.supply-chain.row': 'Blocked by the 24-hour release cool-off — see details' }
 }
 const classifiers = new Function(
   't',
   `${extractFunction('fileLockedDetail')}
+${extractFunction('supplyChainDetail')}
 ${extractFunction('registryUnreachableDetail')}
 ${extractFunction('shortFailureText')}
-return { fileLockedDetail, registryUnreachableDetail, shortFailureText }`
+return { fileLockedDetail, supplyChainDetail, registryUnreachableDetail, shortFailureText }`
 )((key) => STRINGS_STUB.zh[key] ?? key)
-const { fileLockedDetail, registryUnreachableDetail, shortFailureText } = classifiers
+const { fileLockedDetail, supplyChainDetail, registryUnreachableDetail, shortFailureText } = classifiers
 
 // ── 真实样本 ──
 const REAL_NETWORK_DIAGNOSTIC = [
@@ -147,9 +150,10 @@ check('什么都没有时返回空串（调用方自己接兜底文案）', () =
 
 console.log('\n[5] 详情行要露出诊断原文（否则用户看到的是宿主的通用句）')
 check('网络诊断进详情行：能直接看到 ECONNRESET / registry 主机', () => {
-  // errorCopy 的 message 字段 = locked || unreachable || message
+  // errorCopy 的 message 字段 = supply || locked || unreachable || message
+  // （v1.2.0 起最前面多了供应链一档，它比网络更具体、必须优先）
   const src = source
-  assert.match(src, /message: locked \|\| unreachable \|\| message/, 'errorCopy 的详情行必须带上网络诊断原文')
+  assert.match(src, /message: supply \|\| locked \|\| unreachable \|\| message/, 'errorCopy 的详情行必须带上网络诊断原文')
   const detail = registryUnreachableDetail({ diagnostic: REAL_NETWORK_DIAGNOSTIC })
   assert.ok(detail.includes('registry.npmjs.org'), '诊断原文里要有源站主机，用户才能判断是哪个源')
   assert.ok(detail.includes('Request took 72331ms'), '要保留 pnpm 的耗时信息')

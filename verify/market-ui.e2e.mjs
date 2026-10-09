@@ -80,6 +80,8 @@ let consoleErrors = []
 let manualUpdateProbe = false
 /** [10] 专用开关：打开后 /install 返回「构建脚本待批准」（pendingBuilds）。 */
 let buildApprovalProbe = false
+/** [11] 专用：非 null 时 /status 会带上这个 pendingRestart（模拟「宿主进程仍然记得待重启」）。 */
+let statusProbe = null
 try {
   await client.send('Page.enable')
   await client.send('Runtime.enable')
@@ -104,9 +106,44 @@ try {
   client.on('Fetch.requestPaused', (params) => {
     const isInstall = /\/plugin-market\/install$/.test(params.request.url)
     const isSelfCheck = /\/plugin-market\/self-update/.test(params.request.url)
+    const isStatus = /\/plugin-market\/status/.test(params.request.url)
     const posted = String(params.request.postData || '')
     let payload = INJECTED_INSTALLED
     let delay = 0
+    if (isStatus) {
+      // [11]：只在探针开启时改写 /status —— 注入「宿主仍然记得待重启」。
+      // 它模拟的正是**刷新页面**那条路径：页面没有任何写操作，横幅只能靠水合出现。
+      if (statusProbe !== null) {
+        const body = Buffer.from(
+          JSON.stringify({
+            ok: true,
+            plugin: { name: 'deepseek-harness-market', version: '1.1.6' },
+            host: { dsh: null, node: 'v0.0.0', platform: 'win32', profile: 'marketcheck' },
+            manager: { available: true, registries: null },
+            // 桌面壳：一键重启不可用（横幅只留说明，不给按钮）——与真实桌面一致。
+            restart: { available: false },
+            pendingRestart: statusProbe,
+            catalog: null,
+          }),
+          'utf8',
+        ).toString('base64')
+        client
+          .send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [
+              { name: 'Content-Type', value: 'application/json' },
+              { name: 'Cache-Control', value: 'no-store' },
+            ],
+            body,
+          })
+          .catch(() => {})
+        return
+      }
+      // 探针关闭时**放行给真实宿主**（不 fulfill），否则会把真实 /status 打坏。
+      client.send('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {})
+      return
+    }
     if (isInstall && buildApprovalProbe) {
       // [10] 专用：构建脚本待批准（真实案例：装 @linxin666/dsh-remote-web-ui 时它的依赖
       // cloudflared 有 postinstall，pnpm 11 忽略它并非零退出）。
@@ -965,6 +1002,90 @@ try {
   await screenshot(client, join(shotDir, 'market-build-approval.png'))
   console.log(`  · 截图：${join(shotDir, 'market-build-approval.png')}`)
   buildApprovalProbe = false
+
+  console.log('\n[11] 刷新页面后「待重启」不许丢（v1.2.0 第六轮）')
+  // 用户报的场景：更新完插件随手刷新，横幅消失 → 以为已经生效（其实宿主还在跑旧代码）。
+  // 修法是宿主半记账、/status 带 `pendingRestart`、页面挂载时水合。
+  // 这里**真实模拟「宿主进程仍然记得」**：拦截 /status 注入 pendingRestart，
+  // 然后整页重载——页面不会有任何写操作，横幅只能来自水合。
+  statusProbe = { names: ['@fixture/needs-update'], marketVersion: null }
+  await client.send('Fetch.enable', {
+    patterns: [
+      { urlPattern: '*plugin-market/installed*', requestStage: 'Request' },
+      { urlPattern: '*plugin-market/install', requestStage: 'Request' },
+      { urlPattern: '*plugin-market/self-update*', requestStage: 'Request' },
+      { urlPattern: '*plugin-market/status*', requestStage: 'Request' },
+    ],
+  })
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '重载后侧边栏入口')
+  await evaluate(client, dismissApiDialog)
+  // **必须点开面板**：刷新后市场面板默认是关的，横幅不在 DOM 里。
+  // 我第一版只等了 `.dshpm-entry` 就去查 `.dshpm-banner`，于是永远等不到——
+  // 又是「断言站错地方」，跟功能是否生效无关。
+  await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
+  await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '重载后面板打开')
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  await waitFor(
+    client,
+    // 注意：这个模板字符串里**不能出现反引号**（连注释里也不行）——反引号会提前结束模板，
+    // 于是表达式被切成字符串拼接、`restartBtn` 变成未定义变量，跑起来报
+    // "restartBtn is not a function" 这种与现场毫不相干的错（我这一轮就是这么中的，
+    // 而且 node --check 语法是过的，只有真跑才暴露）。
+    `(() => {
+       // 不能等 .dshpm-restartBtn：桌面端 restart.available=false 时横幅照留、
+       // 但按钮故意不给（点了必然失败且代价是应用整个关掉）。我第一版就是等按钮，
+       // 于是永远等不到——那是断言站错地方，不是功能没生效。
+       const b = document.querySelector('.dshpm-banner');
+       return !!b && /待重启/.test(b.innerText);
+     })()`,
+    15000,
+    '刷新后重启横幅仍在（来自 /status 水合）',
+  )
+  const hydrated = await evaluate(
+    client,
+    `(() => {
+       const banner = document.querySelector('.dshpm-banner');
+       const btn = document.querySelector('.dshpm-restartBtn');
+       const modal = document.querySelector('.dshpm-modalLayer');
+       return {
+         bannerText: banner ? banner.innerText.replace(/\\s+/g, ' ').trim() : '',
+         hasButton: !!btn,
+         modalCount: document.querySelectorAll('.dshpm-modalLayer').length,
+       };
+     })()`,
+  )
+  expect(
+    '刷新页面后「待重启」横幅仍然出现（修复前刷新即丢）',
+    !!hydrated && /待重启/.test(String(hydrated.bannerText)),
+    JSON.stringify(hydrated),
+  )
+  expect(
+    '水合**不弹窗**（刷新不该突然跳出「立即重启/稍后重启」）',
+    Number(hydrated?.modalCount) === 0,
+    `弹窗数 ${hydrated?.modalCount}`,
+  )
+  expect(
+    '桌面端横幅里仍不给一键重启按钮（避免点了必然失败）',
+    hydrated?.hasButton === false,
+    JSON.stringify(hydrated),
+  )
+  // 反向：宿主说没有待重启项时不该凭空出现横幅（否则就是把「已生效」也说成待重启）。
+  statusProbe = null
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '再重载一次（宿主已无待重启项）')
+  await evaluate(client, dismissApiDialog)
+  await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
+  await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '再重载后面板打开')
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  const noBanner = await evaluate(
+    client,
+    `(() => {
+       const b = document.querySelector('.dshpm-banner');
+       return b && /待重启/.test(b.innerText) ? 1 : 0;
+     })()`,
+  )
+  expect('宿主没有待重启项时不得凭空出现重启横幅', Number(noBanner) === 0, `横幅数 ${noBanner}`)
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

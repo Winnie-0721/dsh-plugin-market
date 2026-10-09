@@ -438,6 +438,8 @@ export function sendChangeResult(res, result, stage, activation) {
   const pending = Array.isArray(value.pendingBuilds)
     ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
     : []
+  // 记账「改动已落盘、但当前进程还在跑旧代码」——客户端刷新页面后靠它恢复横幅。
+  noteRestartFromResult(value, value.target)
   const payload = {
     // ok 不能只看 error：宿主的 ChangeResult 里 error 是可选的，`application:'failed'`
     // 完全可能不带 error。只看 error 就会把一次失败的操作报成 ok:true，客户端据此渲染
@@ -518,6 +520,49 @@ function invalidQuery(res, picked) {
   sendError(res, 400, 'bad-request', { message: picked.message, hint: picked.hint })
 }
 
+/**
+ * 「改动已落盘、但当前进程还在跑旧代码」的**宿主半记账**（v1.2.0 第六轮）。
+ *
+ * 为什么必须放在宿主半，而不是像以前那样只记在客户端 React state 里：
+ * 那个状态**刷新页面就没了**，而「待重启」是**磁盘上的事实**，不会因为刷新而消失。
+ * 后果是用户更新完插件、随手刷新一下，横幅消失 → 他以为已经生效，其实宿主仍在跑旧代码
+ * （真实案例：用户更新 dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
+ *
+ * 语义边界（这是它能成立的关键）：
+ *   - 进程内的模块级变量。宿主**真重启**时进程换了，这个变量自然重置为空
+ *     —— 恰好就是正确的语义（重启过了就不 pending），不需要任何落盘或过期逻辑；
+ *   - 只记「宿主明说 restart-required / requiresRestart」的结果，不猜。装新包（applied）
+ *     不算，因为它已经热生效了；
+ *   - 上限 32 条，防止长时间不重启时无限增长。
+ */
+const restartPending = { names: [], marketVersion: null, at: 0 }
+
+/** 记一笔待重启。/status 每次都会带上它，所以刷新页面不会再丢。 */
+export function noteRestartFromResult(value, fallbackTarget) {
+  const source = value !== null && typeof value === 'object' ? value : {}
+  const needs = source.application === 'restart-required' || source.requiresRestart === true
+  if (!needs) return
+  const target = optionalText(source.target) ?? optionalText(fallbackTarget)
+  if (target !== null && restartPending.names.indexOf(target) === -1) {
+    restartPending.names.push(target)
+    if (restartPending.names.length > 32) restartPending.names.shift()
+  }
+  // 市场自身的自更新：正文要说「插件市场已更新到 v…」，不能混进插件名单里。
+  const to = optionalText(source.to)
+  if (to !== null) restartPending.marketVersion = to
+  restartPending.at = Date.now()
+}
+
+/** /status 用的快照。没有待重启项时返回 null，客户端据此不显示横幅。 */
+export function restartPendingSnapshot() {
+  if (restartPending.names.length === 0 && restartPending.marketVersion === null) return null
+  return {
+    names: restartPending.names.slice(),
+    marketVersion: restartPending.marketVersion,
+    since: restartPending.at
+  }
+}
+
 function createHandlers(ctx, catalog, selfUpdate) {
   /** 目录不可用时如实报错，绝不用空列表冒充「没有结果」。 */
   async function requireCatalog(res) {
@@ -572,6 +617,8 @@ function createHandlers(ctx, catalog, selfUpdate) {
         // （而且这一步的代价是整个应用关掉且不会自己回来，见 restart.js 的 isDesktopManagedHost）。
         // 与 POST /restart 用同一个判定，两处不会漂移。
         restart: { available: isDesktopManagedHost() !== true },
+        // 待重启项：宿主半的模块级记账（刷新页面不丢）。见 noteRestartFromResult 的推理。
+        pendingRestart: restartPendingSnapshot(),
         catalog:
           cache === null
             ? null
@@ -890,6 +937,9 @@ function createHandlers(ctx, catalog, selfUpdate) {
       const value = result !== null && typeof result === 'object' ? result : {}
       const error = projectChangeError(value.error)
       const application = optionalText(value.application) ?? 'failed'
+      // 开关也可能是 restart-required（宿主没有 HMR 时）——同样要记账，
+      // 否则刷新页面后这条待重启提示也会丢。
+      noteRestartFromResult(value, name ?? id)
       sendJson(res, 200, {
         // 与 sendChangeResult 用**同一条规则**：只看 error 会把 `application:'failed'`
         // 且不带 error 的一次失败开关报成 ok:true。
@@ -1017,12 +1067,16 @@ function createHandlers(ctx, catalog, selfUpdate) {
       })
       return
     }
+    // 自更新同样要记账：`to` 非空说明装上了新版本，但宿主进程还在跑旧代码——
+    // 这正是桌面用户最需要那条横幅的场景（他没有一键重启按钮，只能关窗重开）。
+    noteRestartFromResult(result, null)
     sendJson(res, 200, {
       ok: true,
       application: result.application,
       from: result.from ?? null,
       to: result.to ?? null,
       requiresRestart: result.requiresRestart === true,
+      pendingRestart: restartPendingSnapshot(),
       tarball: result.tarball ?? null,
       bytes: result.bytes ?? null,
       warnings: result.warnings ?? []

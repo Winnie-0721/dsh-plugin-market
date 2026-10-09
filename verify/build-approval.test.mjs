@@ -81,7 +81,12 @@ function loadSendChangeResult() {
     grab(hostSource, 'function optionalText('),
     grab(hostSource, 'function projectChangeError('),
     grab(hostSource, 'function warningsOf('),
-    grab(hostSource, 'function tail(')
+    grab(hostSource, 'function tail('),
+    // sendChangeResult 现在还会调 noteRestartFromResult 记账「待重启」。
+    // 本套件不测那件事（由 host-contract.test.mjs 的 [P] 覆盖），但**必须注入**，
+    // 否则整个沙箱在 ReferenceError 上炸掉、这一整套会假红。
+    // （我加了记账之后就是这么把本套件弄挂的：改一个函数要连带看谁在抠它执行。）
+    grab(hostSource, 'function noteRestartFromResult(')
   ]
     .filter(Boolean)
     .join('\n')
@@ -90,6 +95,8 @@ function loadSendChangeResult() {
     const MANAGEMENT_MESSAGE = new Map()
     const MANAGEMENT_HINT = new Map()
     const JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
+    // noteRestartFromResult 读写的模块级记账变量（本套件不测它，占位即可）。
+    const restartPending = { names: [], marketVersion: null, at: 0 }
   `
   const sandbox = new Function(`${tables}\n${helpers}\n${fnSource}\nreturn sendChangeResult`)
   return sandbox()

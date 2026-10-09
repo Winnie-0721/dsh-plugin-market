@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { sendError, sendJson, createRouteTable } from '../plugin-market/lib/http.js'
-import { sendChangeResult, findCatalogItem, verifyActivation } from '../plugin-market/lib/index.js'
+import { sendChangeResult, findCatalogItem, verifyActivation, noteRestartFromResult, restartPendingSnapshot } from '../plugin-market/lib/index.js'
 import { buildHelperCommand, buildRestartPayload, spawnRestartHelper } from '../plugin-market/lib/restart.js'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -401,6 +401,134 @@ check('install 路由真的做了前后快照并传给 sendChangeResult（源码
   assert.match(indexSource, /const before = await captureBundles\(manager\)/, '装之前要有基线')
   assert.match(indexSource, /const after = await captureBundles\(manager\)/, '装之后要回读')
   assert.match(indexSource, /sendChangeResult\(res, result, 'install', activation\)/, '要把 activation 传进去')
+})
+
+console.log('\n[P] 待重启记账：刷新页面不再丢（v1.2.0 第六轮）')
+/**
+ * 抠出「待重启记账」那两个真函数，在**全新作用域**里求值——拿到一个干净的模块实例。
+ * 为什么需要：模块级记账是共享状态，前面的用例已经把它写脏了；
+ * 在同一个实例里断言「初始是 null」永远不可能失败（我第一版就是那种假测试）。
+ * 做法与 client-errorcopy.test.mjs 的 grab 一致：抠真源码、不复制逻辑。
+ */
+function buildFreshLedger() {
+  function grab(signature) {
+    const start = indexSource.indexOf(signature)
+    if (start < 0) throw new Error(`抠不到：${signature}`)
+    let i = indexSource.indexOf('{', start)
+    let depth = 0
+    for (let j = i; j < indexSource.length; j += 1) {
+      if (indexSource[j] === '{') depth += 1
+      else if (indexSource[j] === '}') {
+        depth -= 1
+        if (depth === 0) return indexSource.slice(start, j + 1)
+      }
+    }
+    throw new Error(`括号不配平：${signature}`)
+  }
+  const body = [
+    // optionalText 是这两个函数的依赖（真源码里也是这么用的）
+    grab('function optionalText('),
+    grab('const restartPending = {'),
+    grab('export function noteRestartFromResult(').replace('export function', 'function'),
+    grab('export function restartPendingSnapshot(').replace('export function', 'function'),
+    'return { noteRestartFromResult, restartPendingSnapshot };'
+  ].join('\n')
+  return new Function(body)()
+}
+
+check('restart-required 会被记账，/status 的 pendingRestart 带出包名', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'restart-required', target: 'dsh-mobile' }, 'install')
+  const snap = restartPendingSnapshot()
+  assert.ok(snap !== null, 'restart-required 之后必须有待重启快照')
+  assert.ok(snap.names.includes('dsh-mobile'), `包名要进名单，实际 ${JSON.stringify(snap.names)}`)
+})
+check('requiresRestart:true 也记账（宿主两种写法都要认）', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'applied', requiresRestart: true, target: 'dsh-two' }, 'install')
+  assert.ok(restartPendingSnapshot().names.includes('dsh-two'))
+})
+check('applied（已经热生效）**不**记账——装了新包不该提示重启', () => {
+  const before = JSON.stringify(restartPendingSnapshot())
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'applied', target: 'dsh-three' }, 'install')
+  const after = restartPendingSnapshot()
+  const names = after === null ? [] : after.names
+  assert.equal(names.includes('dsh-three'), false, 'applied 不该进待重启名单')
+  assert.equal(JSON.stringify(after), before, '快照不应被 applied 改动')
+})
+check('failed / cancelled 都不记账（没改成就别提重启）', () => {
+  const before = JSON.stringify(restartPendingSnapshot())
+  const r1 = capture()
+  sendChangeResult(r1, { changed: false, application: 'failed', target: 'dsh-four' }, 'install')
+  const r2 = capture()
+  sendChangeResult(r2, { changed: false, application: 'cancelled', target: 'dsh-five' }, 'install')
+  const snap = restartPendingSnapshot()
+  const names = snap === null ? [] : snap.names
+  assert.equal(names.includes('dsh-four'), false)
+  assert.equal(names.includes('dsh-five'), false)
+  assert.equal(JSON.stringify(snap), before)
+})
+check('同一个包重复记账只留一条（幂等，不是数组追加）', () => {
+  const r1 = capture()
+  sendChangeResult(r1, { changed: true, application: 'restart-required', target: 'dsh-six' }, 'install')
+  const r2 = capture()
+  sendChangeResult(r2, { changed: true, application: 'restart-required', target: 'dsh-six' }, 'install')
+  const hits = restartPendingSnapshot().names.filter((n) => n === 'dsh-six').length
+  assert.equal(hits, 1, `应去重，实际出现 ${hits} 次`)
+})
+check('市场自更新的版本号单独记（正文要说「插件市场已更新到 v…」）', () => {
+  noteRestartFromResult({ application: 'restart-required', requiresRestart: true, to: '1.2.0' }, null)
+  const snap = restartPendingSnapshot()
+  assert.equal(snap.marketVersion, '1.2.0', '市场版版本要单独带出来，不能混进插件名单')
+})
+check('没有待重启项时快照是 null（客户端据此不显示横幅）', () => {
+  // 必须用一个**全新的实例**：上面那些用例已经把模块级记账写脏了，
+  // 在同一个实例里断言「初始是 null」是永远不可能失败的假测试。
+  // （我第一版就是这么写的，还把它当成通过——那等于没测。）
+  // 这里沿用 client-errorcopy 的抠函数做法：把真实源码抠出来在**新作用域**里求值，
+  // 既是同步的，又拿到一个干净实例。
+  const fresh = buildFreshLedger()
+  assert.equal(fresh.restartPendingSnapshot(), null, '全新实例里没有待重启项，必须是 null')
+  fresh.noteRestartFromResult({ application: 'applied', target: 'nope' }, null)
+  assert.equal(fresh.restartPendingSnapshot(), null, 'applied 不该让它变成非 null')
+  fresh.noteRestartFromResult({ application: 'restart-required', target: 'yes' }, null)
+  const snap = fresh.restartPendingSnapshot()
+  assert.notEqual(snap, null, 'restart-required 之后必须非 null')
+  assert.deepEqual(snap.names, ['yes'], '只该有那一个名字')
+})
+check('名单有上限 32 条（长时间不重启不会无限增长）', () => {
+  for (let i = 0; i < 40; i += 1) {
+    const res = capture()
+    sendChangeResult(res, { changed: true, application: 'restart-required', target: `dsh-cap-${i}` }, 'install')
+  }
+  const snap = restartPendingSnapshot()
+  assert.ok(snap.names.length <= 32, `上限应为 32，实际 ${snap.names.length}`)
+  assert.ok(snap.names.includes('dsh-cap-39'), '最新的必须保留（淘汰最旧的）')
+})
+check('/status 真的带上了 pendingRestart（源码形状：不是只记不报）', () => {
+  // **必须限定在 status handler 的切片里**：`pendingRestart: restartPendingSnapshot()`
+  // 在 self-update 里也有一处，全文件正则会被那一处满足——
+  // 于是「把 /status 那行删掉」也能通过（变异测试 M4 就是这么漏掉的，我第一版写法不合格）。
+  const from = indexSource.indexOf('async status(req, res)')
+  const to = indexSource.indexOf('async catalog(req, res', from)
+  assert.ok(from > 0 && to > from, '要能切出 status handler')
+  const statusBody = indexSource.slice(from, to)
+  assert.match(statusBody, /pendingRestart: restartPendingSnapshot\(\)/, '/status 要把快照带出去（刷新页面才能恢复横幅）')
+})
+check('客户端会用 /status 的 pendingRestart 水合横幅（两侧接上，缺一即断）', () => {
+  const client = readFileSync(new URL('../plugin-market/lib/client.js', import.meta.url), 'utf8')
+  assert.match(client, /function hydrateRestartFromStatus\(/, '要有水合函数')
+  assert.match(client, /hydrateRestartFromStatus\(payload\)/, 'loadStatus 成功后要调用它')
+  assert.match(client, /payload\.pendingRestart/, '要读宿主给的字段（名字对齐，不能各写各的）')
+  assert.match(client, /pendingRestart\.marketVersion/, '市场版版本也要接')
+  // 水合**不许弹窗**：刷新页面突然跳出「立即重启/稍后重启」是一次打扰；
+  // 横幅常驻已足够。弹窗只属于「当场做完写操作」那条路径。
+  const fn = client.slice(
+    client.indexOf('function hydrateRestartFromStatus('),
+    client.indexOf('function maybeAskRestart(')
+  )
+  assert.equal(/maybeAskRestart\(/.test(fn), false, '水合路径不许弹窗')
 })
 
 console.log('')

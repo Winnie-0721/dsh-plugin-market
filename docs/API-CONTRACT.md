@@ -289,6 +289,39 @@ Query 参数（全部可选，未知参数忽略）：
 热开关 `application:"applied"` → 杀掉宿主 → 重启同一 profile → `enabled` 仍是关着的。
 持久化不靠内存，所以重启不会丢开关状态。**开关与重启本身不冲突，冲突只在「同时发生」。**
 
+**为什么桌面版没有一键重启按钮（v1.2.0 第六轮，用户问「你桌面端为什么不做重启按钮」）**：
+判据是 `isDesktopManagedHost()`（`ELECTRON_RUN_AS_NODE=1` **且** 有 IPC 通道）。三条独立理由：
+
+1. **没有「请壳重启自己」的通道**。宿主→壳的 IPC 消息是**封闭白名单**，壳只认
+   `ready` / `platform-session` / `shutdown-complete` / `fatal` 四种；其余一律
+   `fail("invalid IPC event")` **并 SIGTERM 掉子进程**（`main.js:3698-3717`）。
+   所以「礼貌地请求重启」连消息类型都不存在。
+2. **宿主一退出，壳当致命故障处理，且不会自动拉回来**。`child.once("close")` 里
+   `code !== 0` 与 `code === 0` **都**走 `fail(...)`（`main.js:3721-3728`），
+   于是弹原生「启动失败」对话框。自动重启只发生在壳**自己的更新流程**里
+   （`restoreHost` 分支），普通退出不走。
+3. **那个对话框里有一颗破坏性按钮**：`[退出应用, 重启应用, 停用第三方插件]`，
+   第三颗会 `disableAllPlugins()`——一键停用**所有**第三方插件（含市场自己）。
+
+让用户在自己的应用里撞出「启动失败」框、还可能手滑停掉全部插件，比「请关掉窗口再打开」
+糟得多。**真正合规的重启通道是壳自己的 `InstallAndRestart`**（它带任务收割与交接），
+那是壳的职责，不该由插件越过它去猜。
+
+**待重启提示必须记在宿主半（v1.2.0 第六轮）**：
+客户端原来把「待重启」只存在页面 React state 里，注释还写着「刷新后没了就没了」——
+但那是**磁盘上的事实**，不会因为刷新而消失，宿主仍在跑旧代码。
+后果是用户更新完插件随手刷新 → 横幅消失 → 他以为已经生效（真实案例：用户更新
+dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
+
+修法：宿主半 `restartPending` 模块级记账 → `/status` 带 `pendingRestart` → 客户端挂载时水合。
+**语义边界**（这是它成立的关键）：
+- 进程内的模块级变量，宿主**真重启**时自然清空 —— 恰好就是正确语义，不需要落盘或过期逻辑；
+- 只记宿主明说 `restart-required` / `requiresRestart` 的结果，`applied`（已热生效）**不记**；
+- 上限 32 条；
+- 水合**不弹窗**（刷新不该突然跳出「立即重启/稍后重启」，横幅常驻已足够），
+  且不许把进行中的 `restarting` 退回 `idle`；宿主说没有待重启项时**什么都不做**，
+  而不是把已有的清掉（避免假阴性）。
+
 ### 2.7 `POST /plugin-market/refresh`
 
 强制丢弃目录缓存并重新抓取。
@@ -604,7 +637,7 @@ window.__ModuleLoader__.load({
    - 端到端（`verify/self-update-live.ps1`）：临时把当前版本降到低于最新标签 → 真的下载 → 校验 →
      `pnpm add` 装进 scratch profile（依赖变为 `file:` 指向下载物）→ 结束时按字节还原本地 `package.json`。
 10. **同一路径的 GET 与 POST 必须只有一个路由登记项**：路由表以 path 为键，登记两次会互相覆盖，`GET /self-update` 会变成 405。改这里要重跑 §5 第 9 条的 GET 断言。
-11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，83 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧**首屏就是「一键更新（2）」**与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）、**有更新时不再存在多余的「检查更新」按钮**（用户第四轮：`["检查更新","插件市场更新"]` 是错的，应为 `["一键更新（2）","插件市场更新"]`）；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
+11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，90 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧**首屏就是「一键更新（2）」**与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）、**有更新时不再存在多余的「检查更新」按钮**（用户第四轮：`["检查更新","插件市场更新"]` 是错的，应为 `["一键更新（2）","插件市场更新"]`）；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
 12. **文案与动效不变量**（`verify/client-copy.test.mjs`）：zh/en 键集完全一致；代码里用到的每个 `t("字面量键")` 都在两种语言里存在；没有僵尸文案键；被引用的 `@keyframes` 都有定义；没有任何升入动画用 `forwards`/`both`；顶部黑条进度条（`.dshpm-progress`）不存在；更新失败的 `EPERM`/拒绝访问必须被 `fileLockedDetail` 识别并切到 `err.file-locked.*`（三处接入：错误气泡、可更新行内、已安装行错误）；回执文案保持精简形态（`已刷新 {count} 个插件` 等）；「检查更新」合并状态机存在（`checkPhase`/`onCheckUpdates`/页脚 `drawerFoot` 已删、插件市场更新按钮同为 primary），
 且**有更新时必须直接给「一键更新（N）」**（`var canUpdateAll = bundles.length > 0;`——不许再有
 `checked && bundles.length > 0` 这个「先点一次检查」的前置条件；v1.2.0 用户第四轮改正）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。

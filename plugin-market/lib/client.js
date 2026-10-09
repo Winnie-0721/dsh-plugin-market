@@ -2896,8 +2896,12 @@ function errorCopy(error) {
       }, []);
 
       // ── 重启助手 ── pending：本轮会话里有改动装好待重启；phase：idle / restarting / failed。
-      // 状态放页面内存而不是持久化：重启会把页面带走，「待重启」本来就是一次性的，
-      // 页面刷新后没了就没了——不谎称还在等。
+      // **不能只放页面内存**（v1.2.0 第六轮修）：以前这里写着「刷新后没了就没了」，
+      // 但「待重启」是**磁盘上的事实**，不会因为刷新而消失——主机进程仍在跑旧代码。
+      // 后果：用户更新完插件随手刷新一下，横幅消失 → 他以为已经生效（真实案例：用户更新
+      // dsh-mobile 后问「是默认生效的吗」）。
+      // 现在由**宿主半**记账（node 模块级变量，`/status` 的 `pendingRestart`），页面挂载时水合；
+      // 宿主真重启时那个变量自然清空，语义自动正确，不需要任何落盘或过期逻辑。
       var restartState = React.useState(null);
       var restart = restartState[0];
       var setRestart = restartState[1];
@@ -2952,6 +2956,37 @@ function errorCopy(error) {
           return { pending: true, phase: previous && previous.phase === "restarting" ? "restarting" : "idle" };
         });
         if (opts.defer !== true) maybeAskRestart(opts.marketVersion ? String(opts.marketVersion) : null);
+      }
+
+      /**
+       * 用 `/status` 的 `pendingRestart` 水合横幅（v1.2.0 第六轮）。
+       *
+       * 为什么需要：`noteRestartFrom` 只在**收到写操作响应那一刻**记一笔，记在页面内存里，
+       * 刷新即失。而「待重启」是磁盘事实，刷新不会让它消失——宿主仍在跑旧代码。
+       * 用户随手刷新后横幅消失，就会以为已经生效（真实案例：更新 dsh-mobile 后问「是默认生效的吗」）。
+       *
+       * 三条边界：
+       *   - **不覆盖正在进行中的重启**（phase 已是 restarting 就别退回 idle，否则按钮会
+       *     从「正在重启」突然变回可点）；
+       *   - **不弹窗**。刷新页面不该突然跳出「立即重启 / 稍后重启」——那是一次打扰；
+       *     横幅常驻已经足够说明「为什么还没生效」，用户想重启会自己去点。
+       *     （弹窗只在**当场做完写操作**时弹，见 maybeAskRestart。）
+       *   - 宿主说没有待重启项时**什么都不做**，而不是把已有的清掉：宿主刚重启过的话
+       *     页面本来也会重载，这里保守一点不会造成假阳性。
+       */
+      function hydrateRestartFromStatus(payload) {
+        var pendingRestart = payload && payload.pendingRestart;
+        if (!pendingRestart || typeof pendingRestart !== "object") return;
+        var names = Array.isArray(pendingRestart.names) ? pendingRestart.names : [];
+        var marketVersion = pendingRestart.marketVersion ? String(pendingRestart.marketVersion) : null;
+        if (names.length === 0 && marketVersion === null) return;
+        for (var i = 0; i < names.length; i++) {
+          var name = String(names[i]);
+          if (restartNamesRef.current.indexOf(name) === -1) restartNamesRef.current.push(name);
+        }
+        setRestart(function (previous) {
+          return { pending: true, phase: previous && previous.phase === "restarting" ? "restarting" : "idle" };
+        });
       }
 
       /**
@@ -3169,6 +3204,7 @@ function errorCopy(error) {
         api.status(bag.signal).then(function (payload) {
           if (!isCurrent("status", bag.token)) return;
           setStatus({ phase: "ready", data: payload, error: null });
+          hydrateRestartFromStatus(payload);
         }).catch(function (error) {
           if (error && error.aborted) return;
           if (!isCurrent("status", bag.token)) return;

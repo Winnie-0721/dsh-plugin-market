@@ -315,6 +315,62 @@ check('普通文本、空值、数字不受影响', () => {
   assert.equal(decodeURIComponent(parts[0].slice('query='.length)), '普通中文 & = #?')
 })
 
+console.log('\n[6] 待重启横幅的水合：刷新页面后不能把「还没生效」丢掉（v1.2.0 第六轮）')
+// 真跑 hydrateRestartFromStatus：它依赖 restartNamesRef / setRestart 两个外部名字，
+// 用桩注入（这也是真实调用点用的同一套数据形状）。
+const hydrateSrc = grab('function hydrateRestartFromStatus(')
+function makeHydrator(initialRestart) {
+  const ref = { current: [] }
+  let seen = initialRestart
+  const fn = new Function(
+    'restartNamesRef', 'setRestart',
+    `${hydrateSrc}\nreturn hydrateRestartFromStatus;`
+  )(
+    ref,
+    (updater) => { seen = typeof updater === 'function' ? updater(seen) : updater }
+  )
+  return { fn, ref, get restart() { return seen } }
+}
+
+check('宿主的 pendingRestart 会把横幅点亮（这正是刷新页面后的路径）', () => {
+  const h = makeHydrator(null)
+  h.fn({ pendingRestart: { names: ['dsh-mobile'], marketVersion: null } })
+  assert.ok(h.restart !== null, '收到待重启项后横幅必须点亮')
+  assert.equal(h.restart.pending, true)
+  assert.equal(h.restart.phase, 'idle')
+  assert.deepEqual(h.ref.current, ['dsh-mobile'], '包名要进名单（横幅正文要用）')
+})
+check('宿主说没有待重启项时**什么都不做**（不清掉已有的，避免假阴性）', () => {
+  const h = makeHydrator({ pending: true, phase: 'idle' })
+  h.fn({ pendingRestart: null })
+  assert.equal(h.restart.pending, true, '不能因为一次 null 就把横幅撤掉')
+  h.fn({})
+  assert.equal(h.restart.pending, true)
+})
+check('正在重启中时不许被退回 idle（否则按钮从「正在重启」变回可点）', () => {
+  const h = makeHydrator({ pending: true, phase: 'restarting' })
+  h.fn({ pendingRestart: { names: ['x'], marketVersion: null } })
+  assert.equal(h.restart.phase, 'restarting', 'restarting 必须被保留')
+})
+check('重复水合不产生重复名字（刷新两次不该出现两条同名）', () => {
+  const h = makeHydrator(null)
+  h.fn({ pendingRestart: { names: ['dup', 'dup'], marketVersion: null } })
+  h.fn({ pendingRestart: { names: ['dup'], marketVersion: null } })
+  assert.deepEqual(h.ref.current, ['dup'], `应去重，实际 ${JSON.stringify(h.ref.current)}`)
+})
+check('市场版版本也能水合（正文要说「插件市场已更新到 v…」）', () => {
+  const h = makeHydrator(null)
+  h.fn({ pendingRestart: { names: [], marketVersion: '1.2.0' } })
+  assert.ok(h.restart !== null, '只有 marketVersion、没有包名时也要点亮横幅')
+})
+check('形状不对的输入不炸（宿主旧版本没有这个字段）', () => {
+  const h = makeHydrator(null)
+  for (const bad of [null, undefined, {}, { pendingRestart: 'x' }, { pendingRestart: 1 }, { pendingRestart: [] }]) {
+    h.fn(bad)
+  }
+  assert.equal(h.restart, null, '不认识的东西不该凭空点亮横幅')
+})
+
 console.log('')
 if (failures.length > 0) {
   console.log(`客户端文案/回执回归：${passed}/${passed + failures.length} 通过，${failures.length} 失败`)

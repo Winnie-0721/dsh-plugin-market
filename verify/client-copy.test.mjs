@@ -175,11 +175,20 @@ check('回执文案精简（用户反馈：toast 尽量短）', () => {
   assert.equal(enBlock.includes('Catalog refreshed: {count} plugins'), false, 'en 旧刷新长句应已删除')
   assert.equal(enBlock.includes('Update all finished'), false, 'en 旧汇总长句应已删除')
 })
-check('「检查更新」单按钮状态机：检查过才给一键更新/重新检查，页脚旧按钮已合并删除', () => {
+check('「检查更新」单按钮状态机：有更新就给一键更新，页脚旧按钮已合并删除', () => {
   assert.match(zhBlock, /"action\.checkUpdates": "检查更新"/, '初始态文案是「检查更新」')
-  assert.match(source, /var checked = props\.checkPhase === "checked";/, '三态里的 checked 来自页面状态')
+  // 用户第四轮修正：主动作由**数据**决定——列表里有可更新插件时，按钮直接就是「一键更新（N）」，
+  // 不该先逼用户点一次「检查更新」（那一页打开时列表和角标早就把 N 摆出来了）。
+  // `checked` 只保留「没有更新时」区分「检查更新 / 重新检查」这一个用途。
+  assert.match(source, /var canUpdateAll = bundles\.length > 0;/, '有更新即可一键更新，不再要求先手动检查')
+  assert.equal(
+    /var canUpdateAll = checked && bundles\.length > 0/.test(source),
+    false,
+    '旧的「必须先点过检查才给一键更新」必须已删除'
+  )
+  assert.match(source, /var checked = props\.checkPhase === "checked";/, 'checked 仍保留（用于没有更新时的「重新检查」）')
   assert.match(source, /onClick: canUpdateAll \? props\.onUpdateAll : props\.onCheckUpdates/, '同一颗按钮按状态切换点击目标')
-  assert.match(source, /checked \? t\("action\.recheckSelf"\) : t\("action\.checkUpdates"\)/, '检查过没更新 → 重新检查；没检查过 → 检查更新')
+  assert.match(source, /checked \? t\("action\.recheckSelf"\) : t\("action\.checkUpdates"\)/, '没有更新时：检查过 → 重新检查；没检查过 → 检查更新')
   assert.match(source, /function checkUpdates\(\)/, '要有检查入口函数')
   assert.match(source, /onCheckUpdates: checkUpdates/, '按钮要接上检查入口')
   assert.match(source, /setCheckPhase\("checked"\)/, '批量跑完也要进入已检查态')

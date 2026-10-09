@@ -449,10 +449,18 @@ window.__ModuleLoader__.load({
   - 顶部：标题「插件市场」+ 版本号 + **一个按钮**：「刷新目录」（标题右侧的 `.dshpm-headerActions`）。
     原先的「更新插件」与「检查市场更新」按用户要求删掉了：前者由第三个页签取代，后者搬进「可更新」页页头，
     连同两者的反馈（忙碌态 spinner + `aria-busy` + 回执气泡）一起搬过去。
-  - 「可更新」页页头右侧的**两个按钮（样式统一为 primary）**，v1.1.4 起左边是一颗**合并状态机**：
-    没检查过 →「检查更新」，按下重读列表（带回执）；检查过且有更新 →「一键更新（N）」（按顺序逐个执行
-    同一条安装接口、每条结果留在该行、跑完给一条汇总回执，卡在「要先批准构建脚本」上就暂停）；
-    检查过且没有更新 →「重新检查」。原页脚那颗独立的「重新检查」已合并进这颗按钮（`drawerFoot` 删除）。
+  - 「可更新」页页头右侧的**两个按钮（样式统一为 primary）**，v1.1.4 起左边是一颗**合并状态机**。
+    **v1.2.0 用户第四轮改正**：主动作由**数据**决定，不再由「有没有手动点过检查」决定——
+    **列表里有可更新插件（`bundles.length > 0`）时，首屏就是「一键更新（N）」**，不需要先点一次
+    「检查更新」。理由是那一页打开时列表已把 N 条摆出来、页签角标也是 N，信息早就到手，
+    再让用户去「检查」一件刚刚已经确认的事就是多余的一步（用户原话：
+    「有更新时检查更新状态机应该为一键更新」）。
+    `checkPhase`（`idle` / `checked`）继续保留，但**只用于「没有更新时」**区分文案：
+    没检查过 →「检查更新」，检查过 →「重新检查」——不再参与主动作的判定
+    （那个区分本身仍然有意义：没检查过不该谎称「已检查」，这条不放松）。
+    点主动作：有更新 → 一键更新（按顺序逐个执行同一条安装接口、每条结果留在该行、
+    跑完给一条汇总回执，卡在「要先批准构建脚本」上就暂停）；没更新 → 重读列表（带回执）。
+    原页脚那颗独立的「重新检查」已合并进这颗按钮（`drawerFoot` 删除）。
     右边是「插件市场更新」（原「检查市场更新」改名，状态机：插件市场更新 / 检查中… / 更新到 x.y.z /
     重新检查——检查完没有新版本时不再显示「已是最新」，避免与插件的更新状态混淆）。逐条的「更新到 x.y.z」仍然保留。
   - 「可更新」页的数据来自 `/installed` 的 `updateAvailable`/`latest`（宿主已把目录 join 进去），
@@ -557,8 +565,10 @@ window.__ModuleLoader__.load({
    - 端到端（`verify/self-update-live.ps1`）：临时把当前版本降到低于最新标签 → 真的下载 → 校验 →
      `pnpm add` 装进 scratch profile（依赖变为 `file:` 指向下载物）→ 结束时按字节还原本地 `package.json`。
 10. **同一路径的 GET 与 POST 必须只有一个路由登记项**：路由表以 path 为键，登记两次会互相覆盖，`GET /self-update` 会变成 405。改这里要重跑 §5 第 9 条的 GET 断言。
-11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，78 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧初始是「检查更新」与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）；点「检查更新」后同一颗按钮变成「一键更新（2）」；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
-12. **文案与动效不变量**（`verify/client-copy.test.mjs`）：zh/en 键集完全一致；代码里用到的每个 `t("字面量键")` 都在两种语言里存在；没有僵尸文案键；被引用的 `@keyframes` 都有定义；没有任何升入动画用 `forwards`/`both`；顶部黑条进度条（`.dshpm-progress`）不存在；更新失败的 `EPERM`/拒绝访问必须被 `fileLockedDetail` 识别并切到 `err.file-locked.*`（三处接入：错误气泡、可更新行内、已安装行错误）；回执文案保持精简形态（`已刷新 {count} 个插件` 等）；「检查更新」合并状态机存在（`checkPhase`/`onCheckUpdates`/页脚 `drawerFoot` 已删、插件市场更新按钮同为 primary）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。
+11. **真实浏览器渲染**（`verify/ui-check.ps1` → `verify/market-ui.e2e.mjs`，83 条）：侧边栏入口可点开面板；头部只剩「刷新目录」一个按钮；页签栏是 `发现 / 已安装 / 可更新`，有 2 个可更新插件时页签角标显示 `2`；切到「可更新」页能看到两条记录，页头右侧**首屏就是「一键更新（2）」**与「插件市场更新」（带 `data-state`；启动时的自动检查没更新时停在 `checking`→`idle`，**首次进入必须是「插件市场更新」而不是「再次检查」**——用户报过的 bug，手动点过之后才到 `ready`）且**两颗都带 `--primary`**、页脚没有独立按钮（`drawerFoot` 为 0）、**有更新时不再存在多余的「检查更新」按钮**（用户第四轮：`["检查更新","插件市场更新"]` 是错的，应为 `["一键更新（2）","插件市场更新"]`）；每行仍有自己的「更新到 x.y.z」；点批量按钮时第一条返回 `restart-required`（**必须计为成功**并显示「重启 DSH 后生效」）、第二条由 CDP 注入 `EPERM` diagnostic 失败——汇总回执必须写「成功 1、失败 1」，失败行必须显示「文件被 DSH 占用」的专用短句，且批量进行中（按钮 `aria-busy`）页面里 `.dshpm-progress` 必须为 0（顶部黑条已删）；restart-required 之后必须出现「重启 DSH」横幅按钮（`.dshpm-restartBtn`：空闲态、可点、tooltip 写明流式截断；**e2e 绝不点击它**——会真的退出验收宿主，真实生命周期由第 14 条覆盖）；卡片/列表行的 `animation-name` 含 `dshpm-rise` 且 `animation-fill-mode` 是 `backwards`；切到 `prefers-reduced-motion: reduce` 后 `animation-name` 变 `none` 而列表行仍然可见（行数不变）；发现页搜索框**聚焦并输入关键字**后必须只有一颗清除键（`.dshpm-search` 内 `button` 精确 1——Chromium 对 `input[type=search]` 在这个状态下会自己再画一颗原生 ✕、按 `accent-color` 上色，靠 `.dshpm-input::-webkit-search-cancel-button` 的 `appearance:none` + `display:none` 关掉；e2e 在**生效的样式表里挑出我们这条**规则（宿主自己的 `._3Y3Nma_search` 同名规则不算数）、截图 `market-search-clear.png`，并断言点它会把输入框与按钮一起复位。原生 ✕ 只在聚焦时才画，失焦的截图验不出问题，所以截图前重新聚焦并打出 `activeElement`）；**三个页签页面共用一套布局**（v1.1.6，用户报「高度不对齐」）：三个 `.dshpm-tab` 按钮等高、页签由注册表生成并带 `data-tab`（顺序 `discover/installed/updates`）、每页 `.dshpm-page` 的「页签底边 → 页面顶边」节距都是 12px、**三个页面的第一行内容顶边完全一致**（容差 1px）、内容不足一屏时已安装与可更新两页等高，截图 `market-tab-alignment.png`。注意页面入场动画（`dshpm-rise` 自 `translateY(7px)` 起）与页签底线 0.26s 过渡会污染几何测量，断言前必须等动画落位）。
+12. **文案与动效不变量**（`verify/client-copy.test.mjs`）：zh/en 键集完全一致；代码里用到的每个 `t("字面量键")` 都在两种语言里存在；没有僵尸文案键；被引用的 `@keyframes` 都有定义；没有任何升入动画用 `forwards`/`both`；顶部黑条进度条（`.dshpm-progress`）不存在；更新失败的 `EPERM`/拒绝访问必须被 `fileLockedDetail` 识别并切到 `err.file-locked.*`（三处接入：错误气泡、可更新行内、已安装行错误）；回执文案保持精简形态（`已刷新 {count} 个插件` 等）；「检查更新」合并状态机存在（`checkPhase`/`onCheckUpdates`/页脚 `drawerFoot` 已删、插件市场更新按钮同为 primary），
+且**有更新时必须直接给「一键更新（N）」**（`var canUpdateAll = bundles.length > 0;`——不许再有
+`checked && bundles.length > 0` 这个「先点一次检查」的前置条件；v1.2.0 用户第四轮改正）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。
 13. **安装 spec 钉版本**（`verify/install-spec.test.mjs`）：`pinnedNpmSpec` 在装之前被调用、只认「spec === 目录里的裸 npm 名 + 版本像 semver」、钉出 `name@version`；行为上，`POST /install {name}` 与 `{spec:裸名}` 都让假 `installBundle` 收到 `dsh-context@0.63.0`，GitHub 条目的 spec 保持 URL 原样。
 14. **重启助手**（`verify/restart-helper.test.mjs`，离线、不碰真实 DSH）：启动规格必须 `detached` + `windowsHide` + `ELECTRON_RUN_AS_NODE=1`，helper 脚本缺失或参数不合法在 spawn 之前就拒绝；幂等（第二次请求回 `already` 且不再 spawn）；真助手两向——父 pid 已死则拉起且拉起前 env 里 `ELECTRON_RUN_AS_NODE` 已删（子进程必须 `detached` 才能在创建者退出后活着，Windows 实测），父 pid 活着则等满期限放弃、绝不拉起。客户端接线在第 12 条里盯：`POST /restart` 被真的调用、`restart-failed` 进错误码表、各写操作点亮横幅、探活「先见过死」才 `location.reload()`、60s 超时如实提示。
 15. **目录身份层与内容校验**（`verify/catalog-identity.test.mjs` 36 条，v1.1.6 新增）：

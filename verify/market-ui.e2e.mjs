@@ -545,12 +545,17 @@ try {
     JSON.stringify(perItemButtons),
   )
 
-  // 页头右侧的两个按钮（用户第三轮指定）：左边是合并状态机「检查更新 → 一键更新（N）/ 重新检查」，
+  // 页头右侧的两个按钮（用户第三轮指定）：左边是合并状态机「一键更新（N）/ 检查更新 / 重新检查」，
   // 右边是改名后的「插件市场更新」；两颗风格统一（都是 primary），页脚的旧「重新检查」已合并删除。
+  //
+  // 用户第四轮报的问题（本次修的）：**列表里明明已经列着 2 个可更新插件、页签角标也是 2，
+  // 左边那颗按钮却还写「检查更新」**——它要人先点一下「检查」才肯变成「一键更新（2）」，
+  // 而那一页的数据早就加载好了。用户的原话：「有更新时检查更新状态机应该为一键更新」。
+  // 所以这里断言的是**首屏**（切到页签、列表已渲染、没有再点任何按钮）就已经是「一键更新（2）」。
   const paneButtons = await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-updatesActions button')).map(b => b.textContent.trim())`)
   expect(
-    '页头右侧初始是「检查更新」与「插件市场更新（四态之一）」两个按钮',
-    Array.isArray(paneButtons) && paneButtons.length === 2 && /^检查更新/.test(paneButtons[0] || '') && /插件市场更新|正在更新|更新到|再次检查|Plugin market|Updating|Update to|Check again/.test(paneButtons[1] || ''),
+    '页头右侧首屏就是「一键更新（2）」与「插件市场更新（四态之一）」两个按钮',
+    Array.isArray(paneButtons) && paneButtons.length === 2 && /^一键更新（2）/.test(paneButtons[0] || '') && /插件市场更新|正在更新|更新到|再次检查|Plugin market|Updating|Update to|Check again/.test(paneButtons[1] || ''),
     JSON.stringify(paneButtons),
   )
   // 用户报「第一次进入这个界面怎么会是再次检查的状态机」：启动时的自动检查（桩恒回无更新、
@@ -595,11 +600,17 @@ try {
   const afterSelfCheck = await evaluate(client, `(() => { const b = document.querySelectorAll('.dshpm-updatesActions button')[1]; return b ? (b.textContent || '').trim() : null; })()`)
   expect('右键检查完（无更新）显示「再次检查」', /再次检查|Check again/.test(String(afterSelfCheck)), `实际：${afterSelfCheck}`)
 
-  // 状态机走一遍：点「检查更新」→ 重读列表 → 检查过且有更新 → 同一颗按钮变成「一键更新（2）」。
-  await evaluate(client, `(() => { const b = Array.from(document.querySelectorAll('.dshpm-updatesActions button')).find(x => /检查更新/.test(x.textContent)); if (b) b.click(); return true; })()`)
-  await waitFor(client, `(() => { const b = document.querySelectorAll('.dshpm-updatesActions button')[0]; return !!b && /一键更新（2）/.test(b.textContent); })()`, 10000, '检查后按钮变成「一键更新（2）」')
+  // 用户第四轮的核心诉求：**首屏就应该是「一键更新（2）」，不需要先点一次「检查更新」**。
+  // 上面那条断言已经钉住首屏文案；这里再钉住「它真的能一键跑」，以及不再存在「先检查一下」
+  // 这个多余的动作——那一页打开时列表已经把 2 个可更新插件摆出来了，没有信息缺口。
   const checkedButtons = await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-updatesActions button')).map(b => b.textContent.trim())`)
-  expect('「检查更新」按下后发现 2 个更新 → 同一颗按钮显示「一键更新（2）」', /一键更新（2）/.test(String(checkedButtons?.[0])), JSON.stringify(checkedButtons))
+  expect('首屏无需任何点击：左边那颗已经是「一键更新（2）」', /一键更新（2）/.test(String(checkedButtons?.[0])), JSON.stringify(checkedButtons))
+  const noCheckButton = await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-updatesActions button')).filter(b => /检查更新/.test(b.textContent)).length`)
+  expect(
+    '有更新时不再出现「检查更新」这颗多余按钮（列表与角标已给出全部信息）',
+    Number(noCheckButton) === 0,
+    `仍存在 ${noCheckButton} 颗「检查更新」`,
+  )
   expect(
     '批量入口「一键更新」就位，同时逐条确认没有被取消',
     Array.isArray(perItemButtons) && perItemButtons.length === 2 && perItemButtons.every((label) => label.includes('更新到')),

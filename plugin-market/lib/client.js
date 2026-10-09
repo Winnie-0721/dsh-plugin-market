@@ -2583,11 +2583,15 @@ function errorCopy(error) {
       var updateBundle = props.onUpdate;
       var batch = props.batch || null;
       var batchRunning = !!(batch && batch.running);
-      // 状态机的三态：没检查过（idle）→ 按下「检查更新」→ 检查过（checked）。
-      // 列表本身在页签打开时就会加载，但按钮不谎称「已检查」——检查这个动作要点出来。
+      // 状态机（用户第四轮改正）：**「有更新」这个事实已经在手时，按钮就该是「一键更新（N）」**，
+      // 不该先逼用户点一下「检查更新」。那一页打开时列表与页签角标早就把 N 个可更新插件摆出来了，
+      // 按钮却还写「检查更新」——让用户去「检查」一件刚刚已经确认的事（用户原话：
+      // 「有更新时检查更新状态机应该为一键更新」）。
+      // 所以主动作由**数据**决定，`checked` 只用来区分「没有更新时」显示「检查更新」还是
+      // 「重新检查」——那个区分是有意义的（没检查过就不许谎称「已检查」），继续保留。
       var checked = props.checkPhase === "checked";
       var checking = state.phase === "loading";
-      var canUpdateAll = checked && bundles.length > 0;
+      var canUpdateAll = bundles.length > 0;
       var self = props.self || {};
       var hasCatalog = props.catalogUpdated !== null && props.catalogUpdated !== undefined;
       var subtitle = batchRunning

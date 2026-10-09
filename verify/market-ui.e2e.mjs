@@ -757,6 +757,36 @@ try {
   const updatesActionsAfter = await evaluate(client, `document.querySelectorAll('.dshpm-updatesActions button').length`)
   expect('重启按钮在横幅里、不混进可更新页头部按钮组（那里精确 2 颗）', Number(updatesActionsAfter) === 2, `按钮 ${updatesActionsAfter}`)
 
+  // 用户第五轮问：「检查开关和重启是不是有冲突」。
+  // 确认**有一处真冲突**：重启是「进程级」动作（宿主 900ms 后 process.exit），
+  // 而安装/更新/开关是「文件级」写入（宿主写 package.json / cordis.patch.yml）。
+  // 在写没落地时点重启，宿主会带着「写了一半的 profile」退出——重启后状态未知。
+  // 所以写操作进行中，重启入口必须与更新按钮**同一个口径**：禁用。
+  //
+  // 断言放在这里而不是批量进行中：批量那段**还没有重启横幅**（横幅由 restart-required 点亮），
+  // 那时 `.dshpm-restartBtn` 根本不存在，取到 null 是在测空气（我第一版就放错了位置，
+  // 跑红报 null——那不是修复没生效，是断言站错了地方）。
+  // 这里横幅已在（上面刚断言过空闲可点），再触发一次**单条**更新：fixture 会拖 700ms，
+  // 这个窗口里 job 非空 → 重启按钮必须变禁用；窗口结束后恢复可点（不能一禁到底）。
+  const restartIdleBefore = await evaluate(client, `(() => { const b = document.querySelector('.dshpm-restartBtn'); return b ? b.disabled === true : null; })()`)
+  expect('前置条件：没有写操作时重启按钮是可点的（下面要验「变成禁用」）', restartIdleBefore === false, `disabled=${restartIdleBefore}`)
+
+  await evaluate(client, `(() => { const b = document.querySelector('.dshpm-updateRow .dshpm-btn--primary'); if (b) b.click(); return !!b; })()`)
+  await waitFor(client, `document.querySelector('.dshpm-restartBtn[data-write-busy="true"]') !== null`, 8000, '写操作进行中重启按钮进入 write-busy')
+  const restartDuringWrite = await evaluate(
+    client,
+    `(() => { const b = document.querySelector('.dshpm-restartBtn'); return b ? { disabled: b.disabled === true, writeBusy: b.getAttribute('data-write-busy'), title: b.getAttribute('title') } : null; })()`,
+  )
+  expect(
+    '写操作进行中「重启 DSH」按钮被禁用（重启会让没落地的写入断在半路）',
+    !!restartDuringWrite && restartDuringWrite.disabled === true && restartDuringWrite.writeBusy === 'true' && /等它结束|写操作/.test(String(restartDuringWrite.title)),
+    JSON.stringify(restartDuringWrite),
+  )
+  // 反向断言：写操作结束后必须**恢复可点**，否则就是把重启永久锁死了。
+  await waitFor(client, `(() => { const b = document.querySelector('.dshpm-restartBtn'); return !!b && b.getAttribute('data-write-busy') !== 'true'; })()`, 20000, '写操作结束')
+  const restartIdleAfter = await evaluate(client, `(() => { const b = document.querySelector('.dshpm-restartBtn'); return b ? b.disabled === true : null; })()`)
+  expect('写操作结束后重启按钮恢复可点（不能一禁到底）', restartIdleAfter === false, `disabled=${restartIdleAfter}`)
+
   const panelOpenHeight = await evaluate(client, `document.querySelector('.dshpm-updatesPanel').getBoundingClientRect().height`)
   expect('可更新页有实际高度（不是空壳）', Number(panelOpenHeight) > 120, `高度 ${panelOpenHeight}`)
 

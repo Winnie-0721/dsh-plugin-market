@@ -270,6 +270,25 @@ Query 参数（全部可选，未知参数忽略）：
 注意 `overridden` 在两处的 `applied` **有意不同**：安装路径问「包装上了吗」（装上了 → `true`），
 开关路径问「状态真的切过去了吗」（被压住 → `false`）。两个问题不同，答案就该不同。
 
+**开关 ↔ 重启的冲突（v1.2.0 第六轮，用户问「检查开关和重启是不是有冲突」）**：
+两者**确实有一处真冲突**，但不是「写了同一个文件」，而是**粒度不一致**：
+
+- 关卡持久化走 `setBundleEnabled` → `selectBundle`，写的是 **`package.json` 的 `dsh.profile.bundles`**；
+  单插件开关走 `setPluginEnabled` → `writePluginEnabled`，写的是 **`cordis.patch.yml`**。
+  两条都是 **文件级**写入，且宿主用 `writeFileAtomic`（先写临时文件再改名）——**写在半路不会留下半个文件**。
+- 重启是**进程级**动作：宿主在 `RESTART_EXIT_DELAY_MS`(900ms) 后 `process.exit(0)`。
+
+所以真正危险的是**在写操作进行中点重启**：进程会在写入落地前退出；而安装还牵着
+**pnpm 子进程**（pnpm 子树可能比宿主活得久），重启后 profile 状态未知。
+**规则**：写操作进行中（`job` 非空，或「一键更新」整轮 `batch.running`），
+重启入口必须与更新按钮同一个口径 —— **禁用**，并在 tooltip 说明原因（`restart.busy`）。
+两处都挡：横幅按钮 `disabled`，以及 `startRestart()` 本身（弹窗里的「立即重启」是另一个入口，
+只挡按钮会留后门）。写操作结束后**必须恢复可点**（不能一禁到底）。
+
+**实测确认「开关的状态能活过重启」**（`verify/repro-toggle-vs-restart.ps1`）：
+热开关 `application:"applied"` → 杀掉宿主 → 重启同一 profile → `enabled` 仍是关着的。
+持久化不靠内存，所以重启不会丢开关状态。**开关与重启本身不冲突，冲突只在「同时发生」。**
+
 ### 2.7 `POST /plugin-market/refresh`
 
 强制丢弃目录缓存并重新抓取。

@@ -2,6 +2,39 @@
 
 ## 1.2.0
 
+- **开关 ↔ 重启：确认有一处真冲突，并修掉**（用户第五轮问「检查开关和重启是不是有冲突」）。
+
+  **先回答「冲突在哪」**——不是「写了同一个文件」，而是**粒度不一致**：
+
+  | | 动作粒度 | 落盘 |
+  |---|---|---|
+  | 开关 | **文件级** | `setBundleEnabled` → `selectBundle` 写 `package.json` 的 `dsh.profile.bundles`；`setPluginEnabled` → `writePluginEnabled` 写 `cordis.patch.yml`（都用 `writeFileAtomic`，写在半路不留半个文件） |
+  | 重启 | **进程级** | 宿主在 `RESTART_EXIT_DELAY_MS`(900ms) 后 `process.exit(0)` |
+
+  所以**真正危险的是「在写操作进行中点重启」**：进程会在写入落地前退出；安装还牵着
+  **pnpm 子进程**（pnpm 子树可能比宿主活得久）。修复前重启按钮只看 `restart.phase === "restarting"`，
+  **完全不看有没有写操作在跑**——用户可以在一键更新跑到一半时点「重启 DSH」。
+
+  **同时验明「开关状态能活过重启」**（新增 `verify/repro-toggle-vs-restart.ps1`）：
+  热开关 `application:"applied"` → 杀掉宿主 → 重启同一 profile → `enabled` 仍是关着的。
+  持久化不靠内存，所以**重启本身不会丢开关状态**——冲突只发生在「同时」。
+
+  **修法**：写操作进行中（`job` 非空，或「一键更新」整轮 `batch.running`）禁用重启，
+  与更新按钮同一个口径；tooltip 说明原因（新增 `restart.busy`）。两处都挡：
+  横幅按钮的 `disabled`，以及 `startRestart()` 自身（弹窗里的「立即重启」是另一个入口，
+  只挡按钮会留后门）。写操作结束后**恢复可点**（另加一条反向断言，防止一禁到底）。
+
+  **验证**：真实浏览器 e2e **83→86**，3 条新断言（前置可点 / 进行中禁用 / 结束后恢复），
+  先跑到红再改；**变异测试 2/2 CAUGHT**（去掉 writeInFlight 判定 / 把 `data-write-busy` 写死），
+  还原后 sha256 逐字节一致。
+
+  **本轮记一条我自己的错**：第一版把 `var writeInFlight = …` 写进了 `el(...)` 的参数列表——
+  JSX 参数位是表达式，不是语句，`node --check` 当场报 `Unexpected token 'var'`。
+  第二版把断言放在**批量进行中**去查 `.dshpm-restartBtn`，那时**重启横幅还没出现**（它由
+  `restart-required` 点亮），取到 `null` 而失败——**那不是修复没生效，是断言站错了地方**。
+  教训：断言「某个东西被禁用」之前，要先确认**那个东西此刻真的存在于 DOM 里**，
+  否则测的是空气。
+
 - **上一轮的「版本并集」豁免方案本周就被现实打破（同一天复现，已换成裸包名）**。
 
   第五轮我把 profile 的 `minimumReleaseAgeExclude` 写成 `dsh-context@0.64.0 || 0.65.0`，

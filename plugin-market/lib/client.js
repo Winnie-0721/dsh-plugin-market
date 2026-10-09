@@ -303,6 +303,7 @@ window.__ModuleLoader__.load({
         "restart.bannerBody": "更新（插件或市场自更新）已经把新代码写到磁盘，但宿主进程还在跑旧代码。点「重启 DSH」让新代码生效。",
         "restart.manualBody": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。桌面版不能用一键重启（壳持有应用的单实例锁，从这里拉起的进程会被挡下）：请关掉应用窗口再打开，新代码就会生效。",
         "restart.title": "立刻重启 DSH：正在流式输出的回复会被截断；桌面上应用窗口会重新打开。",
+        "restart.busy": "有写操作正在进行（安装 / 更新 / 开关），等它结束再重启——否则那一次改动可能只落了一半。",
         "action.restart": "重启 DSH",
         "action.restarting": "正在重启…",
         // 重启询问弹窗（v1.2.0）：装完之后主动问一次「现在重启还是等会儿」，
@@ -595,6 +596,7 @@ window.__ModuleLoader__.load({
         "restart.bannerBody": "An update (a plugin or the market itself) has written the new code to disk, but the host process is still running the old code. Restart DSH to apply it.",
         "restart.manualBody": "The update has written the new code to disk, but the host process is still running the old code. One-click restart is unavailable in the desktop app (the shell holds the app's single-instance lock, so a process launched from here would be refused): close the app window and open it again to apply the new code.",
         "restart.title": "Restart DSH right now: replies still streaming will be cut off, and the desktop app reopens its window.",
+        "restart.busy": "A write is in progress (install / update / toggle). Wait for it to finish before restarting — otherwise that change may only land half-way.",
         "action.restart": "Restart DSH",
         "action.restarting": "Restarting…",
         "restartAsk.title": "Restart DSH so the new code takes effect",
@@ -3028,6 +3030,13 @@ function errorCopy(error) {
 
       function startRestart() {
         if (restart && restart.phase === "restarting") return Promise.resolve();
+        // 与横幅按钮同一口径的兜底：写操作还在跑就**不发**重启请求（v1.2.0 第六轮）。
+        // 按钮已经禁用，但弹窗里的「立即重启」是另一个入口，这里不挡就留了个后门。
+        // 重启会让宿主在 900ms 后退出，写了一半的 package.json / patch 文件就那样留在磁盘上。
+        if (job || (batch && batch.running)) {
+          setNotice({ kind: "warn", text: t("restart.busy") });
+          return Promise.resolve();
+        }
         setRestart({ pending: true, phase: "restarting" });
         setNotice({ kind: "info", text: t("notice.restartQueued") });
         return api.restart().then(function () {
@@ -3862,6 +3871,12 @@ function errorCopy(error) {
       // 当前页：未知 id 退回第一页（受控 prop 不可能凭空变成别的值，这里只是防御）。
       var activePane = MARKET_PANES[tab] || MARKET_PANES[MARKET_TABS[0].id];
 
+      // 是否有写操作正在进行（安装 / 更新 / 开关 / 一键更新整轮）。
+      // **必须声明在 return 之前**：`el(...)` 的参数列表里不能放 `var` 语句（写了就是
+      // SyntaxError: Unexpected token 'var'——我第一版就放在里面，被 `node --check` 当场拦下）。
+      // `job` 只覆盖单个写操作，「一键更新」每一步之间 job 会短暂为空，所以要并上 batch。
+      var writeInFlight = !!job || !!(batch && batch.running);
+
       // 弹窗挂成 .dshpm-root 的**兄弟节点**（Fragment 包一层），不做它的子项：
       // .dshpm-root 的直接子项被 e2e [8] 的几何断言盯着（「任何直接子项都不得被压扁」），
       // 而这个覆盖层是 fixed、天然比 root 高，塞进去只会让那条断言变得含糊。
@@ -3919,22 +3934,31 @@ function errorCopy(error) {
         // **宿主说不能一键重启时不给按钮**（桌面壳持有单实例锁，点了必然失败且代价是应用
         // 整个关掉不回来）：横幅照留（用户仍需要知道「要重启才生效」），但正文改成
         // 「请关掉窗口再打开」，不再摆一个点了会出事的按钮。
+        //
+        // **写操作进行中也不给点**（v1.2.0 第六轮，用户问「开关和重启是不是有冲突」）：
+        // 重启是**进程级**动作（宿主 900ms 后 process.exit），而安装/更新/开关是
+        // **文件级**写入（宿主写 package.json、cordis.patch.yml，pnpm 子树可能还在跑）。
+        // 在写没落地时点重启，宿主会带着「写了一半的 profile」退出——重启后状态未知。
+        // `job` 覆盖单个写操作，`batch` 覆盖「一键更新」整轮（每一步之间 job 会短暂为空，
+        // 只看 job 会留出可乘之机）。两者任一在跑就禁用。
         restart && restart.pending
           ? el(Banner, {
             kind: "warn",
             title: t("restart.bannerTitle"),
             body: restart.phase === "restarting"
               ? t("notice.restartQueued")
-              : restartAvailable ? t("restart.bannerBody") : t("restart.manualBody")
+              : writeInFlight ? t("restart.busy")
+                : restartAvailable ? t("restart.bannerBody") : t("restart.manualBody")
           }, restartAvailable
             ? el("div", { className: "dshpm-bannerActions" },
               el("button", {
                 type: "button",
                 className: "dshpm-btn dshpm-btn--primary dshpm-restartBtn",
-                disabled: restart.phase === "restarting",
+                disabled: restart.phase === "restarting" || writeInFlight,
                 "aria-busy": restart.phase === "restarting" ? "true" : "false",
                 "data-phase": restart.phase || "idle",
-                title: t("restart.title"),
+                "data-write-busy": writeInFlight ? "true" : "false",
+                title: writeInFlight ? t("restart.busy") : t("restart.title"),
                 onClick: startRestart
               }, restart.phase === "restarting" ? el(IconSpinner, { size: 13 }) : el(IconUpgrade, { size: 13 }),
                 restart.phase === "restarting" ? t("action.restarting") : t("action.restart")))

@@ -163,8 +163,17 @@ check('被 pnpm 供应链策略拦下 ≠ 连不上源：不许再劝人配镜�
   assert.ok(zhSupplyNext, 'zh 的 supply-chain.next 应存在')
   assert.equal(/\.npmrc|registry=/.test(zhSupplyNext[1]), false, '供应链的 next 不许再劝人配镜像')
   assert.match(zhSupplyNext[1], /minimumReleaseAgeExclude/, '要给出真正的解法（豁免清单）')
-  // 同一个包只能写一条规则：这是本次故障根因，必须在文案里提醒
-  assert.match(zhSupplyNext[1], /只能写一条规则/, '要提醒同名规则只有第一条生效')
+  // v1.2.0 第六轮修正：文案原来教「写一条版本并集」，但那**只在当次生效**——pnpm 自己会把
+  // 触发的版本追加到列表末尾，而第一条同名规则先命中就 return，追加的那条永远被挡住。
+  // （真实复现：0.66.0 就是这么被追加进去、然后被挡住的。）现在必须教**裸包名**。
+  assert.match(zhSupplyNext[1], /只认\*\*第一个\*\*同名规则/, '要提醒同名规则只有第一条生效')
+  assert.match(zhSupplyNext[1], /追加到列表末尾/, '要提醒 pnpm 会把版本追加到末尾（这才是「并集只能生效一次」的原因）')
+  assert.match(zhSupplyNext[1], /裸包名/, '要给出不会被追加破坏的写法')
+  assert.equal(
+    /dsh-context@0\.64\.0 \|\| 0\.65\.0/.test(zhSupplyNext[1]),
+    false,
+    '不许再教「版本并集」——它下次就会被 pnpm 的追加破坏'
+  )
 })
 check('回执文案精简（用户反馈：toast 尽量短）', () => {
   assert.match(zhBlock, /"notice\.refreshOk": "已刷新 \{count\} 个插件"/, '刷新回执只留计数')

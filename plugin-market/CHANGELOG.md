@@ -2,6 +2,84 @@
 
 ## 1.2.0
 
+- **上一轮的「版本并集」豁免方案本周就被现实打破（同一天复现，已换成裸包名）**。
+
+  第五轮我把 profile 的 `minimumReleaseAgeExclude` 写成 `dsh-context@0.64.0 || 0.65.0`，
+  当次 PASS。**但它是会腐坏的**：`dsh-context` 的 specifier 是 `^0.66.0`（caret 范围，会自动升版），
+  升级当天 pnpm 就把触发的 `- dsh-context@0.66.0` **追加到列表末尾**，而
+  `evaluateVersionPolicy` 只认**第一个**同名规则（命中就 `return`）——于是：
+
+  ```yaml
+  minimumReleaseAgeExclude:
+    - dsh-context@0.64.0 || 0.65.0   # ← 先命中就返回，0.66.0 不在里面
+    - dsh-context@0.66.0             # ← pnpm 自己追加的，永远不生效
+  ```
+
+  lockfile 校验再次失败（实测 `dsh-context@0.66.0 was published at … within the cutoff`）。
+  **我的修复「通过了一次」，但没通过时间。**
+
+  **改成裸包名** `- dsh-context`（放行该包所有版本）。理由不是它更"安全"，
+  而是它**对「先命中者胜」是稳定且自愈的**：pnpm 之后再怎么往末尾追加，都不会再破。
+  代价写在注释里：这个包不再享受 24h 发布冷静期（本 profile 的有意取舍）。
+
+  **验过两件事**（不只是「改完绿了」）：
+  ① 真 profile 上 `pnpm install --lockfile-only` PASS；
+  ② **模拟 pnpm 再次追加**同类条目后再跑，仍然 PASS（这正是上一版缺的性质）。
+
+  同时把客户端 `err.supply-chain.next` 的建议改对了：原来教「写一条版本并集」，
+  现改为**明确说明并集只能生效一次、并教裸包名**，并加断言**禁止再出现并集写法**
+  （`assert.equal(/dsh-context@0\.64\.0 \|\| 0\.65\.0/.test(...), false)`）。
+
+  **教训**：修一个「方向性」bug 时，要问的不只是「现在好了吗」，还有
+  **「谁会在什么时候把它再弄坏」**。这次的破坏者是 pnpm 自己的追加行为——
+  它就在同一个文件里、每次升级都会发生。
+
+- **热开关：证伪 + 一个真缺陷**（第六轮；用户要求「完成文档里面的热开关」）。
+
+  **结论：热开关不用做——宿主本来就会热应用。** ROADMAP §3.3 把它列成待做的大件，
+  理由是「现在完全依赖宿主 `setBundleEnabled`；热开关能免重启」，**这个前提是错的**。
+
+  实测（新增 `verify/repro-hot-toggle.ps1` → `verify/probe-toggle-hot.mjs`，跑在 scratch
+  profile 上，不碰用户的 desktop profile）：
+
+  ```
+  POST /plugin-market/toggle  {"name":"@feiyang666/dsh-usage-plugin","enabled":false}
+  → 200 {"ok":true,"changed":true,"application":"applied","enabled":false,"error":null,"warnings":[]}
+  ```
+
+  `application:"applied"` = **已经热生效，没有重启**。机制取自宿主源码：`setPluginEnabled`
+  自己就 `writePluginEnabled(this.profile.patchPath, …)` 写 patch 文件，紧接着 `reload()` →
+  `reconcileProfilePatches(...)`；而 `dsh-base` 的 bundle 常驻加载
+  `- id: hmr / name: '@deepseek-ai/dsh-hmr'`，本 profile 的 HMR 在场。佐证：用户的
+  `cordis.patch.yml` 里本来就有宿主写过的开关行（`- id: whale-mode / disabled: false`）。
+
+  所以自己写 `cordis.patch.yml` **既多余又有害**：违反写下来的安全不变量
+  （`PLUGIN-MARKET.md §5`「host 半只做 GET 目录与调用宿主服务，**不写任何文件**」），
+  还得抄参考实现约 45 条受保护模块正则（写错一条就可能把 boot 链自己关掉）。
+  **调用者不该绕过被调用者去改它的文件。**
+
+  **顺带查出一个真缺陷（已修，TDD）**：`toggleNotice` 只认 `cancelled` / `changed`，
+  对宿主另外两种**可达**结果都回绿色「已启用 {name}」：
+
+  | 宿主回 | 修复前 | 真相 |
+  |---|---|---|
+  | `applied` | 「已启用 X」✅ | 对 |
+  | `restart-required` | 「已启用 X」绿色 ❌ | 还没生效（无 HMR 的 profile） |
+  | `overridden` | 「已启用 X」绿色 ❌ | 被覆盖层压住，**状态没变** |
+
+  `overridden` 由宿主 `setPluginEnabled` 显式 return（`index.js:1658`），不是假想分支。
+  修法：补两条分支（warn +「重启 DSH 后生效」/「被覆盖层压住，实际没有启用」），并把
+  `!changed` 与 `noticeFromResult` 统一到同一条排除规则。`applied` 语义**有意**与安装路径不同：
+  安装问「包装上了吗」（`true`），开关问「状态真的切过去了吗」（`false`）。
+
+  **验证**：门禁 PASS（**18 套件**；client-errorcopy **22→25**，3 条新断言先跑到红再修）；
+  真实浏览器 e2e **83/83**。
+
+  **这一轮的教训**：**「文档说缺什么」不等于「真的缺」**。这条 if 从写下到被当任务执行，
+  中间隔了好几轮；真正推翻它的是一次**在 scratch profile 上真发出去的请求**，
+  而不是再读一遍参考实现。同时它也暴露了同一个病的第二次发作——
+  **用一条 happy path 的规则去覆盖一个有多分支的真实接口。**
+
 - **修「有更新时按钮却还写『检查更新』」**（用户第四轮报：
   「有更新时检查更新状态机应该为一键更新」）。
 

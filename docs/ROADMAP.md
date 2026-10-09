@@ -17,7 +17,7 @@
 | ~~P0~~ | ~~截图 + 能力红线~~ | 874/4412 带截图 | 中 | **否定**（用户判定：多数插件没有图） |
 | **P0** | 让「装」和「更新」不说谎：装后激活校验 + 版本回读 | host 半只把宿主的 `application` 原样透传，**无法区分「装好了在跑」和「装了但没生效」** | 小 | **✅ 已完成（1.2.0）** |
 | **P1** | 安装来源优先级：预构建 Release 包优先于整仓下载 | 333 条带 `tarball`；我们现在一律 `npm ?? url` | 中 | 待做 |
-| **P2** | 诊断 / 加载顺序 / 备份快照 / 热开关 / 主题页 | 参考实现有，我们零代码 | 大（逐个独立立项） | 待做 |
+| **P2** | 诊断 / 加载顺序 / 备份快照 / 热开关 / 主题页 | 参考实现有，我们零代码 | 大（逐个独立立项） | 待做（**热开关已证伪，见 §0.3**） |
 | **P1.5** | 自更新通道的激活校验 + 构建脚本批准入口 | `apply()` 不认 `pendingBuilds`，且客户端 `applySelfUpdate()` **无条件**亮绿灯；两者必须一起改（见 §0.2） | 中 | 待做 |
 | **不做** | 收藏 / 备注 / 分组 / 评论 / 独立签名 / 内置快照 | 与「在侧边栏装/管插件」闭环无关或违反既有不变量 | — | — |
 
@@ -61,6 +61,75 @@ requestedName 本来就是同一个值；更新**已装**插件时 `before` 里�
 `postinstall`），而**单方面放宽 `ok` 会更糟**：客户端 `applySelfUpdate()` 的 `.then()` 里
 **无条件** `markSelfDone()` + 绿色「更新成功」，根本不读 `application`/`error`。只改宿主那一行
 等于把今天一条诚实的失败换成假绿灯。要做得同时给它加激活校验与批准入口，记为 **P1.5**。
+
+## 0.3 热开关：**证伪**（v1.2.0 第六轮，实测）
+
+§3.3 把「热开关（写 `cordis.patch.yml`）」列成待做的第三梯队大件，理由是
+「现在完全依赖宿主 `setBundleEnabled`；热开关能免重启」。**这个前提是错的——它已经生效了。**
+
+**实测**（`verify/repro-hot-toggle.ps1` → `verify/probe-toggle-hot.mjs`，scratch profile
+`marketcheck`，不碰用户 desktop profile）：
+
+```
+POST /plugin-market/toggle  {"name":"@feiyang666/dsh-usage-plugin","enabled":false}
+→ 200 {"ok":true,"changed":true,"application":"applied","enabled":false,"error":null,"warnings":[]}
+```
+
+`application: "applied"` = **已经热生效，没有重启**。
+
+**机制**（读宿主源码，不是推测）：
+- `@deepseek-ai/dsh-plugin-manager` 的 `setPluginEnabled` 自己就写 patch 文件：
+  `await writePluginEnabled(this.profile.patchPath, row.patchId, row.moduleName, enabled)`
+  （宿主 `index.js:1656`）；
+- 紧接着 `result.warnings = await this.reload(...)`，而 `reload()` 走
+  `reconcileProfilePatches(root, readProfilePatches('dsh', profile), 'dsh', requiredIds)`
+  （宿主 `index.js:2031-2034`）；
+- `reload()` 在 `hmr` 服务缺席时**直接 return []**，而 `dsh-base` 的 bundle patch 里就加载了
+  `- id: hmr / name: '@deepseek-ai/dsh-hmr'`——本 profile 的 HMR 在场；
+- 佐证：用户的 `cordis.patch.yml` 里本来就有**宿主写过**的开关行
+  （`- id: whale-mode / disabled: false`、`- id: llm-mimo / disabled: false`）。
+
+**所以自己写 `cordis.patch.yml` 不但多余，还有害**：
+1. **违反写下来的安全不变量**——`PLUGIN-MARKET.md §5`：「不落盘、不带凭据：host 半只做 GET 目录
+   与调用宿主服务，**不写任何文件**」；
+2. **重复且更危险**：参考实现为此维护约 45 条受保护模块正则（`patch.ts:50-94`），
+   写错一条就可能把 boot 链自己关掉（那是「DSH 直接起不来」量级的事故）；
+3. 宿主的写入是它的既有职责，我们只是调用者——**调用者不该绕过被调用者自己改它的文件**。
+
+**结论**：热开关**不立项**。这一条从「待做」改成「**已由宿主提供，实测确认**」。
+
+### 0.3.1 补记：第五轮的「版本并集」豁免方案同日即失效（教训）
+
+第五轮修 `minimumReleaseAgeExclude` 时写成 `dsh-context@0.64.0 || 0.65.0`，当次 PASS。
+**但它会腐坏**：`dsh-context` 的 specifier 是 `^0.66.0`（caret 范围，会自动升版），升级当天
+pnpm 把触发的 `- dsh-context@0.66.0` **追加到列表末尾**，而 `evaluateVersionPolicy` 只认
+**第一个**同名规则 → 追加的那条永远被挡住 → 校验再次失败。
+
+**所以那条规则现在写成裸包名 `- dsh-context`**：它对「先命中者胜」是**稳定且自愈**的，
+pnpm 之后再怎么追加都不会破。代价是该包不再享受 24h 冷静期，这是本 profile 的有意取舍。
+
+**这一条的普遍教训**：修「方向性」bug 时要多问一句——
+**「谁会在什么时候把它再弄坏？」** 这次的破坏者是 pnpm 自己的追加行为，
+它就在同一个文件里、每次升级都会发生；只看「改完这次绿了」是不够的。
+
+**但实测顺带查出一个真缺陷（已修）**：`toggleNotice` 只认 `cancelled` / `changed`，
+对宿主另外两种**可达**结果都回绿色「已启用 {name}」——
+
+| 宿主回 | 修复前 | 真相 |
+|---|---|---|
+| `applied` | 「已启用 X」✅ | 对 |
+| `restart-required` | 「已启用 X」绿色 ❌ | 还没生效（无 HMR 的 profile） |
+| `overridden` | 「已启用 X」绿色 ❌ | 被更高优先级覆盖层压住，**状态没变** |
+
+`overridden` 由宿主 `setPluginEnabled` 显式 return（`index.js:1658`），不是假想分支。
+修法：补 `restart-required`（warn +「重启 DSH 后生效」）与 `overridden`
+（warn +「被覆盖层压住，实际没有启用/停用」）两条分支，并让 `!changed` 与
+`noticeFromResult` 用同一条排除规则。`applied` 语义**有意**与安装路径不同：
+安装问「包装上了吗」（装上了 → `true`），开关问「状态真的切过去了吗」（被压住 → `false`）。
+
+回归 3 条（client-errorcopy 22→**25**），先跑到红再修。这是同一个病第二次犯：
+**只会用一条 happy path 的规则去覆盖一个有多分支的真实接口。**
+
 
 
 ## 1. 方法与可信度
@@ -148,7 +217,7 @@ A 和 B 共用一次读取，建议**一起做**。
 | **重启没起来时的恢复页** | `recovery.ts`；`_ref README.md:48` | DSH 启动是全有全无：**一个插件加载失败整个进程就退出**，市场界面随之消失。恢复页由脱离终端的助手在原地址提供，所以宿主已经没了也打得开。我们的 `restart.js` 只做有界等待，**没有任何恢复路径** |
 | 组合诊断 + 加载顺序编辑器 + 落盘前试跑 | `check.ts` / `order.ts` / `trial.ts` | 同上，是「别把 boot 搞坏」的另一半 |
 | 备份 / 快照 / 恢复 | `backup.ts` / `snapshot.ts` | 我们唯一的安全网是宿主自己 |
-| 热开关（写 `cordis.patch.yml`） | `patch.ts` / `hot.ts` | 现在完全依赖宿主 `setBundleEnabled`；热开关能免重启 |
+| ~~热开关（写 `cordis.patch.yml`）~~ | — | **已证伪：宿主本来就会热应用**（实测 `application:"applied"`，见 §0.3） | — | **不立项** |
 | 主题页 | `themes.ts` | 我们**零主题代码** |
 | 无 `pluginManager` 时的 CLI 兜底 | `dsh-cli.ts` | 我们现在这种情况下**只读**（`client.js:344`） |
 
@@ -213,6 +282,7 @@ A 和 B 共用一次读取，建议**一起做**。
 3. **P1｜安装来源优先级 + 同仓库绑定**：抄来源顺序和安全绑定的判断，不抄它的 pnpm 逻辑。
 4. **P2｜从「重启恢复页」单独立项**（第三梯队里最该先做的一件）：它是唯一能在
    **市场自己已经消失**时还救得回 profile 的能力。
-5. 其余大件（诊断/顺序/备份/热开关/主题）**一条一个版本**，各自带失败复现与回归。
+5. 其余大件（诊断/顺序/备份/主题）**一条一个版本**，各自带失败复现与回归。
+   **热开关已从这条里拿掉**：实测证明宿主本来就会热应用（§0.3），不需要我们做。
 
 前两项都是 `MINOR` 量级的增量，且都不需要新的数据源或新的宿主能力——**这是本报告的核心判断**。

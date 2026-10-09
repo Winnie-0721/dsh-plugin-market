@@ -216,6 +216,41 @@ check('真正变更 ⇒ 绿色成功（不能因为收紧而误伤）', () => {
   const off = toggleApi.toggleNotice({ ok: true, changed: true, application: 'applied' }, 'x', false)
   assert.match(off.text, /notice\.toggleDisabled:x/)
 })
+
+console.log('\n[3b] 开关的另外两种真实结果不得谎报成功（v1.2.0 第六轮）')
+// 实测依据：在 scratch profile 上真打 POST /toggle，宿主回
+//   {"ok":true,"changed":true,"application":"applied",...}   ← 热生效（HMR）
+// 而宿主的 setPluginEnabled 还会在某条件下 return "overridden"（index.js:1658），
+// 以及 change() 在 hmr 缺席时给 "restart-required"。这两条都是**可达**的。
+// 修复前 toggleNotice 对二者都回「已启用 {name}」绿色成功——把「没生效」说成「生效了」。
+check('application=restart-required ⇒ 必须说「重启 DSH 后生效」，不能说成已生效', () => {
+  const on = toggleApi.toggleNotice({ ok: true, changed: true, application: 'restart-required' }, 'p', true)
+  assert.notEqual(on.kind, 'success', '还没生效不能报绿色成功')
+  assert.match(on.text, /notice\.toggleRestartOn/)
+  assert.doesNotMatch(on.text, /notice\.toggleEnabled/)
+  assert.equal(on.applied, true, '已写入待重启：算「改动已受理」，与安装路径口径一致')
+  const off = toggleApi.toggleNotice({ ok: true, changed: true, application: 'restart-required' }, 'p', false)
+  assert.match(off.text, /notice\.toggleRestartOff/)
+  assert.doesNotMatch(off.text, /notice\.toggleDisabled/)
+})
+check('application=overridden ⇒ 必须说「被覆盖层压住」，不能报成已生效', () => {
+  const on = toggleApi.toggleNotice({ ok: true, changed: true, application: 'overridden' }, 'p', true)
+  assert.notEqual(on.kind, 'success', '被覆盖层压住不算生效')
+  assert.match(on.text, /notice\.toggleOverriddenOn/)
+  assert.doesNotMatch(on.text, /notice\.toggleEnabled/)
+  // 与安装路径的差别是**有意的**：安装问「包装上了吗」（装上了 → true），
+  // 开关问「状态真的切过去了吗」（被压住 → 没有）。两个问题不同，答案就该不同。
+  assert.equal(on.applied, false, '请求的状态没有生效')
+  const off = toggleApi.toggleNotice({ ok: true, changed: true, application: 'overridden' }, 'p', false)
+  assert.match(off.text, /notice\.toggleOverriddenOff/)
+})
+check('四条新文案 zh/en 都要有（缺 en 会直接显示 key）', () => {
+  for (const k of ['toggleRestartOn', 'toggleRestartOff', 'toggleOverriddenOn', 'toggleOverriddenOff']) {
+    const needle = `"notice.${k}":`
+    const count = source.split(needle).length - 1
+    assert.equal(count, 2, `notice.${k} 应在 zh/en 各有一条，实际 ${count}`)
+  }
+})
 check('两条开关路径都改用了这个函数（源码形状：不得再手写 kind 三元）', () => {
   assert.equal(
     /kind: payload && payload\.error \? "error" : "success"/.test(source),

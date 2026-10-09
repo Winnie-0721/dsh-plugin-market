@@ -250,6 +250,26 @@ Query 参数（全部可选，未知参数忽略）：
 - 响应 `{ "ok": true, "changed": true, "application": "applied", "enabled": true, "error": null, "warnings": [] }`。
 - 宿主返回 `readOnlyReason` 时 ⇒ `400 not-allowed`，`message` 说明这条由宿主基础设施管理，不能在市场里开关。
 
+**热开关（v1.2.0 第六轮实测澄清）**：`application: "applied"` 表示宿主**已经热应用**，
+不需要重启。宿主侧 `setPluginEnabled` 自己就会写 profile 的 patch 文件
+（`writePluginEnabled(this.profile.patchPath, …)`）再 `reload()` →
+`reconcileProfilePatches(...)`，而 `dsh-base` bundle 常驻加载 `hmr` 服务。
+**因此市场不自己写 `cordis.patch.yml`**——那既违反 §5「不落盘」，也是绕过宿主既有职责去改它的文件。
+实测（scratch profile）：`POST /toggle` 回 `{"ok":true,"changed":true,"application":"applied",…}`。
+
+**客户端必须处理另外两种可达结果**（它们都不是「已生效」）：
+
+| `application` | 含义 | 客户端呈现 |
+|---|---|---|
+| `applied` | 已热生效 | 绿色「已启用/已停用 {name}」 |
+| `restart-required` | 设置已写入，但**没有 HMR**，要重启才生效 | warn「…重启 DSH 后生效」，`applied: true` |
+| `overridden` | 写进去了，但**更高优先级的覆盖层赢了**，状态没变 | warn「被覆盖层压住，实际没有启用/停用」，`applied: false` |
+| `cancelled` | 取消 | info |
+| `changed: false` | 什么都没改 | info「本次操作没有产生变更」 |
+
+注意 `overridden` 在两处的 `applied` **有意不同**：安装路径问「包装上了吗」（装上了 → `true`），
+开关路径问「状态真的切过去了吗」（被压住 → `false`）。两个问题不同，答案就该不同。
+
 ### 2.7 `POST /plugin-market/refresh`
 
 强制丢弃目录缓存并重新抓取。

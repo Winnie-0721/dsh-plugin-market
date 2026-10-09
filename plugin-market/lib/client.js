@@ -138,6 +138,10 @@ window.__ModuleLoader__.load({
         "notice.removeCancelled": "{name} 的卸载已取消",
         "notice.toggleEnabled": "已启用 {name}",
         "notice.toggleCancelled": "{name} 的开关已取消",        "notice.toggleDisabled": "已停用 {name}",
+        "notice.toggleRestartOn": "已启用 {name}，重启 DSH 后生效",
+        "notice.toggleRestartOff": "已停用 {name}，重启 DSH 后生效",
+        "notice.toggleOverriddenOn": "已写入 {name} 的启用设置，但 profile 配置的覆盖层优先，实际没有启用",
+        "notice.toggleOverriddenOff": "已写入 {name} 的停用设置，但 profile 配置的覆盖层优先，实际没有停用",
         "notice.refreshOk": "已刷新 {count} 个插件",
         "notice.noChange": "本次操作没有产生变更（宿主可能正在执行同一操作）",
         "notice.buildsPending": "{name} 需要先执行构建脚本，请在下方确认条里批准",
@@ -163,7 +167,7 @@ window.__ModuleLoader__.load({
         "err.registry-unreachable.row": "npm 源连不上，配镜像后重试",
         "err.supply-chain.title": "被供应链策略拦下了（不是网络问题）",
         "err.supply-chain.why": "pnpm 11 默认开了 24 小时冷静期：lockfile 里有包是 24 小时内刚发布的，它按安全策略拒绝整个 lockfile。日志末尾那几行 UND_ERR_DESTROYED / 「Will retry」是**结果不是原因**——校验一失败 pnpm 就放弃下载了。所以配镜像、换源都不会好。",
-        "err.supply-chain.next": "要么等那个包满 24 小时后再更新；要么在 profile 目录的 pnpm-workspace.yaml 里把它的**确切版本**加进 minimumReleaseAgeExclude（例如 dsh-context@0.65.0）。注意同一个包**只能写一条规则**，pnpm 匹配到第一个同名规则就返回、后面的会失效——要放行多个版本得写成一条 `dsh-context@0.64.0 || 0.65.0`。改完完全退出 DSH 再重试。",
+        "err.supply-chain.next": "要么等那个包满 24 小时后再更新；要么在 profile 目录的 pnpm-workspace.yaml 里把它加进 minimumReleaseAgeExclude（例如写 - dsh-context@0.65.0）。注意 pnpm 只认**第一个**同名规则（匹配到就 return），而且它自己会把触发的版本**追加到列表末尾**——所以「同一个包写多条精确版本」或「写一条版本并集」都只能在当次生效，下次它一追加又会被第一条挡住。要给一个会随 caret 范围升版的包长期豁免，就写**裸包名**（`- dsh-context`，放行它的所有版本），那才是不会被追加破坏的写法。改完完全退出 DSH 再重试。",
         "err.supply-chain.row": "被 24 小时发布冷静期拦下，见说明",
         "err.network.title": "无法连接宿主的市场接口",
         "err.network.why": "浏览器到本地宿主的请求失败，宿主可能已退出或连接被拦截。",
@@ -430,6 +434,10 @@ window.__ModuleLoader__.load({
         "notice.toggleEnabled": "Enabled {name}",
         "notice.toggleCancelled": "The toggle of {name} was cancelled",
         "notice.toggleDisabled": "Disabled {name}",
+        "notice.toggleRestartOn": "Enabled {name}; restart DSH to apply",
+        "notice.toggleRestartOff": "Disabled {name}; restart DSH to apply",
+        "notice.toggleOverriddenOn": "Wrote the enable setting for {name}, but a profile override takes precedence, so it is not actually enabled",
+        "notice.toggleOverriddenOff": "Wrote the disable setting for {name}, but a profile override takes precedence, so it is not actually disabled",
         "notice.refreshOk": "Refreshed: {count} plugins",
         "notice.noChange": "This operation made no change (the host may already be running it)",
         "notice.buildsPending": "{name} needs install scripts first; approve them in the banner below",
@@ -455,7 +463,7 @@ window.__ModuleLoader__.load({
         "err.registry-unreachable.row": "npm registry unreachable — configure a mirror",
         "err.supply-chain.title": "Blocked by a supply-chain policy (not a network problem)",
         "err.supply-chain.why": "pnpm 11 enforces a 24-hour release cool-off by default: the lockfile contains a package published less than 24 hours ago, so pnpm rejects the whole lockfile as a safety policy. The trailing UND_ERR_DESTROYED / \"Will retry\" lines are a consequence, not the cause — pnpm abandons the download once verification fails. So configuring a mirror or switching registries will not help.",
-        "err.supply-chain.next": "Either wait for that package to age past 24 hours, or add its exact version to minimumReleaseAgeExclude in the profile's pnpm-workspace.yaml (e.g. dsh-context@0.65.0). Note that a package may only appear in one rule: pnpm returns at the first rule whose name matches and ignores the later ones — to allow several versions, write one rule such as `dsh-context@0.64.0 || 0.65.0`. Quit DSH completely after changing it, then retry.",
+        "err.supply-chain.next": "Either wait for that package to age past 24 hours, or add it to minimumReleaseAgeExclude in the profile's pnpm-workspace.yaml (e.g. `- dsh-context@0.65.0`). Note that pnpm honours only the FIRST rule for a given name (it returns on the first match) and it also appends the triggering version to the END of the list — so several exact-version rules, or a single version-union rule, only work once: the next append is shadowed by the first match again. To exempt a package permanently when it is specified with a caret range, use the bare name (`- dsh-context`, allowing all its versions); that form cannot be broken by a later append. Quit DSH completely after changing it, then retry.",
         "err.supply-chain.row": "Blocked by the 24-hour release cool-off — see details",
         "err.network.title": "Cannot reach the host market endpoint",
         "err.network.why": "The request from the browser to the local host failed; the host may have exited or the connection is blocked.",
@@ -2558,7 +2566,32 @@ function errorCopy(error) {
       if (application === "cancelled") {
         return { kind: "info", applied: false, text: t("notice.toggleCancelled", { name: name }) };
       }
-      if (!changed) return { kind: "info", applied: false, text: t("notice.noChange") };
+      // restart-required / overridden 与「什么都没改」是**两回事**：前者已经写进去了，
+      // 只是还没生效。和 noticeFromResult 保持同一条规则（那个 !changed 分支同样把这两个排除）。
+      if (!changed && application !== "restart-required" && application !== "overridden") {
+        return { kind: "info", applied: false, text: t("notice.noChange") };
+      }
+      // 宿主在 hmr 缺席时给 restart-required：设置写进了 patch 文件，但要重启才生效。
+      // 修复前这里直接落到「已启用 {name}」绿色成功——把「还没生效」说成了「已生效」。
+      if (application === "restart-required") {
+        return {
+          kind: "warn",
+          applied: true,
+          text: next ? t("notice.toggleRestartOn", { name: name }) : t("notice.toggleRestartOff", { name: name })
+        };
+      }
+      // 宿主的 setPluginEnabled 会在「写进去了、但更高优先级的覆盖层赢了」时 return "overridden"
+      // （宿主 index.js:1658）。修复前同样报「已启用 {name}」——那是最糟的一种：用户以为切了，
+      // 实际状态没变，而且还会有绿色回执替这个假象背书。
+      // applied=false 与安装路径的 true 不一样，是**有意的**：安装问「包装上了吗」（装上了），
+      // 开关问「状态真的切过去了吗」（没有）。两个问题不同，答案就该不同。
+      if (application === "overridden") {
+        return {
+          kind: "warn",
+          applied: false,
+          text: next ? t("notice.toggleOverriddenOn", { name: name }) : t("notice.toggleOverriddenOff", { name: name })
+        };
+      }
       return { kind: "success", applied: true, text: successText };
     }
 

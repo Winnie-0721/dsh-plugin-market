@@ -1098,6 +1098,14 @@ function errorCopy(error) {
       // 用真实 errorCopy 实测过：operation-error + ECONNRESET 诊断为
       // why="宿主执行这个操作时报错。"（错），而同样诊断走 install-failed 时 why 正确
       // ——差别只在 known，与是否识别出网络问题无关。
+      // **已知码（known）时绝不覆盖**——`err.restart-unsupported.*` 这类专属文案就是被
+      // `copy.why = message` 悄悄换掉的（v1.2.0 第七轮，NEW-3）：`known` 为真却仍走这行
+      // 的前提是 `message` 非空，而宿主每个错误都带 message，于是桌面版点「重启 DSH」
+      // 得到的 why 是宿主原话「桌面版不能在市场里一键重启。」，title 是 `err.unknown.title`
+      // —— 三段式里两段都错，专属文案一次都没被渲染。上面 76110d9 那条修复只挡了
+      // 「识别出网络/占用」的路径，挡不住「码在表里」这条。
+      // 反向对照：未知码**仍要**塞宿主原话（`reason unknown` 会让人没法判断是网络、限流
+      // 还是源站挂了），所以条件里保留 `!known`。
       if (!supply && !locked && unreachable === "" && !known && message) copy.why = message;
       return copy;
     }

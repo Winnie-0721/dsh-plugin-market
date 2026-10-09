@@ -61,6 +61,52 @@ jobs:
       # checkout 下来就是发布内容。
       - run: npm install -g "npm@^11.5.1"
 
+      # **身份自检：把「文件名不对」从一句神秘的 ENEEDAUTH 变成一句看得懂的错。**
+      #
+      # npm 的 Trusted Publisher 按 `job_workflow_ref` 里的**文件名**匹配，而这个字段
+      # 只指向「实际执行本 job 的那个 workflow 文件」。如果哪天有人把发布步骤从
+      # pack-release.yml 里自己跑一遍（或忘了用 workflow_call 复用），这里就会立刻
+      # 红在**发布之前**，并且直接告诉你登记的是哪个文件、实际是哪个文件——
+      # 而不是等到 `npm stage publish` 才甩一句 need auth（v1.1.6/v1.2.0 各踩一次，
+      # 每次都要去翻日志才看得懂）。
+      #
+      # 注意：**不设 audience 之外的假设**——只请求令牌、解出声明、比对文件名。
+      # 这一步不发布任何东西，纯读。
+      - name: 自检 OIDC 身份（文件必须是 publish-npm.yml）
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, sys, urllib.request
+
+          # 本 job 必须拿到 id-token: write（调用方与被调用方都要声明，缺一个就没有这个变量）。
+          base = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+          token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+          if not base or not token:
+              sys.exit("拿不到 OIDC 请求地址/令牌：确认调用方与被调用方都声明了 `id-token: write`。")
+
+          # 用 npm 的 audience 请求，确保拿到的就是 npm 会校验的那张令牌。
+          req = urllib.request.Request(
+              base + "&audience=npm:registry.npmjs.org",
+              headers={"Authorization": "bearer " + token},
+          )
+          jwt = json.load(urllib.request.urlopen(req))["value"]
+          payload = jwt.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          job_ref = claims.get("job_workflow_ref", "")
+          print(f"job_workflow_ref = {job_ref}")
+          print(f"workflow_ref     = {claims.get('workflow_ref')}")
+
+          expected = ".github/workflows/publish-npm.yml@"
+          if expected not in job_ref:
+              sys.exit(
+                  "OIDC 身份不对：npm 按 job_workflow_ref 的文件名匹配 Trusted Publisher，"
+                  f"登记的是 publish-npm.yml，但这次是 {job_ref.split('@')[0]}。"
+                  "不要把发布步骤复制到别的 workflow 里跑——请用 `uses: ./.github/workflows/publish-npm.yml` 复用。"
+              )
+          print("OIDC 身份正确：npm 会认这个文件名。")
+          PY
+
       # 幂等闸门（从原来 pack-release.yml 里那个重复 job 搬过来的，别丢）：
       # 版本已在 npm 上就跳过——否则 pack-release 补跑 / workflow_dispatch 重跑时
       # `npm stage publish` 会因版本已存在而失败，把整个 Pack and Release 弄红。

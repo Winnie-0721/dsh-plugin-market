@@ -202,6 +202,27 @@ check('走的是 npm stage publish（本包 Trusted Publisher 只授予暂存发
   assert.match(publish, /npm stage publish --access public/, '必须用暂存发布')
 })
 
+console.log('\n[3b] OIDC 身份自检：把「文件名不对」变成看得懂的错')
+
+check('发布前先自检 job_workflow_ref 的文件名', () => {
+  // 为什么要有这一步：文件名不匹配时 npm 只回一句 need auth，得翻日志才能定位
+  // （v1.1.6 / v1.2.0 各踩一次）。自检让它在**发布之前**就红，且直接说是哪个文件不对。
+  const step = stepBlock(publish, '自检 OIDC 身份（文件必须是 publish-npm.yml）')
+  assert.match(step, /ACTIONS_ID_TOKEN_REQUEST_URL/, '要真的去请求 OIDC 令牌')
+  assert.match(step, /job_workflow_ref/, '要比对的字段就是它（npm 按这个匹配）')
+  assert.match(step, /publish-npm\.yml@/, '必须断言里面是 publish-npm.yml')
+  assert.match(step, /sys\.exit/, '文件名不对要**失败**，不能只打印')
+})
+
+check('自检排在发布之前（否则拦不住 ENEEDAUTH）', () => {
+  const selfCheck = publish.indexOf('自检 OIDC 身份')
+  const guard = publish.indexOf('该版本已在 npm 则跳过')
+  const stage = publish.indexOf('Stage publish to npm')
+  assert.ok(selfCheck !== -1 && guard !== -1 && stage !== -1, '三个步骤都要存在')
+  assert.ok(selfCheck < stage, '自检必须在 Stage publish 之前')
+  assert.ok(selfCheck < guard, '自检应在幂等闸门之前——这样即使会跳过，也能早早证明身份正确')
+})
+
 console.log('\n[4] 不许再有第二份发布实现')
 
 check('没有任何其它 workflow 出现 npm stage publish', () => {

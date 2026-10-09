@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-market",
-  "version": "1.1.6",
+  "version": "1.2.0",
   "description": "DeepSeek Harness plugin market: browse and search the community catalog inside the sidebar, install, update, enable, disable and remove plugins without leaving the GUI. Ships a host half plus a web client half in one package.",
   "keywords": [
     "deepseek",

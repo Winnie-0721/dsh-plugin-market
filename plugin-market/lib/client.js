@@ -141,8 +141,10 @@ window.__ModuleLoader__.load({
         "notice.refreshOk": "已刷新 {count} 个插件",
         "notice.noChange": "本次操作没有产生变更（宿主可能正在执行同一操作）",
         "notice.buildsPending": "{name} 需要先执行构建脚本，请在下方确认条里批准",
-        "notice.buildsStillPending": "构建脚本仍未获批准：{builds}。请重试，或在终端安装。",
+        "notice.buildsStillPending": "构建脚本仍未获批准：{builds}。确认条已重新出现，请再点一次「允许并安装」；仍不行就编辑 profile 的 pnpm-workspace.yaml，在 allowBuilds 里把这些包设为 true。",
         "notice.buildsApproved": "已批准构建脚本，正在继续安装 {name}",
+        "notice.selfUpdateFailed": "插件市场更新失败（目标 v{version}）。没有改动已生效；稍后重试，或在终端按 Release 页面的命令升级。",
+        "notice.selfUpdateCancelled": "插件市场更新已取消（目标 v{version}）。",
         "error.label.what": "发生了什么",
         "error.label.why": "为什么",
         "error.label.next": "现在怎么办",
@@ -431,8 +433,10 @@ window.__ModuleLoader__.load({
         "notice.refreshOk": "Refreshed: {count} plugins",
         "notice.noChange": "This operation made no change (the host may already be running it)",
         "notice.buildsPending": "{name} needs install scripts first; approve them in the banner below",
-        "notice.buildsStillPending": "Install scripts remain unapproved: {builds}. Retry, or install in a terminal.",
+        "notice.buildsStillPending": "Install scripts remain unapproved: {builds}. The approval banner is back — click \"Allow and install\" once more; if it still fails, set these packages to true under allowBuilds in the profile's pnpm-workspace.yaml.",
         "notice.buildsApproved": "Build scripts approved; continuing the install of {name}",
+        "notice.selfUpdateFailed": "The plugin market update failed (target v{version}). Nothing took effect; retry later, or upgrade in a terminal with the command from the release page.",
+        "notice.selfUpdateCancelled": "The plugin market update was cancelled (target v{version}).",
         "error.label.what": "What happened",
         "error.label.why": "Why",
         "error.label.next": "What to do now",
@@ -3351,8 +3355,15 @@ function errorCopy(error) {
           clearJob(jobKey);
           if (payload.pendingBuilds && payload.pendingBuilds.length) {
             if (approvedBuilds && approvedBuilds.length) {
+              // 已经带着批准重提了一次、宿主仍说待批准（常见于 `stale-approval`：
+              // pnpm 这一轮没写出占位，宿主的 approveBuilds 因此拒绝了这次批准）。
+              // **绝不能在这里关掉确认条**：那会移除唯一的批准入口，而宿主的
+              // hint 写的是「重新点一次安装」——入口没了，hint 就指向一个不存在的 UI，
+              // 用户点一次即断头、这个插件永远装不上。
+              // 正确做法是**保留确认条**（换上这一轮真实的包名），让用户再点一次：
+              // 第二次往往会命中 pnpm 写出的占位、真的批准成功。
               var stillText = t("notice.buildsStillPending", { builds: payload.pendingBuilds.join(", ") });
-              setPending(null);
+              setPending({ name: requestName, label: label, spec: target.spec, kind: target.kind || "install", key: key, builds: payload.pendingBuilds });
               setNotice({ kind: "warn", text: stillText });
               report({ ok: false, text: stillText, pending: true });
             } else {
@@ -3572,7 +3583,30 @@ function errorCopy(error) {
           if (!mountedRef.current) return;
           clearJob("self-update");
           var to = payload && payload.to ? payload.to : null;
-          // 装完先亮「更新成功」（SELF_DONE_MS 后回 idle），重启前不谎称新代码已生效。
+          // **必须读 application，不能无条件亮绿灯**（与 sendChangeResult 同一条规则）：
+          // 宿主的 ChangeResult 里 error 是可选的，`application:'failed'` 完全可能不带 error，
+          // 而 /self-update 的 ok 规则在无 pendingBuilds 时会判 false——但只要有 pendingBuilds
+          // 或 cancelled，HTTP 就是 200，`.then` 照样进。以前这里 `markSelfDone()` +
+          // 绿色 `notice.selfUpdated` 是无条件的，于是**一次失败的自更新被渲染成成功**。
+          // 没有 application 说明宿主从没确认过这次安装，同样按失败处理。
+          var application = payload && typeof payload.application === "string" ? payload.application : "failed";
+          var failed = application === "failed";
+          var cancelled = application === "cancelled";
+          if (failed) {
+            // 不 markSelfDone：状态机留在 installing/error，按钮不显示「更新成功」。
+            var failError = (payload && payload.error) || null;
+            setSelfCheck({ phase: "error", data: selfUpdate.data, error: failError, at: Date.now() });
+            setNotice({
+              kind: "error",
+              error: failError || marketError("self-update-unavailable", t("notice.selfUpdateFailed", { version: target }), "")
+            });
+            return;
+          }
+          if (cancelled) {
+            setSelfCheck({ phase: "ready", data: selfUpdate.data, error: null, at: Date.now() });
+            setNotice({ kind: "info", text: t("notice.selfUpdateCancelled", { version: target }) });
+            return;
+          }
           markSelfDone();
           // 市场自更新是**独立**的一件事（不是插件列表里的一条），正文改说市场版本。
           noteRestartFrom(payload, { marketVersion: to || target });

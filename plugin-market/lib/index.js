@@ -81,7 +81,7 @@ const MANAGEMENT_HINT = new Map(Object.entries({
   'not-removable': '它是宿主的一部分，只能停用，不能卸载。',
   'stop-profile': '关掉当前 DSH 进程后用 dsh plugin 操作。',
   'bundle-in-use': '关掉占用它的会话或进程，再重试。',
-  'stale-approval': '重新点一次安装，按提示批准构建脚本。',
+  'stale-approval': '重新点一次安装；市场里的批准确认条会重新出现，再点「允许并安装」即可。',
   'incompatible-version': '换一个与当前 DSH 兼容的版本。',
   'operation-error': '看宿主日志里的 pnpm 输出，修好原因后重试。'
 }))

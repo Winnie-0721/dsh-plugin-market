@@ -199,6 +199,41 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 > **Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
 > 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的——**npm 那条路慢一步不影响用户安装**。
 
+#### 4.2.1 第三个真因（v1.2.0 发布时查清，**影响 pack-release.yml 的自动发布，别再推断**）
+
+> v1.2.0 的 `Pack and Release` run（#4，37937588918）结论是 **failure**，
+> 但**打包那半是成功的**：Release `v1.2.0` 已创建、附件齐全
+> （`deepseek-harness-market-1.2.0.tgz` 190,314B + `version.json` 195B）。
+> 失败的只有 `publish-npm` job。
+>
+> **真因（CI 日志原话，不是推断）**：
+> ```
+> npm error code ENEEDAUTH
+> npm error need auth This command requires you to be logged in to https://registry.npmjs.org/
+> ```
+> 即 **OIDC 根本没认证成功**，而不是第 2 条那种「认证成功但权限不足」的 403。
+>
+> **为什么**：npm 的 Trusted Publisher 是把信任**绑定到具体 workflow 文件名**的。
+> 本包的 Trusted Publisher 配的是 **`publish-npm.yml`**；而 `pack-release.yml`
+> 里那个**自己实现的 `publish-npm` job 不是那个文件**，OIDC 不认 → `ENEEDAUTH`。
+> 「v1.1.6 同样失败」也印证：run #3（f11c3c5）的 `publish-npm` 同样是 failure，
+> 而 v1.1.6 最终是**靠手动触发 `Publish to npm`（publish-npm.yml，workflow_dispatch）**
+> 才暂存成功的（run #6，成功）。
+>
+> **可靠做法（v1.2.0 已照此办）**：标签推送让 `pack-release.yml` 完成**打包 + 建 Release**；
+> 随后**另跑一次** `Publish to npm`：
+> ```powershell
+> gh workflow run publish-npm.yml --repo Winnie-0721/dsh-plugin-market --ref main
+> ```
+> 它会读 `plugin-market/package.json` 的当前版本（即刚发的那个）去 `npm stage publish`，成功。
+>
+> **可选的根治**：要么把 `pack-release.yml` 里的 `publish-npm` job 删掉、
+> 只留 `publish-npm.yml` 这条路（少一处会骗人的红灯）；要么在 npm 包设置里把
+> Trusted Publisher 再添加一条指向 `pack-release.yml`。**不建议**为了红灯好看去放松 npm 权限。
+>
+> v1.2.0 当前状态：**已暂存，等待批准**
+> （stage id `96502bf5-4862-4f2a-9933-67412099f989`，run 37938458936，含 Sigstore 溯源）。
+
 
 
 

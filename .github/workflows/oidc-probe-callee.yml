@@ -1,0 +1,37 @@
+name: OIDC Probe Callee (temporary)
+
+# 被调用的可复用 workflow：只打印 OIDC 声明，不做任何发布。
+on:
+  workflow_call:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: 打印 npm 会校验的那几个声明
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+
+          base = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          token = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+          url = base + "&audience=npm:registry.npmjs.org"
+          req = urllib.request.Request(url, headers={"Authorization": "bearer " + token})
+          jwt = json.load(urllib.request.urlopen(req))["value"]
+
+          payload = jwt.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          print("=== CALLEE-CLAIMS-BEGIN ===")
+          for k in ("job_workflow_ref", "workflow_ref", "event_name"):
+              print(f"{k} = {claims.get(k)}")
+          print("=== CALLEE-CLAIMS-END ===")
+          PY

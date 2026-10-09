@@ -33,7 +33,8 @@
 
 - **目录大，读得快。** 社区精选目录 [awesome-dsh-plugin](https://awesome-dsh-plugin.com/plugins.json) 4400+ 条（每日更新）；读取 **npm 镜像优先、官方源兜底**，抓取、缓存、重试、降级全在宿主进程，浏览器只读自家接口——列表始终秒开。
 - **更新每一步都看得见。** 左键是合并状态机「检查更新 → 一键更新（N）/ 重新检查」，行内逐条「更新到 x.y.z」；每条结果留在自己那行，跑完给一条**如实**的汇总回执（待重启计成功、失败原因原样写在那一行，不糊弄）。
-- **市场会更新自己。** 启动自动查一次本体更新，有新版本按钮直接亮「更新到 x.y.z」，四态齐全：插件市场更新 → 正在更新… → 更新成功 → 再次检查；下载过路径形状 + `sha256` + 产物自证三道校验，装完**不假装已生效**——亮出一键「重启 DSH」（detached 等待、死透再拉起，探活先见过宿主死过一次才自动刷新页面）。
+- **市场会更新自己。** 启动自动查一次本体更新，有新版本按钮直接亮「更新到 x.y.z」，四态齐全：插件市场更新 → 正在更新… → 更新成功 → 再次检查；下载过路径形状 + `sha256` + 产物自证三道校验，装完**不假装已生效**。
+- **「要重启」这件事如实说，而且刷新页面丢不掉。** 需要重启宿主的改动，面板不会悄悄变绿；记账在**宿主半**（`/status.pendingRestart`）而不是页面内存里，所以刷新只丢界面、丢不掉事实。`dsh web` / CLI 下还给一键**「重启 DSH」**（detached 等待、死透再拉起，探活先见过宿主死过一次才自动刷新页面）。**桌面端故意没有这颗按钮**——三条各自独立的理由（壳的 IPC 白名单里没有「请壳重启自己」这种消息、宿主一退出壳就当致命故障、那个「启动失败」框里有一颗「停用所有第三方插件」）写在 [API-CONTRACT §2.6](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/API-CONTRACT.md)，桌面端改说「关掉窗口再打开」；见 [ROADMAP 第 6 条](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/ROADMAP.md)。
 - **边界收得紧。** 只装目录内插件、只走宿主 `pluginManager`、写操作只收同源 POST（64 KiB）、目录包 `dist.integrity` 必校验、市场拒绝卸载自己。
 - **像宿主的一部分。** 颜色只用宿主 `--dsw-*` 主题 token 并带兜底值，文案 zh / en 跟随宿主语言；深色 / 浅色、窄屏、`prefers-reduced-motion` 都如实处理（e2e 逐条盯着）。
 
@@ -72,6 +73,13 @@ dsh plugin --profile web add deepseek-harness-market
 > 兼容 DSH **0.2.0-rc.2**；npm 包与 GitHub Release 同步发版，版本规则与发布流程见 [docs/RELEASING.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/RELEASING.md)。
 > 还没有 DSH？`npx @deepseek-ai/dsh web` 起一个本地实例。
 
+**该不该重启、怎么重启**（面板上说的也是这一套，不糊弄）：
+
+| 你在用什么 | 市场装上「宿主半」的改动之后 | 你该做什么 |
+|---|---|---|
+| `dsh web` / CLI | 面板亮出「待重启」横幅，横幅里有**「重启 DSH」**按钮 | 点它，或者自己重启命令 |
+| **桌面端应用** | 同一条横幅，**但没有按钮** | **关掉窗口再重新打开** —— 刷新页面不会加载新的宿主代码 |
+
 ## 它怎么工作
 
 一个 npm 包同时带两半，按官方插件规范装进宿主：
@@ -105,6 +113,9 @@ dsh plugin --profile web add deepseek-harness-market
 
 ## 开发与验收
 
+发布到 npm 的包里**只有运行时**（`lib/`、`cordis.patch.yml`、两份 README、`CHANGELOG`、`LICENSE`）——
+下面这些命令在**仓库里**跑，不是在装好的副本里跑：
+
 ```sh
 # 真实浏览器 e2e：起 scratch 宿主 + headless Edge，驱动真引擎断言并落截图
 pwsh -File verify\ui-check.ps1
@@ -113,11 +124,17 @@ pwsh -File verify\ui-check.ps1
 pwsh -File scripts\release.ps1 -LocalOnly
 
 # 正式发版（本地只到这里）：门禁 → 递增 → 提交 → 打标签 → 推送
-# 推上去的标签触发 GitHub Actions：打包 → GitHub Release 附件 → npm（回退也从附件下载）
+# 推上去的标签触发 GitHub Actions：打包 → GitHub Release 附件 → npm，
+# 其中 npm 发布只有 publish-npm.yml 一份实现（真因见 docs/RELEASING.md §4.2.1）
 pwsh -File scripts\release.ps1 -Bump patch
 ```
 
-回归测试全部放在 `verify/*.test.mjs`（文案键、状态机、安装 spec、自更新通道、来源判定……），发布门禁逐个跑；
+门禁**自动发现** `verify/*.test.mjs`（当前 **20 套**：文案键、状态机、安装 spec、自更新通道、
+来源判定、发布工作流回归……），逐套跑。其中
+[`release-workflow.test.mjs`](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/verify/release-workflow.test.mjs) 有一条**反向断言**：
+`pack-release.yml` 里不得出现 `npm stage publish`——把发布步骤再写一遍正是**吃过两次**的那个 bug
+（[真因与 CI 实际证明了什么，RELEASING §4.2.1](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/RELEASING.md)）。
+真实浏览器 e2e 共 **90 条**，不进门禁（要浏览器与 scratch 宿主），改客户端半或自更新通道后手动跑；
 独立验收报告见 [verify/REPORT.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/verify/REPORT.md)。
 
 ## 仓库结构
@@ -125,8 +142,11 @@ pwsh -File scripts\release.ps1 -Bump patch
 | 路径 | 内容 |
 |---|---|
 | [plugin-market/](https://github.com/Winnie-0721/dsh-plugin-market/tree/main/plugin-market) | 插件包本体：host 半（`lib/index.js` / `catalog.js` / `catalog-npm.js` / `http.js` / `self-update.js` / `restart*.js`）+ web client 半（`lib/client.js` 单文件 bundle）+ `cordis.patch.yml` |
+| [.github/workflows/](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/.github/workflows/publish-npm.yml) | `pack-release.yml`（标签 → 门禁 → 打包 → 建 Release）与 `publish-npm.yml`（**唯一**的 npm 发布实现，经 `workflow_call` 被复用） |
 | [docs/API-CONTRACT.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/API-CONTRACT.md) | host ↔ client 的冻结接口契约（端点、响应约定、目录抓取策略） |
 | [docs/PLUGIN-MARKET.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/PLUGIN-MARKET.md) | 设计与官方规范逐条对照、数据源决策、安全决定、限制、验收结论 |
+| [docs/RELEASING.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/RELEASING.md) | 版本规则、发布链路、npm 发布三次翻车的真因、分发路径 |
+| [docs/ROADMAP.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/ROADMAP.md) | 下一步做什么、不做什么，都带实测证据与代价 |
 | [docs/TEAM-BRIEF.md](https://github.com/Winnie-0721/dsh-plugin-market/blob/main/docs/TEAM-BRIEF.md) | 实现期的环境事实与 API 签名（供协作 / 复现） |
 | [scripts/](https://github.com/Winnie-0721/dsh-plugin-market/tree/main/scripts) | 安装 / 回滚与发布脚本 |
 | [verify/](https://github.com/Winnie-0721/dsh-plugin-market/tree/main/verify) | 回归测试 + 真实浏览器 e2e + 独立验收报告 |

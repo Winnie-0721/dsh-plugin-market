@@ -9,8 +9,10 @@ name: Pack and Release
 #
 # workflow_dispatch 用于补跑 / 回填：按 package.json 的版本找到对应标签重新打包；
 # Release 已存在则幂等补传附件（--clobber），npm 已有该版本则跳过。
-# （release 事件不会因 GITHUB_TOKEN 创建的 Release 而触发其它 workflow，所以 npm
-#   发布放在本文件的 publish-npm job 里；publish-npm.yml 保留作手动补发通道。）
+# （release 事件不会因 GITHUB_TOKEN 创建的 Release 而触发其它 workflow，所以本文件的
+#   publish-npm job 必须存在——但它**不自己执行发布**，而是 `uses:` 复用 publish-npm.yml：
+#   npm 的 Trusted Publisher 按 OIDC 里的 workflow **文件名**匹配，只有复用才能让文件名
+#   仍是登记的那个。publish-npm.yml 同时保留 release/workflow_dispatch 作人工补发通道。）
 on:
   push:
     tags: ['v*']

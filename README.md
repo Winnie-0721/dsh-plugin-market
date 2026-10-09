@@ -28,9 +28,14 @@
 
 ## Why it exists
 
+**One-line positioning: this is a DeepSeek Harness plugin market that works like a phone app store** —
+browse, inspect, install, update, enable/disable and uninstall, all inside the sidebar, using the same
+mental model you already have from installing apps on your phone. Everything below is that positioning made concrete:
+
 - **A big catalog that loads fast.** The community-curated [awesome-dsh-plugin](https://awesome-dsh-plugin.com/plugins.json) catalog with 4400+ entries (updated daily); it reads **npm mirror first with the official URL as fallback**, and fetching, caching, retries and degradation all happen in the host process — the browser only talks to our own endpoints, so the list is always instant.
 - **Every update step is visible.** The left button is one merged state machine: “Check for updates → Update all (N) / Check again”; each row updates to x.y.z on its own; every result stays on its own row and a run ends with one **honest** summary (restart-pending counts as success, failure reasons are written verbatim on that row — no sugar-coating).
-- **The market updates itself.** It checks for a new build once at startup; when one exists the button goes straight to “Update to x.y.z”. All four states are covered: Update the market → Updating… → Update succeeded → Check again; downloads pass three checks (path shape + `sha256` + artifact self-verification), and after installing it **never pretends it already took effect** — it offers a one-click “Restart DSH” (a detached waiter that relaunches only after the old process is really dead, and the page only reloads after observing the host die once).
+- **The market updates itself.** It checks for a new build once at startup; when one exists the button goes straight to “Update to x.y.z”. All four states are covered: Update the market → Updating… → Update succeeded → Check again; downloads pass three checks (path shape + `sha256` + artifact self-verification), and after installing it **never pretends it already took effect**.
+- **“Restart required” is told the truth about.** When a change only takes effect after a host restart, the panel says so instead of quietly turning green — and it **survives a page refresh**, because the ledger lives in the host process (`/status.pendingRestart`), not in page memory. On CLI/`dsh web` installs it also offers a one-click **“Restart DSH”** (a detached waiter that relaunches only after the old process is really dead, and the page only reloads after observing the host die once). **The desktop app deliberately has no restart button** — three independently sufficient reasons (the shell's IPC whitelist has no “restart yourself” message, exiting is treated as a fatal failure, and that failure dialog contains a *disable all third-party plugins* button) are written up in [API-CONTRACT §2.6](docs/API-CONTRACT.md); there the panel says “close the window and reopen it” instead. See [ROADMAP item 6](docs/ROADMAP.md).
 - **A tight boundary.** Only installs plugins **in the catalog**, only through the host `pluginManager`, write operations only accept same-origin POST (64 KiB), catalog bundles must pass `dist.integrity` checks, and the market refuses to uninstall itself.
 - **It feels like part of the host.** Colors only use the host `--dsw-*` theme tokens (with fallbacks); copy is zh / en and follows the host language; dark / light, narrow viewports and `prefers-reduced-motion` are all handled honestly (the e2e watches every one of them).
 
@@ -68,6 +73,13 @@ dsh plugin --profile web add deepseek-harness-market
 
 > Compatible with DSH **0.2.0-rc.2**; the npm package and the GitHub Release are published together; versioning rules and the release process live in [docs/RELEASING.md](docs/RELEASING.md).
 > No DSH yet? `npx @deepseek-ai/dsh web` starts a local instance.
+
+**Which restart applies to you** (the honest version — the panel tells you the same thing):
+
+| You are running | After the market packages a host-side change | What you do |
+|---|---|---|
+| `dsh web` / CLI | the panel shows a “restart required” banner with a **Restart DSH** button | click it, or restart the command yourself |
+| the **desktop app** | the panel shows the same banner **without** a button | **close the window and reopen it** — a page refresh will not load the new host code |
 
 ## How it works
 
@@ -110,11 +122,17 @@ pwsh -File verify\ui-check.ps1
 pwsh -File scripts\release.ps1 -LocalOnly
 
 # Official release (local stops here): gate → bump → commit → tag → push
-# The pushed tag triggers GitHub Actions: pack → GitHub Release assets → npm (rollbacks download the assets too)
+# The pushed tag triggers GitHub Actions: pack → GitHub Release assets → npm,
+# where publish-npm.yml is the single npm-publish implementation (see docs/RELEASING.md §4.2.1)
 pwsh -File scripts\release.ps1 -Bump patch
 ```
 
-All regression tests live in `verify/*.test.mjs` (copy keys, state machines, install spec, self-update channel, source classification…), and the release gate runs them one by one;
+The gate auto-discovers `verify/*.test.mjs` (**currently 20 suites** — copy keys, state machines, install spec,
+self-update channel, source classification, the OIDC/release-workflow regression…), and
+[`release-workflow.test.mjs`](verify/release-workflow.test.mjs) adds a **reverse assertion**: `pack-release.yml`
+must not contain `npm stage publish` — writing the publish steps a second time is exactly the bug that broke
+releases twice ([root cause + what CI actually proved, RELEASING §4.2.1](docs/RELEASING.md)).
+Real-browser e2e is **90 assertions** and stays out of the gate (it needs a browser and a scratch host);
 the independent acceptance report is [verify/REPORT.md](verify/REPORT.md).
 
 ## Repository layout
@@ -122,8 +140,11 @@ the independent acceptance report is [verify/REPORT.md](verify/REPORT.md).
 | Path | Contents |
 |---|---|
 | [plugin-market/](plugin-market/README.md) | The plugin package itself: host half (`lib/index.js` / `catalog.js` / `catalog-npm.js` / `http.js` / `self-update.js` / `restart*.js`) + web client half (`lib/client.js`, single-file bundle) + `cordis.patch.yml` |
+| [.github/workflows/](.github/workflows/publish-npm.yml) | `pack-release.yml` (tag → gate → pack → GitHub Release) and `publish-npm.yml` (**the only** npm-publish implementation, reused via `workflow_call`) |
 | [docs/API-CONTRACT.md](docs/API-CONTRACT.md) | The frozen host ↔ client contract (endpoints, response conventions, catalog fetching strategy) |
 | [docs/PLUGIN-MARKET.md](docs/PLUGIN-MARKET.md) | Design and line-by-line comparison with the official spec, data-source decisions, security decisions, limitations, acceptance results |
+| [docs/RELEASING.md](docs/RELEASING.md) | Version rules, the release chain, the three npm-publish root causes, distribution paths |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What to build next, what not to build, with measured evidence and cost |
 | [docs/TEAM-BRIEF.md](docs/TEAM-BRIEF.md) | Implementation-period environment facts and API signatures (for collaboration / reproduction) |
 | [scripts/](scripts/install-into-profile.ps1) | Install / rollback and release scripts |
 | [verify/](verify/ui-check.ps1) | Regression tests + real-browser e2e + the independent acceptance report |

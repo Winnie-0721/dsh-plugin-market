@@ -625,7 +625,7 @@ window.__ModuleLoader__.load({
 6. `POST /plugin-market/install` 用目录外 spec 返回 400 `not-in-catalog`。
 7. 卸载自身返回 400 `not-allowed`。
 8. 目录缓存：连续两次 `GET /catalog` 第二次 `fetchedAt` 不变；`POST /refresh` 后变化。
-9. **自更新通道**（`verify/self-update.test.mjs` 43 条离线 + `verify/self-update-live.ps1` 真实端到端）：
+9. **自更新通道**（`verify/self-update.test.mjs`，写这条时 43 条、**现在是 50 条**离线 + `verify/self-update-live.ps1` 真实端到端）：
    - `GET /plugin-market/self-update` 返回 `ok:true`，`latest` 等于仓库最新标签，`current === latest` 时 `updateAvailable:false`；
    - **一个源半残不能拖垮整次检查**：标签列表只给到旧版本、那个旧标签的清单 404 时，必须改用下一个源并成功；
    - 三个源全不通时 `502 self-update-unavailable` 且 `diagnostic` 列出三条失败原因；
@@ -643,7 +643,7 @@ window.__ModuleLoader__.load({
 `checked && bundles.length > 0` 这个「先点一次检查」的前置条件；v1.2.0 用户第四轮改正）；`restart-required` 带 `applied: true` 且行内/批量按 `applied` 计成功（`已是最新` 与裸 `一键更新` 两个键已删除）；搜索框只有一颗清除键（样式表必须带 `.dshpm-input::-webkit-search-cancel-button` 的 `-webkit-appearance:none` + `display:none`，输入框保持 `type: "search"` 不靠改类型去重，我们那颗按 `props.queryInput` 条件渲染并接 `onQueryClear`）。
 13. **安装 spec 钉版本**（`verify/install-spec.test.mjs`）：`pinnedNpmSpec` 在装之前被调用、只认「spec === 目录里的裸 npm 名 + 版本像 semver」、钉出 `name@version`；行为上，`POST /install {name}` 与 `{spec:裸名}` 都让假 `installBundle` 收到 `dsh-context@0.63.0`，GitHub 条目的 spec 保持 URL 原样。
 14. **重启助手**（`verify/restart-helper.test.mjs`，离线、不碰真实 DSH）：启动规格必须 `detached` + `windowsHide` + `ELECTRON_RUN_AS_NODE=1`，helper 脚本缺失或参数不合法在 spawn 之前就拒绝；幂等（第二次请求回 `already` 且不再 spawn）；真助手两向——父 pid 已死则拉起且拉起前 env 里 `ELECTRON_RUN_AS_NODE` 已删（子进程必须 `detached` 才能在创建者退出后活着，Windows 实测），父 pid 活着则等满期限放弃、绝不拉起。客户端接线在第 12 条里盯：`POST /restart` 被真的调用、`restart-failed` 进错误码表、各写操作点亮横幅、探活「先见过死」才 `location.reload()`、60s 超时如实提示。
-15. **目录身份层与内容校验**（`verify/catalog-identity.test.mjs` 36 条，v1.1.6 新增）：
+15. **目录身份层与内容校验**（`verify/catalog-identity.test.mjs`，写这条时 36 条、**现在是 38 条**，v1.1.6 新增）：
     `repoTail` 取 `/<owner>/<repo>/…` 的**前两段**（不是 URL 最后一段——monorepo 子目录地址会
     退化成 `dsh` 这类通用词；真实 4412 条逐条一致）；
     目录里不存在的 `@scope/<name>` **不得**命中同名的另一个包（这条会装错包），
@@ -656,7 +656,8 @@ window.__ModuleLoader__.load({
     多词是「与」、`jose` 能搜到 `José`；四种排序对正序/倒序输入结果一致且不改动入参数组；
     `paginate` 超出末页收敛到末页。
     真实快照（`_ref/data/plugins.json`）存在时额外跑规模复核；不存在也能单独通过。
-16. **host 契约回归**（`verify/host-contract.test.mjs` 27 条，v1.1.6 新增 18 条 + v1.1.7 新增 9 条）：
+16. **host 契约回归**（`verify/host-contract.test.mjs`，写这条时 27 条、**现在是 38 条**——v1.1.6 新增 18 条 +
+    v1.1.7 新增 9 条，之后各轮陆续加到 38）：
     `sendError` 必须把
     `overrides.diagnostic` 写进响应体（无则不凭空造字段）；`sendChangeResult` 的 `ok` 用**真调
     handler 读响应体**的方式验六种 `application`/`error` 组合（`failed` ⇒ `false`；
@@ -680,7 +681,7 @@ window.__ModuleLoader__.load({
     并带反向断言（两个不同名字各自命中一个 bundle ⇒ 仍须 `ambiguous-bundle`）。
     这一条此前测不出来，是因为既有 7 条相关断言**全都只传单个候选名**、从不传重复项；
     该断言做了双向变异测试（改回不去重 / 只留第一个候选），2/2 全捕获。
-17. **目录搜索记忆化回归**（`verify/catalog-search-cache.test.mjs` 11 条，v1.2.0 新增）：
+17. **目录搜索记忆化回归**（`verify/catalog-search-cache.test.mjs`，写这条时 11 条、**现在是 15 条**，v1.2.0 新增）：
     搜索加了两处**跨请求复用**的缓存，而缓存是「写错了也照样能跑」的东西——结果依旧正确、
     测试依旧全绿，只在特定条件下静静给错答案，所以这一套是专门钉它的：
     ① `foldText` 按**字符串内容**记忆化 → `José`↔`jose` 必须仍双向命中、查询侧也要折叠
@@ -700,24 +701,23 @@ window.__ModuleLoader__.load({
     修复后 0→82 命中自己，剩余 6 条经查为「同名 npm 包优先」与「不同 owner 真撞车判歧义」，
     都是设计而非缺陷）；**大写仓库名要能被全小写探针命中**；**并发 `ensure()` 只归一化一次**
     （8 个等待者必须共用同一个 `plugins` 数组，否则按数组身份的索引缓存全失效）。
-18. **`ok` 推导规则的一致性**（`verify/self-update.test.mjs` 45 条，v1.2.0 新增 3 条）：
+18. **`ok` 推导规则的一致性**（`verify/self-update.test.mjs`，写这条时 45 条、**现在是 50 条**，v1.2.0 新增 3 条）：
     `application:'failed'` ⇒ `ok:false`（**即使宿主没带 `error`**），
     `application:'cancelled'` ⇒ `ok:true`（用户自己取消的，客户端要靠 `application` 渲染
     「已取消」；`ok:false` 会让 `requestJSON` 直接抛错，那条文案永远不可达），
     带 `error` 而没给 `application` ⇒ 回落 `failed` 且 `ok:false`。
     这三条规则在 `self-update.js`、`sendChangeResult`、`/toggle` 三处必须**完全一致**——
     审计发现前两处漂移会让**一次失败的自更新 HTTP 200 + 绿色「更新成功」**。
-    **v1.2.0 复核后的已知例外（故意保留、未修）**：`self-update.js` 的 `apply()` **不认**
-    `pendingBuilds`——`sendChangeResult` 在 v1.2.0 加了「`pendingBuilds` 非空 ⇒ `ok:true`」
-    （修批准入口的死代码），`apply()` 没有跟着改。**这不是可达缺陷**：市场包
-    `plugin-manager/package.json` 的 `dependencies`/`optionalDependencies` 都是空、也没有
-    `postinstall`/`prepare`，`installBundle(<本地 tgz>)` 不会产生 `pendingBuilds`。
-    **更要紧的是不能只改那一行**：客户端 `applySelfUpdate()` 在 `.then()` 里**无条件**
-    `markSelfDone()` + 绿色 `notice.selfUpdated`（它只看 HTTP `ok`，完全不读
-    `application`/`error`/`pendingBuilds`）。所以单方面把 `apply()` 的 `ok` 放宽成
-    「`pendingBuilds` 非空也算成功」，只会把今天一条**诚实的失败**换成**假绿灯**——
-    比现状更糟。真要支持这条路，必须同时给自更新加激活校验与批准入口（记在
-    `docs/ROADMAP.md`），属于独立改动，不在本轮做。
+    **更正（4e1e873 修完后回写，替换本条原先的「故意保留、未修」）**：客户端
+    `applySelfUpdate()` 原先确实在 `.then()` 里**无条件** `markSelfDone()` + 绿色
+    `notice.selfUpdated`（只看 HTTP `ok`，不读 `application`），但**现在它先读
+    `application`**：`failed` → `phase:'error'` + 错误回执、不 `markSelfDone()`；
+    `cancelled` → 「已取消」；`ok` 规则本身也已在 `self-update.js` 与 `sendChangeResult`
+    对齐（`pendingBuilds` 非空 ⇒ `ok:true`，空结果不算 `applied`）。回归：
+    `verify/truth-report.test.mjs`（行为断言）+ `verify/self-update.test.mjs` 的 ok 推导三条。
+    仍**不为自更新单列激活校验与批准入口**，理由只是**不可达**：市场包
+    `dependencies`/`optionalDependencies` 皆空、无 `postinstall`/`prepare`，
+    `installBundle(<本地 tgz>)` 不会产生 `pendingBuilds`——不是「改了会假绿灯」。
 19. **错误归类行为回归**（`verify/error-classify.test.mjs` 18 条，v1.2.0 新增）：
     **不是源码形状断言**——把真 bundle 里的 `fileLockedDetail` / `supplyChainDetail` /
     `registryUnreachableDetail` / `shortFailureText` 抠出来**在同一作用域求值**（后两者内部调用前两者，
@@ -744,7 +744,7 @@ window.__ModuleLoader__.load({
     另一条（v1.2.0 末轮）：加 `supplyChainDetail` 时套用同一套抠函数写法，**忘了把它加进
     求值 bundle**，门禁立刻报 16/18 失败、错误信息全是 `supplyChainDetail is not defined`
     ——这类「测试替身没跟上被测代码」的失误必须靠门禁兜住，不能靠记性。
-19b. **`errorCopy` 与开关回执的行为回归**（`verify/client-errorcopy.test.mjs` 22 条，v1.2.0 新增）：
+19b. **`errorCopy` 与开关回执的行为回归**（`verify/client-errorcopy.test.mjs`，写这条时 22 条、**现在是 31 条**，v1.2.0 新增）：
     `error-classify` 只调三个 detail 函数 + 正则断言 `message:` 那一行，**从不执行 `errorCopy`**
     ——而 `errorCopy` 才是真正决定用户看到哪段文案的函数，它把「选中哪个 prefix」和「兜底是否覆盖
     why」这两件事组合起来。第二轮审计正是钻了这个空子：命中 registry-unreachable 之后 why 被宿主
@@ -773,3 +773,24 @@ window.__ModuleLoader__.load({
     `ok` 的推导行为）。真实浏览器 e2e 的 [10] 段另有一层：断言批准确认条出现过、
     点了名要跑的包、有「允许并安装」按钮、toast 指路。
     **变异测试 4/4 全捕获**（回到旧规则 / 无条件放行 / 不透传 / 不过滤），变异后按字节还原。
+21. **「不说谎」两条路径的行为回归**（`verify/truth-report.test.mjs` 7 条，v1.2.0 新增）：
+    NEW-1 = 批准死路（`pendingBuilds` ⇒ `ok:true`，见第 20 条）；NEW-2 = **自更新假绿灯**——
+    直接调 `apply()` 喂 `{ application:'failed' }`（宿主的 `error` 是可选字段，可以为空），
+    断言 `ok:false` 且 `/self-update` 这条出口把它报成 502，**HTTP 200 + 绿色「更新成功」
+    必须不可复现**。它与 `client-errorcopy` 的 `application` 分支断言一起构成两侧证据：
+    宿主不许把失败说成成功，客户端拿到 `failed` 也不许 `markSelfDone()`。
+22. **桌面版一键重启的拒绝路径**（`verify/restart-unsupported.test.mjs` 8 条，v1.2.0 新增）：
+    ① `errorCopy` 收到真实 409 载荷 `{code:'restart-unsupported', …}` 时 title/why/next 走
+    `err.restart-unsupported.*`；**反向对照**：未知码仍把宿主原话塞进 `why`（兜底不许砍）；
+    ② `startRestart()` 的失败分支必须回到 `phase:'failed'`（可重试）并关掉询问窗、
+    `beginRestartProbe()` 不得被触发（没真重启就不许探活）；
+    ③ **已知码的 `why` 不被宿主原话覆盖**，且对 `install-failed` 同样成立（泛化，
+    不是只修 `restart-unsupported` 一处）。
+23. **发布工作流的反向断言**（`verify/release-workflow.test.mjs` 14 条，v1.2.0 后期新增）：
+    钉住「npm 发布只能由 `publish-npm.yml` 亲自执行」——npm 的 Trusted Publisher 按
+    `job_workflow_ref` 里的**文件名**匹配，而实测 `workflow_call` 下该字段指向**被调用**的文件
+    （真因与 CI 证据见 [RELEASING §4.2.1](RELEASING.md)）。其中一条是**反向**的：
+    `pack-release.yml` 里**不得出现 `npm stage publish`**（自己写一遍步骤正是复发两次的写法）。
+    另有：幂等闸门锚定到具体 step、被调用方与调用方**双侧** `id-token: write`、
+    `npm@latest` 与 `registry-url` 两个历史坑不得回潮、临时 OIDC 探针不得残留。
+    套件本身做过**变异测试 7/7 CAUGHT**（含「把发布命令写回 pack-release.yml」）。

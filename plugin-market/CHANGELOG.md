@@ -2,6 +2,145 @@
 
 ## 1.2.0
 
+> **本节开头三条是 `v1.2.0` 标签之后追加的记录**（按最新在前排列；提交类型为 `docs:` / `ci:`，
+> 按 `docs/RELEASING.md` §1 的判档口径**不升档**）：① 本轮文档整理、② 修掉连续两次让
+> `Pack and Release` 变红的 npm 发布真因、③ 补齐两个套件的门禁记录。
+> （对照办法：`git show v1.2.0:plugin-market/CHANGELOG.md` 里这三条都没有。）
+> **它们不改变已发布的产物**：npm 上的 1.2.0 与 `v1.2.0` 标签内容仍是同一份，
+> 附件与版本号都没动。唯一的实际影响是——**npmjs.com 上那个 1.2.0 页面显示的是标签当时那份
+> 中文 README**（这些文字要等下一次发布才会出现在 npm 页面上）；仓库里的 README 是最新的。
+> 这一条**逐字节核对过**：`npm pack deepseek-harness-market@1.2.0` 解包出的 **14 个文件
+> 与 `v1.2.0` 标签逐个 sha256 相同**；`npm view … readme` 的正文（去掉 CRLF 差异后）
+> **等于 `v1.2.0:plugin-market/README.zh.md`**，长度 7617 字符——所以 npm 页面喂的是中文那份，
+> `README.md`（12516 字符）只是随包发布但没被选为展示正文。
+
+- **文档整理：把「当时的说法」与「现在的事实」分开，并修掉 7 条失效链接**（用户第九轮
+  「整理并更新 文档和README.md」）。
+
+  **先清洗事实**。三处说法已经过期，都是「当时判断对、条件后来变了」而不是当时写错——
+  现在都在原地留**更正块**，不悄悄改掉：`docs/RELEASING.md` 里 v1.1.6 与 v1.2.0 的
+  「已暂存，等待批准」（**已公开**：`npm view` → 1.2.0）、`docs/ROADMAP.md` P1.5 的
+  「待做」（**已关闭，不立项**）、`docs/API-CONTRACT.md` §5 第 18 条的「故意保留、未修」
+  （`4e1e873` 已修，理由只剩不可达）。同一批还改掉了三处会误导人的旧表述：
+  「两个 workflow 都加 Trusted publisher」（**现在只需登记 `publish-npm.yml`**）、
+  「job 里会先 `npm install -g npm@latest`」（**是 `^11.5.1`，npm@latest 会 EBADENGINE**）、
+  「常规发布之后还要另外手动跑一次 `Publish to npm`」（**根治后不必了**）。
+
+  **顺带发现并修掉 7 条失效链接（真缺陷，不是措辞）**：`docs/PLUGIN-MARKET.md` 里
+  `[REPORT §12.x](REPORT.md)` 指向 `docs/REPORT.md` —— **那个文件不存在**，
+  报告在 `verify/REPORT.md`。用一次性脚本 `_verify/link-check.mjs`（git-ignored，不进门禁）
+  扫了 11 个文档的 70 条相对链接：**修复前 7 条目标不存在，修复后 0 条**（含锚点校验）。
+  这类链接在 GitHub 上就是死链，读者点一次就撞墙。
+
+  **这个体检工具自己也做了变异测试，4/4 符合预期**（`_verify/link-check.mutation.mjs`：
+  基线应干净 / 目标改回坏文件 / 锚点指向不存在的章节 / 代码段里的坏链不误报）。
+  **两次都是工具先假绿，抓的是我自己的夹具错**，记下来因为它和本轮反复出现的是同一类错：
+  1. 第一版**没设 `cwd`** —— `link-check.mjs` 用 `resolve(相对路径)` 解析链接，
+     而相对路径相对的是**进程工作目录**；于是它在扫仓库里那份**已经修好**的文档，
+     两个变异都「判为干净」。
+  2. 第二版设了 `cwd`，却**只拷了 md 文件**做夹具 —— 而 README 会指向
+     `verify/release-workflow.test.mjs`、`.github/workflows/publish-npm.yml`、`scripts/*.ps1`，
+     基线里这些合法链接全报 MISSING → **基线假红**，后面的变异结论随之作废。
+  两次都不是「被测逻辑错了」，而是**工具/夹具站错了地方**。改成整仓拷贝（跳过 `.git`/`node_modules`/
+  `_ref`/`_verify`）后 4/4。
+
+  **README 补齐了三件它一直没说的事**（这是本轮最实质的内容补全）：
+  ① **桌面端没有一键重启按钮，而且是故意的** —— README 原来只写「亮出一键『重启 DSH』」，
+  桌面端用户照着找会发现根本没有那颗按钮。现在四个 README 都写清两条路径的差别
+  （`dsh web`/CLI 有按钮；桌面端**关掉窗口再打开**，刷新页面不算），并指向
+  [API-CONTRACT §2.6](../docs/API-CONTRACT.md) 的三条独立理由；
+  ② **「待重启」刷新页面丢不掉** —— 记账在宿主半，不是页面内存；
+  ③ **门禁与 CI 的真实形状**：门禁**自动发现** `verify/*.test.mjs`（当前 **20 套**）、
+  e2e **90 条**不进门禁、npm 发布**只有 `publish-npm.yml` 一份实现**，
+  以及那条反向断言。仓库结构表补上了 `.github/workflows/`、`RELEASING.md`、`ROADMAP.md`。
+
+  **文案层面的一个诚实标注**：npm 页面上现在显示的仍是 `v1.2.0` 标签当时那份 README
+  （`files` 里含 `README.md`/`README.zh.md`），**仓库里的改动要等下一次发布才会反映到 npm 页面**——
+  写在 CHANGELOG 顶部，免得下次有人以为「改完 README 就上线了」。
+  这条**核对过**：npm 上 1.2.0 的 tarball 与 `v1.2.0` 标签逐字节相同，registry 上的 README
+  也确实等于 `v1.2.0:plugin-market/README.zh.md`。
+
+  **请独立一方复核文档，抓出 7 条我说错的——这一步价值最高。**
+  **7 处不实，没有一处是我自己发现的**：①「追加**两条**」其实**三条**；② §14 写「工作树干净」
+  而当时有 **10 个**未提交文件（就是 §15 自己改的）；③ §14 写「**在真实 CI 里验证过**」
+  读起来像已发布成功，实际那一步是 **`skipped`**（幂等闸门命中）——**我在 §14 刚批评过这个错觉，
+  转头又犯了一遍**；④ e2e 增量链 `64→+4→82`、`82→+3→86` 算错（真实是
+  64→65→67→78→82→83→86→90，端点数对、链条错）；⑤ ROADMAP §5 还写 78 条（现 90）；
+  ⑥ RELEASING 两处「404 名字仍可用」（现 200，且与同文档「1.2.0 已公开」自相矛盾）；
+  ⑦ API-CONTRACT §5 六处套件条数（43/36/27/11/45/22 → 50/38/38/15/50/31）。
+
+  **分类看得很清楚**：③ 是**判断错**（把跳过说成验证），①④⑤⑥⑦ 是**数错/没跟着更新**——
+  两类都不是写作能力问题，而是**没把「数一遍」和「分清证明了什么」当成必需步骤**。
+  第 ⑦ 条原来就在 HEAD 上（不是本轮引入），但既然要「整理」，就一起对齐。
+  全部已改，核对结论也写进了 `verify/REPORT.md` §15 第五小节。
+
+  **验证**：门禁 `release.ps1 -LocalOnly` **exit=0、20 套件全绿**；四份 README 的
+  标题结构与新增表格逐份对齐；行尾统一 LF、无尾随空白（`.gitattributes` 要求）；
+  链接体检 exit=0 且**它自己的变异测试 4/4**。**本次不递增版本、不打包、不发布。**
+
+- **修掉连续两次让 `Pack and Release` 变红的真因：npm 的 Trusted Publisher 认的是
+  `job_workflow_ref` 里的那个**文件名**，而 `pack-release.yml` 里**自己写了一遍**发布步骤**
+  （用户第八轮「修复工作流的问题」）。
+
+  **症状**：`Pack and Release` 连续两次 red（v1.1.6 的 run #3、v1.2.0 的 run #4），
+  但**打包那半一直成功**、Release 附件齐全，只有 `publish-npm` job 报：
+  ```
+  npm error code ENEEDAUTH
+  npm error need auth This command requires you to be logged in to https://registry.npmjs.org/
+  ```
+
+  **真因不是推断出来的，是测出来的**。我先写了三个临时探针 workflow（普通 job / caller /
+  callee）跑在真实 Actions 上，量出 OIDC 令牌里那个字段的取值：
+  ```
+  普通 job      : job_workflow_ref = 所在文件
+  workflow_call : job_workflow_ref = **被调用**的文件（workflow_ref 才是调用方）
+  ```
+  所以 `pack-release.yml` 自己跑发布时，令牌里的文件名是 `pack-release.yml`，
+  与 npm 上登记的 `publish-npm.yml` 不符 → `ENEEDAUTH`。
+  **旁证**：run #2 那次 `publish-npm` 显示「成功」其实只是命中了幂等闸门（1.1.5 已在 npm，直接 skip）
+  ——这个 job **从未真正发布成功过**，v1.1.6 是靠手动跑一次 `Publish to npm` 才补上的。
+
+  **改法**：`publish-npm.yml` 加 `workflow_call` 成为**唯一**的发布实现，
+  `pack-release.yml` 的 job 缩成 `needs: pack` + 双侧 `id-token: write` +
+  `uses: ./.github/workflows/publish-npm.yml`；原来重复 job 里的**幂等闸门**搬了过去（不能丢，
+  否则补跑会因版本已存在而失败）。
+
+  **在真实 CI 里跑了复用路径，但要分清它证明了什么、没证明什么**：`Pack and Release` run
+  [#37941309305](https://github.com/Winnie-0721/dsh-plugin-market/actions/runs/37941309305)
+  `conclusion=success`（`pack=success`、`publish-npm / publish=success`），日志里打出
+  `job_workflow_ref = …/publish-npm.yml@refs/heads/main` 与
+  `workflow_ref = …/pack-release.yml@refs/heads/main`——**第一个字段正是 npm 校验的那个，
+  复用路径下它没变，与登记一致**。这是本次修复真正要的结论。
+  **但那一步这次是 skipped**：`Stage publish to npm` = **skipped**（幂等闸门命中——npm 上
+  1.2.0 发布于 13:48:06Z，run 于 14:03:09Z 才起），所以「job 绿」**不等于**「经复用真的发布过」。
+  我第一版把这两件事写混了（说「在真实 CI 里验证过」，像是发布了），是复核算出来的，
+  已在 `docs/RELEASING.md` §4.2.1 写清逐步骤结论，并把「下次发新版本时那一步才是首次实跑」
+  写成提醒。**v1.1.6 那次「publish-npm 显示成功、其实只是闸门命中」是同一种错觉，我又差点重犯。**
+
+  **另加一步发布前自检**（`自检 OIDC 身份`）：只请求令牌、解出声明、比对文件名，不发布任何东西。
+  它把「文件名不对」从一句要翻日志才看得懂的 `need auth`，变成发布**之前**就说明
+  「登记的是 publish-npm.yml，这次是 xxx」的错——这个坑连续吃掉两次发布，不该再靠事后读日志定位。
+
+  **防复发**：新增 `verify/release-workflow.test.mjs`（14 项，已入门禁）含一条**反向断言**
+  ——`pack-release.yml` 里不得出现 `npm stage publish`（「把发布步骤再写一遍」正是复发两次的写法）。
+  **变异测试 7/7 CAUGHT**，含 M1「把发布命令写回 pack-release.yml」；期间我自己的两条断言先漏检
+  （全文正则命中了别处的同名条件），改成锚定到具体 job / step 后全部抓住。
+  临时探针已删除，并有断言防止残留。**本次不递增版本、不打包、不发布。**
+
+- **补齐两个「不说谎」套件的门禁记录**（此前代码进了门禁、但 CHANGELOG / REPORT 都没提）：
+  `verify/truth-report.test.mjs`（**7 条**，NEW-1 批准死路 + NEW-2 自更新假绿灯，
+  直接调 `apply()` 读响应体）与 `verify/restart-unsupported.test.mjs`（**8 条**，
+  真实 409 载荷的 `errorCopy` 文案 + `startRestart()` 失败分支回 `failed` +
+  已知码 `why` 不被宿主原话覆盖、并含 `install-failed` 泛化对照）。
+  门禁现共 **20 套件**；`release.ps1 -LocalOnly` exit=0。
+  同时更正 `docs/ROADMAP.md` P1.5（原判据「客户端无条件亮绿灯」已在 4e1e873 修掉，
+  条目关闭、不立项）与 `docs/API-CONTRACT.md` §5 第 18 条的「故意保留、未修」表述。
+  **另记一条 2026-10-09 实测的分发事实**：jsDelivr gh 的两条下载路
+  （`@v<tag>/releases/…` 与 `@main/releases/…`）对 v1.1.6、v1.2.0 **稳定 404**
+  （`releases/` 已不在 git 树，jsDelivr gh 源只读 git 树）——自更新靠第 3 路
+  GitHub Release 附件兜底（实测 3/3 成功），手动安装也请只用附件地址
+  （`docs/RELEASING.md` §4.4 已加复测记录）。**本次不递增版本、不打包、不发布。**
+
 - **桌面端为什么没有一键重启按钮：我原来的理由不完整，查清后把真理由写进契约；顺带修掉
   「刷新页面就丢掉待重启提示」**（用户第六、七轮：先问「你桌面端为什么不做重启按钮」，
   再问「是默认生效的吗」）。

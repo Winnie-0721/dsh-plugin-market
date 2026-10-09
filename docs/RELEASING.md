@@ -63,7 +63,10 @@
    - `cordis.patch.yml` 存在且行 `name` 与包名一致；
    - 客户端 bundle 含 `__ModuleLoader__.load` 且 `id` 等于包名，且不含 `eval` / `new Function`；
    - `lib/` 里不存在**写死的旧版本号**（版本必须从包清单读；这条拦过一次真实的漂移）；
-   - `verify/*.test.mjs` 全部通过（含来源判定矩阵、样式生命周期、版本一致性、PS 脚本 BOM 与读取编码、自更新通道、文案与动效不变量）；
+   - `verify/*.test.mjs` **全部**通过——**不是写死清单，是自动发现的**（当前 **20** 套：
+     来源判定矩阵、样式生命周期、版本一致性、PS 脚本 BOM 与读取编码、自更新通道、文案与动效不变量、
+     不说谎两条路径、桌面端重启拒绝路径，以及**发布工作流回归** `release-workflow.test.mjs`——
+     后者钉住「npm 发布只能由 `publish-npm.yml` 亲自执行」，见 §4.2.1）；
    - **发布面干净**：`plugin-market/`、`docs/`、`scripts/` 与根文件不能有未提交改动。
      其它路径（例如并行进行的 `verify/**` 验收脚本）有改动只警告、不阻塞——它们既不进发布物，
      也不进发布提交，把一场正在跑的验收当成发布阻塞没有意义。
@@ -81,14 +84,23 @@ CI 段（`.github/workflows/pack-release.yml`，`push: tags: ['v*']` 触发；�
    Release 正文取标签上 CHANGELOG 的同名节（`-NotesFile` 可覆盖），读文件一律显式 `-Encoding UTF8`——
    PS 5.1 的 `Get-Content` 默认按系统 ANSI（GBK）解码 UTF-8，漏写就会上去一页乱码（v1.0.0–v1.1.5
    实际发生过，8 个页面已按标签版 CHANGELOG 重建；`verify/ps-encoding.test.mjs` 负责拦住再犯）；
-4. `publish-npm` job：`npm publish --access public`，版本已在 npm 上则跳过；凭据是
-   npm Trusted Publishing（OIDC，job 上 `id-token: write`）——与 `publish-npm.yml` 同一套，
-   前提是在 npmjs.com 给本包添加 Trusted publisher（repository=本仓库 + workflow 文件名，
-   两个 workflow 都加）。npm ≥ 11.5.1 才支持 OIDC，job 里会先 `npm install -g npm@latest`。
-   改回 token 或改用 `npm stage publish`（staged token + 人工 2FA 审批后公开）的位置
-   写在两个 workflow 的注释里。
-   （`publish-npm.yml` 保留作人工建 Release 与手动补发——由 GITHUB_TOKEN 创建的 Release
-   不会触发其它 workflow，这也是 npm 发布必须并进本 workflow 的原因。）
+4. `publish-npm` job：**不自己写发布步骤，而是 `uses: ./.github/workflows/publish-npm.yml`
+   复用**（该文件新增了 `workflow_call` 触发器）。发布实现在 `publish-npm.yml` 里**只有一份**：
+   先自检 OIDC 身份，再看幂等闸门（该版本已在 npm 上就跳过），然后
+   `npm stage publish --access public`（**暂存发布**，之后需人工 2FA 批准才公开）。
+   凭据是 npm Trusted Publishing（OIDC）——**调用方与被调用方都要声明 `id-token: write`**，
+   缺一个就拿不到令牌。前提是在 npmjs.com 给本包添加 Trusted publisher
+   （repository=本仓库 + **workflow 文件名**）。现在只有 `publish-npm.yml` 一个文件需要登记；
+   原来给 `pack-release.yml` 加的那条已经用不上了（留着无害，删掉也不会影响任何一条路径）。
+   npm ≥ 11.5.1 才支持 OIDC，job 里先 `npm install -g "npm@^11.5.1"`（**不要**用 `npm@latest`，
+   见下方 ⚠ 块的第 1 条：npm 12 与 node 22.14.0 不相容）。
+   **为什么必须复用而不是自己写一遍**（v1.1.6 / v1.2.0 各踩一次，真因见 §4.2.1）：
+   npm 按 `job_workflow_ref` 里的**文件名**匹配 Trusted Publisher，而 `workflow_call` 下
+   `job_workflow_ref` 指向**被调用**的那个文件——只有复用才能让令牌里的文件名仍是
+   `publish-npm.yml`。这正是 `release-workflow.test.mjs` 反向断言盯住的那条底线。
+   （`publish-npm.yml` 同时保留 `release(published)` 与 `workflow_dispatch`，用于人工建 Release
+   与手动补发——由 GITHUB_TOKEN 创建的 Release 不会触发其它 workflow，这也是 npm 发布必须
+   并进这条链的原因。）
 
 ## 3. 用法
 
@@ -149,12 +161,20 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 （registry 建议加 scope，但用户名 `winnie_0721` 含下划线，而 scope 不允许下划线，需另建组织。）
 最终选定 `deepseek-harness-market`，实测可用且无近似名冲突。
 
-常规发布**不用手动碰 npm**：`pack-release.yml` 的 `publish-npm` job 会在 Release 之后
-`npm publish --access public`（版本已在 npm 上则跳过）。手动补发 / 重试时按下述确认：
+常规发布**不用手动碰 npm，也不用另跑一次手动补发**：`pack-release.yml` 的 `publish-npm` job
+会**复用** `publish-npm.yml` 完成暂存发布（版本已在 npm 上则跳过）。手动补发 / 重试时按下述确认：
 
 1. `npm whoami` 能返回你的用户名（否则先 `npm login` 或设置 `NPM_TOKEN`）；
-2. `npm view deepseek-harness-market version` 返回 404（名字仍可用）；
+2. 确认要发的是**新版本号**（已被占用的号不能重发）：`npm view deepseek-harness-market versions`
+   里不该出现它 —— 注意**「名字是否可用」在 1.0.0 之后就再也回不到 404 了**，
+   现在 `npm view deepseek-harness-market version` 返回的是 **1.2.0**（本包已公开）；
 3. `npm publish --access public`（公开包需要显式指定 access）。
+
+或者干脆走同一条 OIDC 通道（推荐，与 CI 完全一致）：
+
+```powershell
+gh workflow run publish-npm.yml --repo Winnie-0721/dsh-plugin-market --ref main
+```
 
 > **⚠ npm 发布需要「暂存 + 人工批准」两步——我在 v1.1.6 上连猜错三次才查清，如实记在这里。**
 >
@@ -193,8 +213,10 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 >    也可在 npmjs.com 该包页面点 Approve。**没批准之前版本不会公开**，
 >    `npm view deepseek-harness-market version` 仍是上一个版本。
 >
-> v1.1.6 当前状态：**已暂存，等待批准**
+> 当时的状态记录（**已过期，留作过程证据**）：v1.1.6 一度是「已暂存，等待批准」
 > （stage id `0c2767bb-1d36-4f5e-8033-d9bf9ccc9dfa`，日志见 run 37587492890）。
+> 现在的实况：`npm view deepseek-harness-market version` → **1.2.0**，
+> 1.1.6 于 2026-10-07 公开、1.2.0 于 2026-10-09 公开。
 >
 > **Release 附件不受影响**（已就绪，sha256 与清单逐字节一致），所以
 > 「从 GitHub Release 附件安装 / 自更新」这条主分发路径是好的——**npm 那条路慢一步不影响用户安装**。
@@ -220,12 +242,13 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 > 而 v1.1.6 最终是**靠手动触发 `Publish to npm`（publish-npm.yml，workflow_dispatch）**
 > 才暂存成功的（run #6，成功）。
 >
-> **可靠做法（v1.2.0 已照此办）**：标签推送让 `pack-release.yml` 完成**打包 + 建 Release**；
-> 随后**另跑一次** `Publish to npm`：
+> **当时的临时做法（已被下面的根治取代，留作过程证据）**：标签推送让 `pack-release.yml`
+> 完成**打包 + 建 Release**；随后**另跑一次** `Publish to npm`：
 > ```powershell
 > gh workflow run publish-npm.yml --repo Winnie-0721/dsh-plugin-market --ref main
 > ```
-> 它会读 `plugin-market/package.json` 的当前版本（即刚发的那个）去 `npm stage publish`，成功。
+> 它会读 `plugin-market/package.json` 的当前版本（即刚发的那个）去 `npm stage publish`。
+> v1.2.0 就是这么补发出来的——**但常规发布不该依赖这一步**。
 >
 > **根治（v1.2.0 第七轮已落地）**：`pack-release.yml` 的 `publish-npm` job 改为**复用**
 > `publish-npm.yml`：
@@ -248,18 +271,45 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 > 顺带把原来重复 job 里的**幂等闸门**（版本已在 npm 则跳过）搬进了 `publish-npm.yml`；
 > 少了它，补跑 `Pack and Release` 会因版本已存在而失败。
 >
-> 历史状态（修好之前）：v1.1.6 与 v1.2.0 都因 `ENEEDAUTH` 让整个 `Pack and Release` 变红，
-> 当时都是靠**手动跑一次** `Publish to npm` 补发的：
-> ```powershell
-> gh workflow run publish-npm.yml --repo Winnie-0721/dsh-plugin-market --ref main
+> **在真实 CI 里跑了复用路径（2026-10-09），但要说清它证明了什么、没证明什么**：
+> `Pack and Release` run [#37941309305](https://github.com/Winnie-0721/dsh-plugin-market/actions/runs/37941309305)
+> 结论 **success**，两个 job 分别 `pack=success`、`publish-npm / publish=success`。
+> 日志里自检步骤打出：
 > ```
+> job_workflow_ref = Winnie-0721/dsh-plugin-market/.github/workflows/publish-npm.yml@refs/heads/main
+> workflow_ref     = Winnie-0721/dsh-plugin-market/.github/workflows/pack-release.yml@refs/heads/main
+> OIDC 身份正确：npm 会认这个文件名。
+> ```
+> 第一个字段正是 npm 校验的那个 —— **复用路径下它仍然是 `publish-npm.yml`，与登记一致**。
+> 这是本次修复真正要拿到的那条证据。
 >
-> v1.2.0 当前状态：**已暂存，等待批准**
-> （stage id `96502bf5-4862-4f2a-9933-67412099f989`，run 37938458936，含 Sigstore 溯源）。
-
-
-
-
+> **⚠ 它没有证明「经复用路径真的发布成功过」，因为那一步这次被跳过了。**
+> 该 run 的逐步骤结论（`gh run view 37941309305 --json jobs`）是：
+> ```
+> 4 success  npm install -g "npm@^11.5.1"
+> 5 success  自检 OIDC 身份（文件必须是 publish-npm.yml）
+> 6 success  该版本已在 npm 则跳过（补跑幂等）
+> 7 skipped  Stage publish to npm          ← 幂等闸门命中，没执行
+> 8 skipped  提示下一步（暂存发布需人工批准）
+> ```
+> 原因是时间先后：npm 上的 1.2.0 发布于 **13:48:06Z**，而这个 run **14:03:09Z** 才起 ——
+> 版本已存在，闸门按设计跳过。**所以「job 绿」在这里不等于「发布成功」**：它绿在自检与闸门这两步上，
+> 而真正发布的那一步从未执行。下次发新版本时 `Stage publish to npm` 才是这条路径的首次实跑，
+> 那时要盯的是这一步（而不是只看 job 绿）——这也正是 v1.1.6 那次「publish-npm 显示成功、
+> 其实只是闸门命中」的同一种错觉。
+>
+> **新增的发布前自检**（`publish-npm.yml` 里那一步 `自检 OIDC 身份`）：只请求令牌、解出声明、
+> 比对文件名，不发布任何东西。它把「文件名不对」从一句要翻日志才看得懂的 `need auth`，
+> 变成**发布之前**就直接说明「登记的是 publish-npm.yml，这次是 xxx」的错。
+> 这个坑连续吃掉两次发布，不该再靠事后读日志定位。
+>
+> 历史状态（修好之前）：v1.1.6 与 v1.2.0 都因 `ENEEDAUTH` 让整个 `Pack and Release` 变红，
+> 当时都是靠上面那条手动命令补发的。
+>
+> **v1.2.0 现已公开**：`npm view deepseek-harness-market version` → **1.2.0**
+> （`dist-tags.latest = 1.2.0`，发布于 2026-10-09）。当初的暂存记录
+> （stage id `96502bf5-4862-4f2a-9933-67412099f989`，run 37938458936，含 Sigstore 溯源）
+> 已随人工批准生效，不再是「等待批准」状态。
 
 ### 4.3 真要发 npm 时的检查单
 
@@ -269,7 +319,8 @@ cd plugin-market
 pnpm publish --access public --no-git-checks
 ```
 
-- 发布前确认名字可用：`https://registry.npmjs.org/<name>` 返回 404；
+- 发布前确认**版本号没被占用**（不是「名字可用」——本包已公开，`https://registry.npmjs.org/deepseek-harness-market`
+  现在返回 **200**，404 只属于 1.0.0 之前）：`npm view deepseek-harness-market versions` 里不该有你要发的号；
 - `pnpm pack` 后的 tarball 只含 `package/` 下的文件（lib、cordis.patch.yml、README×2、CHANGELOG、LICENSE、package.json）；
 - 版本号不可重用、不可覆盖——发错了只能往上加；
 - 发布后立刻真装一次：`dsh plugin --profile <新 profile> add <name>` 或直接 `add <tarball URL>`，启动宿主确认侧边栏底部入口还在。
@@ -313,6 +364,10 @@ GitHub Release 附件下载）。这条决定连带改了检查与下载的分�
   → **GitHub Release 附件**；新版本前两条必然 404（快速失败），实际由附件供给。
   **内容由 `sha256` 与产物自证负责**，从哪条路取都不影响安全性（三道校验见 [API-CONTRACT §2.9](API-CONTRACT.md)）。
   传输层失败才换路；字节都拿到了却哈希不符是篡改信号，直接硬失败。
+  **2026-10-09 复测（v1.2.0）**：前两条 jsDelivr gh 路各 3 次全部 404（`releases/` 早已不在
+  git 树里，jsDelivr gh 源只读 git 树，**永远拿不到 Release 附件**——`@v1.1.6` 同样 404）；
+  第 3 条 Release 附件 3/3 成功。自更新靠第 3 条兜底，但**手动安装别用 jsDelivr gh 地址**——
+  §4.1 给的 Release 附件地址才是唯一稳定的手动安装源。
 
 **两条硬约束**：
 
@@ -360,8 +415,8 @@ pwsh -File verify/self-update-live.ps1   # 自更新端到端：真的下载 + �
 | 改动位置 | 生效方式 | 实测证据 |
 |---|---|---|
 | **客户端半**（`lib/client.js`） | 宿主按文件元数据算出新的产物 rev 并推给页面，**无需重启、通常也无需刷新** | 改完后线上 bundle 里能读到新代码（`mountStyles` / `style watchdog`），旧符号 `function installStyles` 已消失 |
-| **宿主半**（`lib/index.js` / `catalog*.js` / `http.js` / `self-update.js` / `restart*.js`） | 需要**重启 DSH 进程**（v1.1.6 起可直接用市场页的一键重启，见下） | 加临时标记 → 用 patch 层 `disabled: true` 卸载再还原触发热重载 → 标记不出现、`/plugin-market/status` 的版本仍是旧值 |
-| **自更新装下的新版本** | 同样是**重启 DSH**：装完 `requiresRestart: true`，客户端不谎称已生效，但会给出一键重启 | `apply` 返回 `application: restart-required` + `from/to`；按钮回到「插件市场更新」而不是「已更新」 |
+| **宿主半**（`lib/index.js` / `catalog*.js` / `http.js` / `self-update.js` / `restart*.js`） | 需要**重启 DSH 进程**（v1.1.6 起市场页有一键「重启 DSH」，**但桌面端除外**，见下） | 加临时标记 → 用 patch 层 `disabled: true` 卸载再还原触发热重载 → 标记不出现、`/plugin-market/status` 的版本仍是旧值 |
+| **自更新装下的新版本** | 同样是**重启 DSH**：装完 `requiresRestart: true`，客户端不谎称已生效，有按钮时给出按钮 | `apply` 返回 `application: restart-required` + `from/to`；按钮回到「插件市场更新」而不是「已更新」 |
 
 三个容易踩的点：
 
@@ -378,3 +433,11 @@ pwsh -File verify/self-update-live.ps1   # 自更新端到端：真的下载 + �
 `execPath` + `argv` 拉起；客户端探活必须先见到宿主「死过一次」，恢复后才自动刷新页面。
 两条如实的代价：**正在流式输出的回复会被截断**；重启后的进程以 detached 方式拉起，
 **终端 Ctrl+C 打不到它**——要用 DSH 自己的退出方式或 `taskkill` 结束（桌面端直接关窗口）。
+
+**⚠ 桌面端没有这个按钮，而且不该有（v1.2.0 查清）**：`restart.available = false`，
+界面**不显示按钮、也不弹重启询问窗**，只给出「关掉窗口再打开」的指引；
+`POST /plugin-market/restart` 返回 **409 `restart-unsupported`**（并有 `restart-unsupported.test.mjs` 钉住）。
+三条独立理由（壳的 IPC 封闭白名单 / 壳把宿主退出当致命故障且不自动拉回 / 那个「启动失败」框里
+有一颗 `disableAllPlugins()`）记在 [API-CONTRACT §2.6](API-CONTRACT.md)，
+不在 `docs/ROADMAP.md` 重新立项。**在桌面端里给按钮 = 让用户撞「启动失败」并可能一键停掉全部插件。**
+**但「待重启」这件事仍然如实显示**：宿主半记账 + `/status.pendingRestart` 水合，刷新页面不会丢。

@@ -1,15 +1,32 @@
 name: Publish to npm
 
-# 只在 Release 发布时触发——版本号由 release.ps1 独家管理，这里绝不 bump：
+# 本文件是**唯一**的 npm 发布实现，也是 npm Trusted Publisher 上登记的那个文件名。
+#
+# ⚠️ 为什么必须由本文件亲自跑「发 npm」这件事（v1.2.0 第七轮查清的真因）：
+#    npm 的 Trusted Publisher 把信任绑定到**具体 workflow 文件名**（包设置页的
+#    Workflow filename 字段，含 .yml）。OIDC 令牌里 npm 校验的是 `job_workflow_ref`，
+#    而**实测**（见 docs/RELEASING.md §4.2.1）：
+#      用 workflow_call 调用时  job_workflow_ref = 被调用的那个文件（= 本文件）
+#                              workflow_ref     = 调用方文件
+#    所以 pack-release.yml **不能自己重写一遍发布步骤**——那样令牌里的文件名是
+#    pack-release.yml，与登记不符，npm 直接回：
+#      npm error code ENEEDAUTH
+#      npm error need auth This command requires you to be logged in to https://registry.npmjs.org/
+#    v1.1.6 与 v1.2.0 都踩了这个坑（run #3 / #4），当时是靠手动跑本文件补发的。
+#    正确做法：pack-release.yml 用 `uses: ./.github/workflows/publish-npm.yml` 复用它。
+#    这样**发布逻辑只有一份**，且 OIDC 认的文件名仍然正确。
+#
+# 版本号由 release.ps1 独家管理，这里绝不 bump：
 # npm version patch 会破坏 versionCode 归零纪律，且同版本重发会被 npm 拒。
-# 注意：由 GITHUB_TOKEN 创建的 Release **不会**触发任何 workflow（防递归），所以
-# Actions 打包发的版本走 pack-release.yml 的 publish-npm job；本文件用于人工建
-# Release 与手动补发（gh workflow run "Publish to npm"）。
 on:
+  # 人工建 Release 时触发（注意：GITHUB_TOKEN 创建的 Release 不会触发 workflow，
+  # 所以标签发布那条路不靠这个事件，而是由 pack-release.yml 直接 workflow_call 本文件）。
   release:
     types: [published]
   # 手动触发：补发 / 重试都走这里。
   workflow_dispatch:
+  # 被 pack-release.yml 复用——**这是标签发布那条路的正解**。
+  workflow_call:
 
 # id-token: write = npm Trusted Publishing（OIDC）：在 npmjs.com 给本包添加
 # Trusted publisher（repository=本仓库、workflow=本文件名）后，publish 不再需要 NPM_TOKEN。
@@ -44,9 +61,36 @@ jobs:
       # checkout 下来就是发布内容。
       - run: npm install -g "npm@^11.5.1"
 
+      # 幂等闸门（从原来 pack-release.yml 里那个重复 job 搬过来的，别丢）：
+      # 版本已在 npm 上就跳过——否则 pack-release 补跑 / workflow_dispatch 重跑时
+      # `npm stage publish` 会因版本已存在而失败，把整个 Pack and Release 弄红。
+      # 查的是 registry 上是否已有该版本（不是 dist-tags.latest，因为暂存发布在批准前
+      # 不会更新 latest，用 latest 判断会误判成「没发过」）。
+      - name: 该版本已在 npm 则跳过（补跑幂等）
+        id: guard
+        run: |
+          SPEC=$(node -p "const p=require('./package.json'); p.name + '@' + p.version")
+          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
+          echo "目标：$SPEC"
+          if npm view "$SPEC" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$SPEC 已在 npm（公开或已批准），跳过"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "$SPEC 尚未公开——将提交暂存发布（暂存后仍需人工 2FA 批准才公开）"
+          fi
+
       # 本包在 npmjs.com 的 Trusted Publisher 只授予 `npm stage publish` 与 `npm dist-tag`，
       # 没有 `npm publish` → 用普通 `npm publish` 会被拒：
       #   403 OIDC permission denied for this action
       # 所以走暂存发布；之后需人工批准（`npm stage approve <id>`，要 2FA）才公开。
       - name: Stage publish to npm
+        if: steps.guard.outputs.skip == 'false'
         run: npm stage publish --access public
+
+      - name: 提示下一步（暂存发布需人工批准）
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          echo "::notice title=npm 暂存发布已提交::这个包用的是 staged publishing，还需人工批准才会公开。"
+          echo "本地批准：npm stage list → npm stage approve <stage-id>（需要 2FA 一次性验证码）"
+          echo "或去 npmjs.com 该包页面点 Approve。"

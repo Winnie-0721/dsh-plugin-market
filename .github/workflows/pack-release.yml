@@ -43,64 +43,20 @@ jobs:
 
   publish-npm:
     needs: pack
-    runs-on: ubuntu-latest
-    # 与 publish-npm.yml 同一套凭据策略：npm Trusted Publishing（OIDC），不存 token。
-    # 在 npmjs.com 给本包添加 Trusted publisher（repository=本仓库、workflow=本文件名）；
-    # 若要改回 token：删掉 id-token，给发布步骤加回 NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}。
+    # **复用 publish-npm.yml，不要自己重写一遍发布步骤。**
+    #
+    # npm 的 Trusted Publisher 绑定的是**具体 workflow 文件名**，而 OIDC 里被校验的
+    # `job_workflow_ref` 实测**指向被调用的那个文件**（见 docs/RELEASING.md §4.2.1）。
+    # 所以：
+    #   这样写（workflow_call 复用）  → job_workflow_ref = publish-npm.yml  ✅ 与登记一致
+    #   以前自己写 job 跑 npm         → job_workflow_ref = pack-release.yml ❌ → ENEEDAUTH
+    #
+    # v1.1.6 与 v1.2.0 都因为后者而让整个 Pack and Release 变红（打包其实成功了，
+    # 只有这一步失败，然后得手动跑一次 Publish to npm 补发）。现在发布逻辑只有一份。
+    #
+    # 权限必须在这里声明：可复用 workflow 的调用方要给出 id-token: write，
+    # 被调用文件自己再声明一次（两边都要有，缺一个 OIDC 就拿不到）。
     permissions:
       contents: read
       id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.14.0'
-          # 故意不写 registry-url：npmjs 就是默认 registry，而 registry-url 会让
-          # setup-node 注入 NODE_AUTH_TOKEN=github.token（对 npm 无效），可能盖过 OIDC。
-          # OIDC 只依赖上面的 id-token: write + npm ≥ 11.5.1。
-
-      - name: 读出要发布的包与版本
-        id: spec
-        run: |
-          SPEC=$(node -p "const p=require('./plugin-market/package.json'); p.name + '@' + p.version")
-          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
-          echo "目标：$SPEC"
-
-      - name: 该版本已在 npm 则跳过（补跑幂等）
-        id: guard
-        run: |
-          if npm view "${{ steps.spec.outputs.spec }}" version >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.spec.outputs.spec }} 已在 npm，跳过"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.guard.outputs.skip == 'false'
-        working-directory: plugin-market
-        run: |
-          # **用 `npm stage publish`，不是 `npm publish`。**
-          # 本包在 npmjs.com 上的 Trusted Publisher 只授予了 `npm stage publish` 与
-          # `npm dist-tag` 两项权限（包设置页 Trusted Publisher 卡片上写着的），
-          # 没有 `npm publish` → 直接 `npm publish` 会被拒：
-          #   403 Forbidden - PUT https://registry.npmjs.org/... - OIDC permission denied for this action
-          # （v1.1.6 实测就到这一步；这是 npm 允许的「暂存发布」，把 2FA 人工确认推迟到最后一步，
-          #  安全性更高——所以按它来，而不是去放松 npm 那边的权限。）
-          #
-          # 两个坑都记在这里，别再踩：
-          #  1) **不能写 `npm@latest`**：npm 12 起要求 node ^22.22.2 || ^24.15.0 || >=26，
-          #     而本 workflow 钉的是 node 22.14.0 → `npm install -g npm@latest` 会 EBADENGINE
-          #     失败，publish 根本没跑到（v1.1.6 第一次失败就是这个）。
-          #  2) `npm stage` 子命令要较新的 11.x（11.8.0 还没有）。`^11.5.1` 会解析到最新的
-          #     11.x（≥11.21），既有 stage、又与 node 22.14.0 相容。
-          npm install -g "npm@^11.5.1"
-          npm stage publish --access public
-
-      - name: 提示下一步（暂存发布需人工批准）
-        if: steps.guard.outputs.skip == 'false'
-        run: |
-          echo "::notice title=npm 暂存发布已提交::这个包用的是 staged publishing，还需人工批准才会公开。"
-          echo "本地批准：npm stage list → npm stage approve <stage-id>（需要 2FA 一次性验证码）"
-          echo "或去 npmjs.com 该包页面点 Approve。"
+    uses: ./.github/workflows/publish-npm.yml

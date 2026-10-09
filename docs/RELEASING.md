@@ -227,9 +227,32 @@ dsh plugin --profile web add https://github.com/Winnie-0721/dsh-plugin-market/re
 > ```
 > 它会读 `plugin-market/package.json` 的当前版本（即刚发的那个）去 `npm stage publish`，成功。
 >
-> **可选的根治**：要么把 `pack-release.yml` 里的 `publish-npm` job 删掉、
-> 只留 `publish-npm.yml` 这条路（少一处会骗人的红灯）；要么在 npm 包设置里把
-> Trusted Publisher 再添加一条指向 `pack-release.yml`。**不建议**为了红灯好看去放松 npm 权限。
+> **根治（v1.2.0 第七轮已落地）**：`pack-release.yml` 的 `publish-npm` job 改为**复用**
+> `publish-npm.yml`：
+> ```yaml
+>   publish-npm:
+>     needs: pack
+>     permissions:
+>       contents: read
+>       id-token: write
+>     uses: ./.github/workflows/publish-npm.yml   # ← job_workflow_ref 就是它，与登记一致
+> ```
+> 关键前提是**实测**出来的：OIDC 里 npm 校验的是 `job_workflow_ref`，而
+> - 普通 job：`job_workflow_ref` = 所在文件；
+> - `workflow_call`：`job_workflow_ref` = **被调用**的文件（`workflow_ref` 才是调用方）。
+>
+> 所以复用会让令牌里的文件名仍是 `publish-npm.yml` ✅，而发布逻辑只有一份。
+> 「自己写一遍步骤」才是那个复发两次的写法，**别再加回去**——
+> `verify/release-workflow.test.mjs` 有反向断言盯着（门禁会拦）。
+>
+> 顺带把原来重复 job 里的**幂等闸门**（版本已在 npm 则跳过）搬进了 `publish-npm.yml`；
+> 少了它，补跑 `Pack and Release` 会因版本已存在而失败。
+>
+> 历史状态（修好之前）：v1.1.6 与 v1.2.0 都因 `ENEEDAUTH` 让整个 `Pack and Release` 变红，
+> 当时都是靠**手动跑一次** `Publish to npm` 补发的：
+> ```powershell
+> gh workflow run publish-npm.yml --repo Winnie-0721/dsh-plugin-market --ref main
+> ```
 >
 > v1.2.0 当前状态：**已暂存，等待批准**
 > （stage id `96502bf5-4862-4f2a-9933-67412099f989`，run 37938458936，含 Sigstore 溯源）。

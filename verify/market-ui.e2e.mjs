@@ -82,6 +82,27 @@ let manualUpdateProbe = false
 let buildApprovalProbe = false
 /** [11] 专用：非 null 时 /status 会带上这个 pendingRestart（模拟「宿主进程仍然记得待重启」）。 */
 let statusProbe = null
+/**
+ * [14] 专用：开启后拦截 /catalog 返回**确定性多页目录**。
+ * 底栏那条断言要求页数 > 1 才有翻页按钮；真实目录虽然有 189 页，但那是网络给的，
+ * 网络一抖这条断言就会假红——所以按本文件既有做法（[9][10][11]）用 fixture 钉死。
+ * 数字刻意取用户截图里的 4527 / 189，让断言对着真实观感。
+ */
+let catalogProbe = false
+const INJECTED_CATALOG = {
+  ok: true,
+  items: Array.from({ length: 24 }, (_, i) => ({
+    name: `@fixture/list-${i}`,
+    description: `列表底栏夹具 ${i}`,
+    version: '1.0.0',
+    stars: 100 - i,
+    categories: ['dev'],
+    installed: false,
+  })),
+  page: { page: 1, pages: 189, total: 4527 },
+  categories: [{ id: 'dev', label: '开发' }],
+  catalog: { updatedAt: '2026-10-13T00:00:00Z', count: 4527 },
+}
 try {
   await client.send('Page.enable')
   await client.send('Runtime.enable')
@@ -101,13 +122,35 @@ try {
       { urlPattern: '*plugin-market/installed*', requestStage: 'Request' },
       { urlPattern: '*plugin-market/install', requestStage: 'Request' },
       { urlPattern: '*plugin-market/self-update*', requestStage: 'Request' },
+      { urlPattern: '*plugin-market/catalog*', requestStage: 'Request' },
     ],
   })
   client.on('Fetch.requestPaused', (params) => {
     const isInstall = /\/plugin-market\/install$/.test(params.request.url)
     const isSelfCheck = /\/plugin-market\/self-update/.test(params.request.url)
     const isStatus = /\/plugin-market\/status/.test(params.request.url)
+    const isCatalog = /\/plugin-market\/catalog/.test(params.request.url)
     const posted = String(params.request.postData || '')
+    // [14]：只在探针开启时接管 /catalog，其余时候放行给真实宿主。
+    if (isCatalog) {
+      if (!catalogProbe) {
+        client.send('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {})
+        return
+      }
+      const body = Buffer.from(JSON.stringify(INJECTED_CATALOG), 'utf8').toString('base64')
+      client
+        .send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [
+            { name: 'Content-Type', value: 'application/json' },
+            { name: 'Cache-Control', value: 'no-store' },
+          ],
+          body,
+        })
+        .catch(() => {})
+      return
+    }
     let payload = INJECTED_INSTALLED
     let delay = 0
     if (isStatus) {
@@ -1259,12 +1302,167 @@ try {
     /Plugin Market/i.test(String(enState?.entry)),
     JSON.stringify(enState),
   )
+
+  // ── [14] 列表底栏：摘要与上下页同一行，按钮靠右 ──────────────────────────
+  // 用户报的是**布局**问题（「共 N 个结果 · 第 1/M 页」原来在网格上方、分页器在下方，
+  // 两处各显示一次页码；现在合成一行，摘要靠左、翻页按钮靠右），所以要量的是真实几何，
+  // 不是源码里有没有这个 class——class 在而位置不对，正是这次要修的东西。
+  console.log('\n[14] 列表底栏：摘要与上下页同一行、按钮靠右')
+  // 用 fixture 钉死「多页」这个前提（真实目录有 189 页，但不能指望网络）。
+  catalogProbe = true
+  // [13] 把浏览器语言覆盖成了 en-US；这里设回去，让断言面对中文观感。
+  // 文案断言本身仍兼容英文（见下），避免依赖这个覆盖一定生效。
+  await client.send('Emulation.setUserAgentOverride', { userAgent: '', acceptLanguage: 'zh-CN,zh;q=0.9' })
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '底栏检查：入口')
+  await evaluate(client, `document.querySelector('.dshpm-entry').click()`)
+  await waitFor(client, `!!document.querySelector('.dshpm-root')`, 30000, '底栏检查：面板挂载')
+  await waitFor(
+    client,
+    `!!document.querySelector('.dshpm-listFooter') && !!document.querySelector('.dshpm-pager')`,
+    45000,
+    '底栏与分页器出现',
+  )
+  // 关掉可能压在上面的 DSH 弹窗（否则截图里底栏被挡/看不到），与 [12] 同样的处理。
+  await evaluate(
+    client,
+    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`,
+  )
+  await evaluate(client, dismissApiDialog)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  // 底栏在 24 张卡下面，默认在视口外——**先滚进视口再截图**，
+  // 否则截图里根本看不到这次要验的东西（第一版就是这么拍出一张没有底栏的图的）。
+  await evaluate(
+    client,
+    `(() => { const f = document.querySelector('.dshpm-listFooter'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'end' }); return true; })()`,
+  )
+  await new Promise((resolve) => setTimeout(resolve, 400))
+
+  const footer = await evaluate(
+    client,
+    `(() => {
+       const footer = document.querySelector('.dshpm-listFooter');
+       const summary = document.querySelector('.dshpm-listSummary');
+       const pager = document.querySelector('.dshpm-pager');
+       const prev = [...document.querySelectorAll('.dshpm-pager button')].find(b => /上一页|Previous/.test(b.textContent || ''));
+       const next = [...document.querySelectorAll('.dshpm-pager button')].find(b => /下一页|Next/.test(b.textContent || ''));
+       if (!footer || !summary || !pager) return { missing: { footer: !!footer, summary: !!summary, pager: !!pager } };
+       const f = footer.getBoundingClientRect(), s = summary.getBoundingClientRect(), p = pager.getBoundingClientRect();
+       // 网格顶边：用来证明摘要**不再**在列表上方（它原来就挂在网格上方）
+       const grid = document.querySelector('.dshpm-grid');
+       const g = grid ? grid.getBoundingClientRect() : null;
+       return {
+         footer: { top: Math.round(f.top), bottom: Math.round(f.bottom), left: Math.round(f.left), right: Math.round(f.right), width: Math.round(f.width) },
+         summary: { top: Math.round(s.top), bottom: Math.round(s.bottom), left: Math.round(s.left), right: Math.round(s.right), text: summary.textContent.trim() },
+         pager: { top: Math.round(p.top), bottom: Math.round(p.bottom), left: Math.round(p.left), right: Math.round(p.right) },
+         grid: g ? { top: Math.round(g.top), bottom: Math.round(g.bottom) } : null,
+         prev: prev ? prev.textContent.trim() : null,
+         next: next ? next.textContent.trim() : null,
+         // 摘要是否在网格**上方**（修复前为 true，修复后必须 false）
+         summaryAboveGrid: g ? (s.bottom <= g.top) : null,
+         viewportWidth: window.innerWidth,
+       };
+     })()`,
+  )
+  const f = footer?.footer
+  const s = footer?.summary
+  const p = footer?.pager
+  expect(
+    '底栏里同时有结果摘要和分页器（两者在同一个 .dshpm-listFooter 里）',
+    !!f && !!s && !!p,
+    JSON.stringify(footer),
+  )
+  expect(
+    '摘要挪到了列表下方（不再挂在网格上方，页码不再重复出现两处）',
+    footer?.summaryAboveGrid === false,
+    JSON.stringify({ summaryAboveGrid: footer?.summaryAboveGrid, summary: s, grid: footer?.grid }),
+  )
+  expect(
+    '摘要与上下页按钮在同一行（垂直方向重叠，不是上下两行）',
+    !!s && !!p && Math.min(s.bottom, p.bottom) - Math.max(s.top, p.top) > 0,
+    JSON.stringify({ summary: s, pager: p }),
+  )
+  expect(
+    '摘要靠左：左边缘贴底栏左边缘',
+    !!f && !!s && Math.abs(s.left - f.left) <= 2,
+    JSON.stringify({ footerLeft: f?.left, summaryLeft: s?.left }),
+  )
+  expect(
+    '上下页按钮靠右：按钮组右边缘贴底栏右边缘（修复前是左对齐跟着摘要走）',
+    !!f && !!p && Math.abs(p.right - f.right) <= 2,
+    JSON.stringify({ footerRight: f?.right, pagerRight: p?.right, pagerLeft: p?.left, footerWidth: f?.width }),
+  )
+  expect(
+    '摘要里带总数与页码（用户看到的「共 N 个结果 · 第 x/y 页」）',
+    !!s && (/共\s*[\d,]+\s*个结果/.test(String(s.text)) || /[\d,]+\s*results/i.test(String(s.text)))
+      && (/第\s*\d+\/\d+\s*页/.test(String(s.text)) || /page\s*\d+\/\d+/i.test(String(s.text))),
+    JSON.stringify(s?.text),
+  )
+  expect(
+    '翻页按钮就在摘要同一行里（上一页/下一页都在）',
+    !!footer?.prev && !!footer?.next,
+    JSON.stringify({ prev: footer?.prev, next: footer?.next }),
+  )
+  // 页码只在**摘要**里出现一次。第一版把摘要挪进底栏后，翻页按钮中间还留着旧的
+  // 「第 x/y 页」，于是同一行里页码写了两遍——截图才暴露出来。这条断言钉的就是它。
+  const footerText = await evaluate(
+    client,
+    `(() => { const f = document.querySelector('.dshpm-listFooter'); return f ? f.textContent.replace(/\\s+/g, ' ').trim() : null; })()`,
+  )
+  const pageMentions = (String(footerText).match(/第\s*\d+\/\d+\s*页|page\s*\d+\/\d+/gi) || []).length
+  expect(
+    '页码在底栏里只出现一次（摘要里），翻页按钮不再重复一遍',
+    pageMentions === 1,
+    JSON.stringify({ footerText, pageMentions }),
+  )
+  await screenshot(client, join(shotDir, 'market-list-footer.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-list-footer.png')}`)
+
+  // ── 单页结果：底栏必须**照旧存在**（只有翻页按钮消失）────────────────────
+  // 这条是突变测试逼出来的：把 e2e 只跑多页（189 页）时，「底栏总是渲染」这句在代码
+  // 注释里写得斩钉截铁，却**从来没有被验证过**——把 `if (pages <= 1) return null;` 塞进去
+  // 照样全绿。结果总数原来挂在网格上方，对任意页数都可见；挪进底栏后不能因此消失。
+  await evaluate(
+    client,
+    `(() => { const i = document.querySelector('.dshpm-root input[type=search], .dshpm-root input'); if (!i) return false;
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; s.call(i, '@fixture/no-such-plugin-zzz');
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return true; })()`,
+  )
+  await waitFor(
+    client,
+    `(() => { const f = document.querySelector('.dshpm-listFooter'); return !!f && !document.querySelector('.dshpm-pager'); })()`,
+    20000,
+    '单页结果（分页器消失）',
+  )
+  const single = await evaluate(
+    client,
+    `(() => {
+       const f = document.querySelector('.dshpm-listFooter');
+       const s = document.querySelector('.dshpm-listSummary');
+       return {
+         footer: !!f, pager: !!document.querySelector('.dshpm-pager'),
+         summary: s ? s.textContent.replace(/\\s+/g, ' ').trim() : null,
+         cards: document.querySelectorAll('.dshpm-card').length,
+       };
+     })()`,
+  )
+  expect(
+    '单页结果时底栏仍在（结果总数不因「不需要翻页」而消失），只有翻页按钮隐藏',
+    single?.footer === true && single?.pager === false && Number(single?.cards) === 0,
+    JSON.stringify(single),
+  )
+  expect(
+    '单页时摘要给出「没有结果」而不是页码（此时没有页可翻）',
+    /没有结果|No results/i.test(String(single?.summary)),
+    JSON.stringify(single),
+  )
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {
   await browser.close()
 }
-
 const failed = results.filter((result) => !result.ok)
 console.log('')
 console.log(`真实浏览器验收：${results.length - failed.length}/${results.length} 通过`)

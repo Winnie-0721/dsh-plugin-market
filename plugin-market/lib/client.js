@@ -101,7 +101,6 @@ window.__ModuleLoader__.load({
         "pager.label": "分页",
         "pager.prev": "上一页",
         "pager.next": "下一页",
-        "pager.indicator": "第 {page}/{pages} 页",
         "state.loadingCatalog": "正在加载插件目录…",
         "state.loadingInstalled": "正在读取已安装插件…",
         "state.loadingHint": "首次加载要从目录源抓取数据，通常需要一两秒。",
@@ -409,7 +408,6 @@ window.__ModuleLoader__.load({
         "pager.label": "Pagination",
         "pager.prev": "Previous",
         "pager.next": "Next",
-        "pager.indicator": "Page {page}/{pages}",
         "state.loadingCatalog": "Loading the plugin catalog…",
         "state.loadingInstalled": "Reading installed plugins…",
         "state.loadingHint": "The first load fetches the catalog; it usually takes a second or two.",
@@ -1457,8 +1455,13 @@ function errorCopy(error) {
 .dshpm-loading { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.85em; }
 .dshpm-skeletonGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:10px; }
 .dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-lg,16px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
-.dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; }
-.dshpm-pagerInfo { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; }
+/* 列表底栏：摘要靠左、翻页按钮靠右（用户要求）。
+   窄屏放不下时允许换行；换行后按钮组仍靠右对齐（margin-left:auto），
+   不会滑到左边去。 */
+.dshpm-listFooter { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; padding-top:4px; }
+.dshpm-listSummary { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; min-width:0; }
+.dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; margin-left:auto; }
+.dshpm-listFooter .dshpm-pager { padding-top:0; }
 .dshpm-installed { display:flex; flex-direction:column; gap:12px; }
 /* 页签内容的统一外壳（用户报「三个切换页面高度不对齐」）：三个页面共用同一套间距与起点，
    切页签时页面高度一致、内容从同一处开始，不再一跳一跳。
@@ -2349,25 +2352,46 @@ function errorCopy(error) {
       );
     }
 
+    /**
+     * 列表底栏：**左边**是结果摘要（总数 + 页码），**右边**是上下页按钮。
+     *
+     * 为什么合成一行（用户报的：结果摘要应该放在上下页那个位置，上下页放在右边）：
+     * 原来摘要在网格**上方**、分页器在**下方**，页码被拆到两处显示（顶上摘要里一次、
+     * 底下分页器里又一次），眼睛要上下跑才能对上；合成一行后信息只落在一处，
+     * 翻页控件贴在列表末尾右侧，这是列表页的常规读法。
+     *
+     * 页码**只在摘要里出现一次**——翻页按钮中间原来还有个「第 x/y 页」，
+     * 合成一行后那就是同一行里写两遍页码，所以删掉了（e2e [14] 有一条断言钉着它）。
+     *
+     * 这一行**总是渲染**，哪怕只有 1 页：结果总数不能因为「不需要翻页」就消失——
+     * 摘要原来挂在网格上方时对任意页数都可见，挪进来不能把这个性质弄丢。
+     * 按钮组只在 pages > 1 时出现。
+     */
     function Pager(props) {
       var page = props.page || 1;
       var pages = props.pages || 1;
-      return el("nav", { className: "dshpm-pager", "aria-label": t("pager.label") },
-        el("button", {
-          type: "button",
-          className: "dshpm-btn",
-          disabled: props.busy || page <= 1,
-          onClick: props.onPrev
-        }, t("pager.prev")),
-        el("span", { className: "dshpm-pagerInfo" }, t("pager.indicator", { page: page, pages: pages })),
-        el("button", {
-          type: "button",
-          className: "dshpm-btn",
-          disabled: props.busy || page >= pages,
-          onClick: props.onNext
-        }, t("pager.next")),
-        page > 1
-          ? el("button", { type: "button", className: "dshpm-btn dshpm-btn--quiet", disabled: props.busy, onClick: props.onFirst }, t("action.firstPage"))
+      return el("div", { className: "dshpm-listFooter" },
+        el("div", { className: "dshpm-listSummary" },
+          el("span", null, props.summary),
+          props.loading ? el("span", null, t("list.updating")) : null),
+        pages > 1
+          ? el("nav", { className: "dshpm-pager", "aria-label": t("pager.label") },
+            page > 1
+              ? el("button", { type: "button", className: "dshpm-btn dshpm-btn--quiet", disabled: props.busy, onClick: props.onFirst }, t("action.firstPage"))
+              : null,
+            el("button", {
+              type: "button",
+              className: "dshpm-btn",
+              disabled: props.busy || page <= 1,
+              onClick: props.onPrev
+            }, t("pager.prev")),
+            el("button", {
+              type: "button",
+              className: "dshpm-btn",
+              disabled: props.busy || page >= pages,
+              onClick: props.onNext
+            }, t("pager.next"))
+          )
           : null
       );
     }
@@ -2548,9 +2572,6 @@ function errorCopy(error) {
               }, categoryLabel(props.categories, category.id) + " " + formatCount(category.count || 0));
             }))
           : null,
-        el("div", { className: "dshpm-summary" },
-          el("span", null, summary),
-          state.phase === "loading" ? el("span", null, t("list.updating")) : null),
         state.phase === "error" && state.data
           ? el(ErrorState, { error: state.error, onRetry: props.onRetry })
           : null,
@@ -2578,16 +2599,18 @@ function errorCopy(error) {
             actionLabel: t("list.empty.action"),
             onAction: props.onResetFilters
           }),
-        (page.pages || 1) > 1
-          ? el(Pager, {
-            page: page.page || 1,
-            pages: page.pages || 1,
-            busy: state.phase === "loading",
-            onPrev: function () { props.onPage((page.page || 1) - 1); },
-            onNext: function () { props.onPage((page.page || 1) + 1); },
-            onFirst: function () { props.onPage(1); }
-          })
-          : null
+        // 底栏总是渲染：结果总数原先挂在网格上方、对任意页数都可见，挪进底栏后
+        // 不能因为「只有 1 页」就把它藏起来（`pages > 1` 只决定里面有没有翻页按钮）。
+        el(Pager, {
+          page: page.page || 1,
+          pages: page.pages || 1,
+          summary: summary,
+          loading: state.phase === "loading",
+          busy: state.phase === "loading",
+          onPrev: function () { props.onPage((page.page || 1) - 1); },
+          onNext: function () { props.onPage((page.page || 1) + 1); },
+          onFirst: function () { props.onPage(1); }
+        })
       );
     }
 

@@ -13,6 +13,18 @@ window.__ModuleLoader__.load({
     var React = require("react");
     var el = React.createElement;
 
+    // 官方 UI 组件（提示气泡等）。它由平台模块系统作为种子模块直接提供——dsh-context 等
+    // 第三方插件同样是**不声明 inject** 直接 require 的。拿不到时（老宿主 / 离线加载回归的严格桩）
+    // 退回浏览器原生 title，界面照常可用，只是气泡样式不跟随官方主题。
+    var UI_PRIMITIVES = null;
+    try {
+      UI_PRIMITIVES = require("@deepseek-ai/dsh-client-ui-primitives");
+    } catch (error) {
+      UI_PRIMITIVES = null;
+    }
+    /** 官方圆角气泡提示；没有它就没有 Tooltip 组件。 */
+    var OfficialTooltip = UI_PRIMITIVES && typeof UI_PRIMITIVES.Tooltip === "function" ? UI_PRIMITIVES.Tooltip : null;
+
     var PANEL_KEY = "plugin-market";
     var ENTRY_ID = "plugin-market";
     var API_PREFIX = "/plugin-market";
@@ -624,9 +636,55 @@ window.__ModuleLoader__.load({
     // apply 里把 locale 服务的变化广播给已挂载的组件。
     var ACTIVE_LOCALE = "zh";
     var changeListeners = [];
+    /**
+     * 官方 locale 快照里的语言定义（`LocaleDefinition[]`）。语言要**跟随官方 harness**，
+     * 而官方的渲染语义是「沿 active 语言**声明的 fallback 链**下探，且链必须终止于 en」
+     * （见 dsh-client-locale 的 addLanguage 契约）。这里存一份只为了照同一条链下探，
+     * 不自己发明第二套规则。
+     */
+    var LOCALE_DEFINITIONS = null;
 
-    function normalizeLocale(value) {
-      return String(value || "").toLowerCase().indexOf("en") === 0 ? "en" : "zh";
+    /** 语言标签的主子标签：`zh-Hans-CN` → `zh`。 */
+    function localeBase(value) {
+      return String(value || "").toLowerCase().split(/[-_]/)[0];
+    }
+
+    /** 市场**有字典**的语言只有这两个；别的语言不能假装有。 */
+    function shippedLocale(value) {
+      var base = localeBase(value);
+      if (base === "en") return "en";
+      if (base === "zh") return "zh";
+      return null;
+    }
+
+    /**
+     * 把官方语言 id 收敛成市场实际有字典的那一个。
+     *
+     * 旧实现是「非英语一律当中文」，**无视官方 fallback 链**：官方今天只发 zh/en 所以看不出，
+     * 但 addLanguage 允许第三方语言包（例如 ja 的 fallback 是 en），那种情况下市场会硬显示
+     * 中文，而官方自己会回退到英文——同一屏上两种语言。现在改成照官方的链下探：
+     * active 自身命中（含 zh-Hans 这类变体）就用它，否则沿 fallback 走，首个我们有字典的赢；
+     * 整条链都没有就落到 en——那是官方契约里明的链尾，不是我们猜的。
+     */
+    function normalizeLocale(value, definitions) {
+      var direct = shippedLocale(value);
+      if (direct) return direct;
+      var byId = {};
+      var list = Array.isArray(definitions) ? definitions : (Array.isArray(LOCALE_DEFINITIONS) ? LOCALE_DEFINITIONS : []);
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && typeof list[i].id === "string") byId[list[i].id.toLowerCase()] = list[i];
+      }
+      var cursor = String(value || "").toLowerCase();
+      // 链是外部数据（第三方语言包声明的），加保护上限避免环状定义把这里挂住。
+      for (var hop = 0; cursor && hop < 16; hop++) {
+        var entry = byId[cursor];
+        if (!entry) break;
+        var fallback = entry.fallback === undefined || entry.fallback === null ? "" : String(entry.fallback).toLowerCase();
+        var hit = shippedLocale(fallback);
+        if (hit) return hit;
+        cursor = fallback;
+      }
+      return "en";
     }
 
     function publishChange() {
@@ -648,8 +706,9 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function setActiveLocale(value) {
-      var next = normalizeLocale(value);
+    function setActiveLocale(value, definitions) {
+      if (Array.isArray(definitions)) LOCALE_DEFINITIONS = definitions;
+      var next = normalizeLocale(value, definitions);
       if (next === ACTIVE_LOCALE) return;
       ACTIVE_LOCALE = next;
       publishChange();
@@ -1262,7 +1321,7 @@ function errorCopy(error) {
 
     // ───────────────────────────── 样式 ─────────────────────────────
     var STYLES = `
-.dshpm-entry { display:flex; align-items:center; gap:8px; margin:0 2px; min-height:36px; padding:7px 8px; box-sizing:border-box; border:none; border-radius:var(--dsw-radius-md,8px); background:transparent; color:var(--dsw-alias-label-primary,#1a1a1a); font:inherit; line-height:22px; text-align:left; cursor:pointer; flex:1 1 100%; min-width:0; }
+.dshpm-entry { display:flex; align-items:center; gap:8px; margin:0 2px; min-height:36px; padding:7px 8px; box-sizing:border-box; border:none; border-radius:var(--dsw-radius-md,12px); background:transparent; color:var(--dsw-alias-label-primary,#1a1a1a); font:inherit; line-height:22px; text-align:left; cursor:pointer; flex:1 1 100%; min-width:0; }
 .dshpm-entry:hover:not(:disabled) { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); }
 .dshpm-entry[data-active="true"] { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); }
 .dshpm-entry:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:-2px; }
@@ -1290,7 +1349,7 @@ function errorCopy(error) {
 .dshpm-tab[data-active="true"] { color:var(--dsw-alias-label-primary,#1a1a1a); border-bottom-color:var(--dsw-alias-brand-primary,#4d6bfe); }
 .dshpm-tab:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:2px; }
 .dshpm-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.dshpm-search { display:flex; align-items:center; gap:6px; flex:1 1 220px; min-width:180px; padding:5px 8px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-search { display:flex; align-items:center; gap:6px; flex:1 1 220px; min-width:180px; padding:5px 8px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-search:focus-within { border-color:var(--dsw-alias-brand-primary,#4d6bfe); }
 .dshpm-searchIcon { flex:none; display:inline-flex; color:var(--dsw-alias-label-secondary,#6b6b6b); }
 .dshpm-input { flex:1 1 auto; min-width:0; border:none; outline:none; background:transparent; color:inherit; font:inherit; font-size:.9em; }
@@ -1298,8 +1357,8 @@ function errorCopy(error) {
    （按 accent-color 上色），与 .dshpm-search 里那颗并排——用户截图里的「两个清除键」。
    实测（headless Edge 聚焦态截图对比）：appearance 与 display 任一都能让它消失，两个都写最稳。 */
 .dshpm-input::-webkit-search-cancel-button { -webkit-appearance:none; appearance:none; display:none; }
-.dshpm-select { border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:inherit; font:inherit; font-size:.85em; padding:5px 6px; }
-.dshpm-iconBtn { flex:none; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; padding:0; border:none; border-radius:var(--dsw-radius-md,8px); background:transparent; color:var(--dsw-alias-label-secondary,#6b6b6b); cursor:pointer; }
+.dshpm-select { border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-1,transparent); color:inherit; font:inherit; font-size:.85em; padding:5px 6px; }
+.dshpm-iconBtn { flex:none; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; padding:0; border:none; border-radius:var(--dsw-radius-md,12px); background:transparent; color:var(--dsw-alias-label-secondary,#6b6b6b); cursor:pointer; }
 .dshpm-iconBtn:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); }
 .dshpm-iconBtn:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:1px; }
 .dshpm-chips { display:flex; gap:6px; flex-wrap:wrap; }
@@ -1309,7 +1368,7 @@ function errorCopy(error) {
 .dshpm-chip:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:1px; }
 .dshpm-summary { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; }
 .dshpm-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:10px; }
-.dshpm-card { display:flex; flex-direction:column; gap:8px; box-sizing:border-box; padding:12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-card { display:flex; flex-direction:column; gap:8px; box-sizing:border-box; padding:14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-cardHead { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
 .dshpm-cardName { margin:0; font-size:.95em; font-weight:600; overflow-wrap:anywhere; }
 .dshpm-cardOwner { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.78em; }
@@ -1322,10 +1381,10 @@ function errorCopy(error) {
 .dshpm-detailValue { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
 .dshpm-tags { display:flex; gap:4px; flex-wrap:wrap; }
 .dshpm-tag { border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:999px; padding:1px 8px; font-size:.95em; color:var(--dsw-alias-label-secondary,#6b6b6b); }
-.dshpm-code { display:block; box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,6px); background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08)); color:var(--dsw-alias-label-primary,#1a1a1a); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.95em; overflow-wrap:anywhere; }
+.dshpm-code { display:block; box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08)); color:var(--dsw-alias-label-primary,#1a1a1a); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.95em; overflow-wrap:anywhere; }
 .dshpm-link { color:var(--dsw-alias-brand-primary,#4d6bfe); text-decoration:none; display:inline-flex; align-items:center; gap:3px; }
 .dshpm-link:hover { text-decoration:underline; }
-.dshpm-btn { display:inline-flex; align-items:center; gap:5px; box-sizing:border-box; border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.16)); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-label-primary,#1a1a1a); font:inherit; font-size:.82em; padding:4px 10px; cursor:pointer; }
+.dshpm-btn { display:inline-flex; align-items:center; gap:5px; box-sizing:border-box; border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.16)); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-label-primary,#1a1a1a); font:inherit; font-size:.82em; padding:4px 10px; cursor:pointer; }
 .dshpm-btn:hover:not(:disabled) { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); }
 .dshpm-btn:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:1px; }
 .dshpm-btn:disabled { opacity:.5; cursor:not-allowed; }
@@ -1340,7 +1399,7 @@ function errorCopy(error) {
 /* ── 回执气泡（Android toast 那种）：position:fixed 悬在视口**底部居中**，不占文档流——
    出现或消失都不推动布局，也不用滚动才看得见。旧版是页内提示条：挤在头部下面一格，
    还得靠根节点滚到那一页才看得见。kind 仍用 data-kind 表达，图标配色不变。 */
-.dshpm-notice { position:fixed; left:0; right:0; bottom:24px; z-index:60; display:flex; align-items:flex-start; gap:8px; box-sizing:border-box; width:fit-content; max-width:min(560px, calc(100vw - 32px)); margin:0 auto; padding:10px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left-width:3px; border-radius:16px; background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.94)); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); box-shadow:0 10px 34px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08); font-size:.84em; line-height:1.5; transition:opacity .2s ease, transform .2s ease; }
+.dshpm-notice { position:fixed; left:0; right:0; bottom:24px; z-index:60; display:flex; align-items:flex-start; gap:8px; box-sizing:border-box; width:fit-content; max-width:min(560px, calc(100vw - 32px)); margin:0 auto; padding:10px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left-width:3px; border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.94)); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); box-shadow:0 10px 34px rgba(0,0,0,.16), 0 2px 8px rgba(0,0,0,.08); font-size:.84em; line-height:1.5; transition:opacity .2s ease, transform .2s ease; }
 /* 退场：先沉下去再卸载（由 data-open 翻转触发，200ms 后组件才真正消失）。 */
 .dshpm-notice[data-open="false"] { opacity:0; transform:translateY(10px) scale(.97); }
 .dshpm-notice[data-kind="success"] { border-left-color:var(--dsw-alias-state-success-primary,#1f9d55); }
@@ -1353,7 +1412,7 @@ function errorCopy(error) {
 .dshpm-notice[data-kind="error"] .dshpm-noticeIcon { color:var(--dsw-alias-state-error-primary,#d93025); }
 .dshpm-noticeBody { flex:1 1 auto; min-width:0; }
 .dshpm-noticeTitle { font-weight:600; }
-.dshpm-banner { display:flex; flex-direction:column; gap:6px; box-sizing:border-box; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left-width:3px; border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); font-size:.85em; }
+.dshpm-banner { display:flex; flex-direction:column; gap:6px; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left-width:3px; border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent); font-size:.85em; }
 .dshpm-banner[data-kind="warn"] { border-left-color:var(--dsw-alias-state-warn-primary,#b7791f); }
 .dshpm-banner[data-kind="error"] { border-left-color:var(--dsw-alias-state-error-primary,#d93025); }
 .dshpm-banner[data-kind="info"] { border-left-color:var(--dsw-alias-state-idle-primary,#8a8a8a); }
@@ -1362,25 +1421,25 @@ function errorCopy(error) {
    fixed 覆盖层，不进文档流——**刻意不放在 .dshpm-root 里面**（用 Fragment 挂成兄弟节点），
    否则它会成为 .dshpm-root 的直接子项，撞上 e2e [8]「任何直接子项都不得被压扁」那条几何断言。 */
 .dshpm-modalLayer { position:fixed; inset:0; z-index:70; display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:20px; background:var(--dsw-alias-bg-overlay,rgba(15,17,21,.42)); }
-.dshpm-modalCard { display:flex; flex-direction:column; gap:10px; box-sizing:border-box; width:min(440px, 100%); max-height:calc(100vh - 40px); overflow:auto; padding:16px 18px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:16px; background:var(--dsw-alias-bg-layer-2,#fff); box-shadow:0 18px 48px rgba(0,0,0,.22), 0 4px 12px rgba(0,0,0,.1); font-size:.9em; }
+.dshpm-modalCard { display:flex; flex-direction:column; gap:10px; box-sizing:border-box; width:min(440px, 100%); max-height:calc(100vh - 40px); overflow:auto; padding:16px 18px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12)); border-radius:var(--dsw-radius-panel,28px); background:var(--dsw-alias-bg-layer-2,#fff); box-shadow:0 18px 48px rgba(0,0,0,.22), 0 4px 12px rgba(0,0,0,.1); font-size:.9em; }
 .dshpm-modalTitle { font-weight:600; font-size:1.02em; }
 .dshpm-modalBody { color:var(--dsw-alias-label-secondary,#5b5b5b); line-height:1.55; overflow-wrap:anywhere; }
 .dshpm-modalNames { color:var(--dsw-alias-label-primary,#1a1a1a); font-weight:600; }
 .dshpm-modalActions { display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
 .dshpm-modalHint { font-size:.86em; color:var(--dsw-alias-label-secondary,#6b6b6b); line-height:1.5; }
 .dshpm-modalState { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#5b5b5b); }
-.dshpm-error { display:flex; flex-direction:column; gap:6px; box-sizing:border-box; padding:12px; border:1px solid var(--dsw-alias-state-error-primary,#d93025); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-error { display:flex; flex-direction:column; gap:6px; box-sizing:border-box; padding:12px; border:1px solid var(--dsw-alias-state-error-primary,#d93025); border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-errorTitle { font-weight:600; color:var(--dsw-alias-state-error-primary,#d93025); }
 .dshpm-errorBody { display:flex; flex-direction:column; gap:4px; font-size:.85em; }
 .dshpm-errorLine { display:flex; gap:8px; align-items:flex-start; }
 .dshpm-errorKey { flex:none; width:5.5em; color:var(--dsw-alias-label-secondary,#6b6b6b); }
 .dshpm-errorCode { flex:1 1 auto; min-width:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
-.dshpm-empty { display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:20px 16px; border:1px dashed var(--dsw-alias-border-l1,rgba(0,0,0,.16)); border-radius:var(--dsw-radius-md,10px); }
+.dshpm-empty { display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:20px 16px; border:1px dashed var(--dsw-alias-border-l1,rgba(0,0,0,.16)); border-radius:var(--dsw-radius-lg,16px); }
 .dshpm-emptyTitle { font-weight:600; }
 .dshpm-emptyBody { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.85em; max-width:52em; }
 .dshpm-loading { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.85em; }
 .dshpm-skeletonGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:10px; }
-.dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-md,10px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
+.dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-lg,16px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
 .dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; }
 .dshpm-pagerInfo { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; }
 .dshpm-installed { display:flex; flex-direction:column; gap:12px; }
@@ -1392,7 +1451,7 @@ function errorCopy(error) {
    flex:1 0 auto —— 覆盖上面「.dshpm-root > *」那条的 0 0 auto：内容短时页面撑满可视区（几页等高），
    内容长时按内容高度、由面板根自己滚动。收缩权仍是 0，所以任何区块都不会被压扁（§12.12）。 */
 .dshpm-root > .dshpm-page { display:flex; flex-direction:column; gap:12px; box-sizing:border-box; flex:1 0 auto; width:100%; }
-.dshpm-row { display:flex; flex-direction:column; gap:8px; box-sizing:border-box; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-row { display:flex; flex-direction:column; gap:8px; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent); }
 .dshpm-rowHead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .dshpm-rowMain { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 220px; }
 .dshpm-rowName { font-weight:600; overflow-wrap:anywhere; }
@@ -1413,13 +1472,13 @@ function errorCopy(error) {
 .dshpm-headerActions { flex-wrap:wrap; justify-content:flex-end; }
 .dshpm-btn--attention { border-color:var(--dsw-alias-state-warn-primary,#b7791f); color:var(--dsw-alias-state-warn-primary,#b7791f); }
 .dshpm-count { display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px; margin-left:2px; padding:0 4px; border-radius:999px; background:var(--dsw-alias-state-warn-primary,#b7791f); color:#fff; font-size:.85em; font-weight:600; line-height:1; }
-.dshpm-selfNote { display:flex; align-items:flex-start; gap:6px; margin-top:8px; padding:6px 9px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left:3px solid var(--dsw-alias-brand-primary,#4d6bfe); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.79em; line-height:1.55; }
+.dshpm-selfNote { display:flex; align-items:flex-start; gap:6px; margin-top:8px; padding:8px 10px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-left:3px solid var(--dsw-alias-brand-primary,#4d6bfe); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.79em; line-height:1.55; }
 .dshpm-selfNote svg { flex:none; margin-top:2px; }
 
 /* ── 可更新插件面板：就地展开，不遮挡列表、不制造第二个滚动容器 ── */
 /* 可更新页是**整页页签**，不再是会折叠的抽屉：所以这里不写 max-height / overflow:hidden——
    那两样是为了「收起时高度归 0」，留着反而会把很长的更新列表裁掉（列表高 > 1600px 时）。 */
-.dshpm-updatesPanel { display:flex; flex-direction:column; gap:12px; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,transparent); }
+.dshpm-updatesPanel { display:flex; flex-direction:column; gap:12px; box-sizing:border-box; padding:14px 16px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent); }
 /* 但作为**整页内容**（第三个页签）时它不应该是「页里的另一张卡片」：卡片自带的内边距会把这一页的
    第一行文字往下推 12px，于是三个页签切来切去看上去就不齐（用户报的「高度不对齐」）。页面节距一律
    交给统一外壳 .dshpm-page 负责，这里只保留结构。基类规则留着，便于将来别处复用这张卡片。 */
@@ -1436,7 +1495,7 @@ function errorCopy(error) {
 .dshpm-drawerList { display:flex; flex-direction:column; gap:8px; }
 .dshpm-drawerLoading { display:flex; align-items:center; gap:6px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.8em; }
 .dshpm-drawerFoot { display:flex; gap:6px; justify-content:flex-end; }
-.dshpm-updateRow { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; box-sizing:border-box; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-base,transparent); }
+.dshpm-updateRow { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; box-sizing:border-box; padding:12px 14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-base,transparent); }
 .dshpm-updateMain { flex:1 1 240px; min-width:0; display:flex; flex-direction:column; gap:3px; }
 .dshpm-updateName { font-weight:600; overflow-wrap:anywhere; }
 .dshpm-updateVersions { display:flex; align-items:center; gap:6px; font-size:.82em; color:var(--dsw-alias-label-secondary,#6b6b6b); }
@@ -1446,7 +1505,7 @@ function errorCopy(error) {
    与两侧的版本号不一致。显式给它次要色 + 稍小字号。 */
 .dshpm-versionArrow { color:var(--dsw-alias-label-tertiary,#8a8a8a); font-size:.9em; }
 /* 有旧数据但这次读取失败时的提示条：黄色、一行、带重试。 */
-.dshpm-staleNote { display:flex; align-items:center; gap:6px; box-sizing:border-box; padding:8px 10px; border:1px solid var(--dsw-alias-state-warn-primary,#b7791f); border-radius:var(--dsw-radius-md,8px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-state-warn-primary,#b7791f); font-size:.82em; }
+.dshpm-staleNote { display:flex; align-items:center; gap:6px; box-sizing:border-box; padding:8px 10px; border:1px solid var(--dsw-alias-state-warn-primary,#b7791f); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-1,transparent); color:var(--dsw-alias-state-warn-primary,#b7791f); font-size:.82em; }
 .dshpm-staleNote .dshpm-btn { margin-left:auto; flex:none; }
 .dshpm-updateDesc { color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; overflow-wrap:anywhere; }
 .dshpm-updateActions { flex:none; display:flex; align-items:center; gap:8px; }
@@ -1846,7 +1905,12 @@ function errorCopy(error) {
         ensureUpdateCount(false);
         return undefined;
       }, [available]);
-      return el("button", {
+      // 提示气泡用**官方** primitives 的 Tooltip（和官方侧边栏自己的面板行同款圆角气泡），
+      // 不再用浏览器原生 title——原生框是直角+系统描边，与官方主题格格不入（用户报的
+      // 「你的选中框和别人的不一样」）。拿不到官方组件时退回原生 title，功能不丢。
+      // 可访问名仍取 market.title（按钮叫什么），气泡文案才是「打开插件市场」（点了会怎样）。
+      var hint = available ? t("market.entry.aria") : t("market.entry.disabled");
+      var entryButton = el("button", {
         type: "button",
         className: "dshpm-entry",
         "data-wide": wide ? "true" : "false",
@@ -1855,7 +1919,7 @@ function errorCopy(error) {
         "aria-label": t("market.title"),
         "aria-current": active ? "page" : undefined,
         disabled: !available,
-        title: available ? t("market.entry.aria") : t("market.entry.disabled"),
+        title: OfficialTooltip ? undefined : hint,
         onClick: openMarketPanel
       },
         el("span", { className: "dshpm-entryIcon" }, el(IconMarket, { size: wide ? 16 : 18 })),
@@ -1863,11 +1927,15 @@ function errorCopy(error) {
         updates.known && updates.count > 0
           ? el("span", {
             className: "dshpm-entryBadge",
-            title: t("updates.entryBadge", { count: updates.count }),
+            // 角标读数是可见的，且按钮已有气泡说明；这里不再挂原生 title，
+            // 否则 hover 角标时又会冒出那个直角方框。
             "aria-label": t("updates.entryBadge", { count: updates.count })
           }, String(updates.count))
           : null
       );
+      if (!OfficialTooltip) return entryButton;
+      // side 与官方 sidebar 自己的面板行一致（默认右侧），delayMs 同样取 500ms。
+      return el(OfficialTooltip, { label: hint, side: "right", delayMs: 500 }, entryButton);
     }
 
     // ───────────────────────────── 通用小组件 ─────────────────────────────
@@ -4070,22 +4138,25 @@ function errorCopy(error) {
 
     function wireLocale(locale) {
       var initial = null;
-      if (locale && typeof locale.getLocale === "function") {
+      // 官方快照里的语言定义也要一起读：active 是第三方语言包时，只有它才能给出 fallback 链。
+      function readSnapshot() {
+        if (!locale || typeof locale.getLocale !== "function") return null;
         try {
           var snapshot = locale.getLocale();
-          if (snapshot && snapshot.active) initial = snapshot.active;
+          if (snapshot && Array.isArray(snapshot.locales)) LOCALE_DEFINITIONS = snapshot.locales;
+          return snapshot && snapshot.active ? snapshot.active : null;
         } catch (readError) {
-          initial = null;
+          return null;
         }
       }
+      initial = readSnapshot();
       if (!initial) initial = detectLocale();
       setActiveLocale(initial);
       if (locale && typeof locale.subscribe === "function") {
         try {
           locale.subscribe(function () {
             try {
-              var next = locale.getLocale();
-              if (next && next.active) setActiveLocale(next.active);
+              setActiveLocale(readSnapshot());
             } catch (readError) {
               // 读不到新语言就保持当前语言，等下一次通知。
             }

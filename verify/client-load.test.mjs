@@ -51,7 +51,15 @@ function loadBundle() {
   }
   const moduleRequire = (id) => {
     if (id === 'react') return React
-    // 平台只给种子模块；require 别的东西应该当场暴露，而不是静默变成 undefined。
+    // 平台模块系统另外把官方 UI 组件作为种子模块提供；宿主把 primitives 当种子发出去，
+    // 第三方插件（dsh-context 等）也是不声明 inject 直接 require 的。这里必须给出真身，
+    // 否则「factory 能跑完」这条就测不到 bundle 真正走的那条路。
+    // 注意：仍**不是**白名单——别的东西一律当场暴露，而不是静默变成 undefined。
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') {
+      return {
+        Tooltip: ({ children }) => children,
+      }
+    }
     throw new Error(`bundle 只允许 require 平台种子模块，却 require("${id}")`)
   }
   let entry = null

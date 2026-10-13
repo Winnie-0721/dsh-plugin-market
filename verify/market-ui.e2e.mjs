@@ -1086,6 +1086,179 @@ try {
      })()`,
   )
   expect('宿主没有待重启项时不得凭空出现重启横幅', Number(noBanner) === 0, `横幅数 ${noBanner}`)
+
+  console.log('\n[12] 大圆角与官方气泡（本轮改动）')
+  // 这一段先**重新加载一次**：官方 Tooltip 靠真实 mouseenter 触发，而这套流程跑到这里时
+  // 页面上压着一层 DSH 自己的遮罩（实测 elementFromPoint 命中的是 _mask_*，不是入口），
+  // 指针根本到不了按钮——第一版就是这么假红的。重载 + 点掉弹窗后条件与「刚进页面」一致。
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1560, height: 980, deviceScaleFactor: 1, mobile: false })
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '重载后的侧边栏入口')
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  await evaluate(
+    client,
+    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`,
+  )
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  await evaluate(client, dismissApiDialog)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+
+  // 官方主题 token 的真实取值：--dsw-radius-md 是 **12px**（旧代码把它的回退值写成 8px，
+  // 主题缺席时就会比官方小一圈），--dsw-radius-lg 是 16px。断言按 token 实算值来，
+  // 而不是写死数字——主题换了这一条仍然成立。
+  const radiusTokens = await evaluate(
+    client,
+    `(() => {
+       const s = getComputedStyle(document.documentElement);
+       return { md: s.getPropertyValue('--dsw-radius-md').trim(), lg: s.getPropertyValue('--dsw-radius-lg').trim() };
+     })()`,
+  )
+  expect(
+    '官方圆角 token 可读（--dsw-radius-md=12px / --dsw-radius-lg=16px）',
+    radiusTokens?.md === '12px' && radiusTokens?.lg === '16px',
+    JSON.stringify(radiusTokens),
+  )
+
+  // 入口按钮不该再挂浏览器原生 title：原生提示框是直角 + 系统描边，和官方主题不一致
+  // （用户报的「你的选中框和别人的不一样」就出在这里）。
+  const entryNative = await evaluate(
+    client,
+    `(() => {
+       const b = document.querySelector('.dshpm-entry');
+       return b ? { title: b.getAttribute('title'), aria: b.getAttribute('aria-label') } : null;
+     })()`,
+  )
+  expect(
+    '侧边栏入口不再挂原生 title，但保留 aria-label（可访问名没丢）',
+    !!entryNative && entryNative.title === null && /插件市场|Plugin Market/.test(String(entryNative.aria)),
+    JSON.stringify(entryNative),
+  )
+
+  // 悬停入口：官方 Tooltip 会渲染一个 role="tooltip" 的气泡节点——原生 title 不会，
+  // 所以这一个节点就是「换了官方组件」的直接证据（delayMs=500，要等）。
+  // 「先移开再移进来」是必须的：CDP 的虚拟指针默认停在别处，只有一次 mouseMoved
+  // 不保证触发 mouseenter，气泡就一直不出来（第一版就是这么假红的）。
+  const entryBox = await evaluate(
+    client,
+    `(() => {
+       const b = document.querySelector('.dshpm-entry');
+       if (!b) return null;
+       const r = b.getBoundingClientRect();
+       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), vw: window.innerWidth, vh: window.innerHeight };
+     })()`,
+  )
+  let bubble = null
+  let hoverDebug = null
+  if (entryBox) {
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4, buttons: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: entryBox.x, y: entryBox.y, buttons: 0 })
+    for (let i = 0; i < 25; i += 1) {
+      bubble = await evaluate(
+        client,
+        `(() => {
+           const t = document.querySelector('[role="tooltip"]');
+           if (!t) return null;
+           return { text: t.textContent.trim(), radius: getComputedStyle(t).borderTopLeftRadius, side: t.dataset.side ?? null };
+         })()`,
+      )
+      if (bubble) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    if (!bubble) {
+      // 假红排障用：拿到那一刻指针底下究竟是谁
+      hoverDebug = await evaluate(
+        client,
+        `(() => {
+           const el = document.elementFromPoint(${entryBox.x}, ${entryBox.y});
+           return {
+             at: [${entryBox.x}, ${entryBox.y}],
+             vp: [${entryBox.x} < window.innerWidth, ${entryBox.y} < window.innerHeight],
+             hit: el ? el.className || el.tagName : null,
+             isEntry: !!(el && el.closest && el.closest('.dshpm-entry')),
+           };
+         })()`,
+      )
+    }
+  }
+  expect(
+    '悬停侧边栏入口出现**官方** Tooltip 气泡（role=tooltip，文案「打开插件市场」）',
+    !!bubble && /打开插件市场|Open the plugin market/.test(String(bubble.text)),
+    `bubble=${JSON.stringify(bubble)} hover=${JSON.stringify(hoverDebug)} entry=${JSON.stringify(entryBox)}`,
+  )
+  expect(
+    '官方气泡是**圆角**的、且带官方定位逻辑（data-side=right；原生 title 两者都没有）',
+    !!bubble && parseFloat(String(bubble.radius)) >= 4 && bubble.side === 'right',
+    JSON.stringify(bubble),
+  )
+
+  // 卡片圆角放在最后量（面板要打开才有卡片；而上面刚重载过，面板是关着的）。
+  await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
+  await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '面板重新打开（量卡片圆角）')
+  await waitFor(client, `document.querySelector('.dshpm-card') !== null`, 30000, '发现页卡片（量圆角前）')
+  const cardRadius = await evaluate(
+    client,
+    `(() => {
+       const c = document.querySelector('.dshpm-card');
+       if (!c) return null;
+       const s = getComputedStyle(c);
+       return { tl: s.borderTopLeftRadius, tr: s.borderTopRightRadius, bl: s.borderBottomLeftRadius, br: s.borderBottomRightRadius };
+     })()`,
+  )
+  expect(
+    '发现页卡片四角都是「大圆角」16px（用 --dsw-radius-lg，不再是小圆角）',
+    !!cardRadius && ['tl', 'tr', 'bl', 'br'].every((k) => cardRadius[k] === '16px'),
+    JSON.stringify(cardRadius),
+  )
+
+  console.log('\n[13] 语言跟随官方 harness')
+  // 官方 GUI 没有语言切换入口，而官方 locale 的初值取自浏览器语言列表
+  // （dsh-client-locale: detectBrowserLocale(locales, languages)）。所以覆盖浏览器语言
+  // 就是驱动同一段代码的合法方式。
+  // 注意两个坑（都实测过）：
+  //   · Emulation.setLocaleOverride **改不动** navigator.language（仍是 zh-CN），必须用
+  //     setUserAgentOverride 的 acceptLanguage；
+  //   · 只覆盖语言**不会**立刻改变已渲染的界面，要重新加载才走初始解析。
+  const readEntry = async (label) =>
+    evaluate(
+      client,
+      `(() => {
+         const e = document.querySelector('.dshpm-entry');
+         return { label: ${JSON.stringify(label)}, entry: e ? e.textContent.trim() : null, htmlLang: document.documentElement.lang || null, navLang: navigator.language };
+       })()`,
+    )
+
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '中文态入口')
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  const zhState = await readEntry('zh')
+
+  await client.send('Emulation.setUserAgentOverride', {
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    acceptLanguage: 'en-US,en;q=0.9',
+  })
+  await client.send('Page.navigate', { url: authUrl })
+  await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '英文态入口')
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  const enState = await readEntry('en')
+
+  // 对照组：官方 harness 自己的界面语言必须先跟着变。它不变就说明「没驱动起来」，
+  // 那时市场是中文并不算缺陷——这条断言把这两种情况分开，避免假红。
+  expect(
+    '前置条件：覆盖浏览器语言后官方 harness 自己切到了英文（htmlLang 变了，证明驱动生效）',
+    zhState?.htmlLang !== enState?.htmlLang && /^en/i.test(String(enState?.htmlLang)) && /^zh/i.test(String(zhState?.htmlLang)),
+    `zh=${JSON.stringify(zhState)} en=${JSON.stringify(enState)}`,
+  )
+  expect(
+    '语言跟随官方 harness：中文态显示「插件市场」',
+    /插件市场/.test(String(zhState?.entry)),
+    JSON.stringify(zhState),
+  )
+  expect(
+    '语言跟随官方 harness：harness 变英文后市场也变「Plugin Market」（不是自己的一套语言）',
+    /Plugin Market/i.test(String(enState?.entry)),
+    JSON.stringify(enState),
+  )
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

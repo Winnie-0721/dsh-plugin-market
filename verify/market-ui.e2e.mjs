@@ -1353,6 +1353,7 @@ try {
        const g = grid ? grid.getBoundingClientRect() : null;
        return {
          footer: { top: Math.round(f.top), bottom: Math.round(f.bottom), left: Math.round(f.left), right: Math.round(f.right), width: Math.round(f.width) },
+         padRight: Math.round(parseFloat(getComputedStyle(footer).paddingRight) || 0),
          summary: { top: Math.round(s.top), bottom: Math.round(s.bottom), left: Math.round(s.left), right: Math.round(s.right), text: summary.textContent.trim() },
          pager: { top: Math.round(p.top), bottom: Math.round(p.bottom), left: Math.round(p.left), right: Math.round(p.right) },
          grid: g ? { top: Math.round(g.top), bottom: Math.round(g.bottom) } : null,
@@ -1388,9 +1389,11 @@ try {
     JSON.stringify({ footerLeft: f?.left, summaryLeft: s?.left }),
   )
   expect(
-    '上下页按钮靠右：按钮组右边缘贴底栏右边缘（修复前是左对齐跟着摘要走）',
-    !!f && !!p && Math.abs(p.right - f.right) <= 2,
-    JSON.stringify({ footerRight: f?.right, pagerRight: p?.right, pagerLeft: p?.left, footerWidth: f?.width }),
+    '上下页按钮靠右：按钮组右边缘贴底栏**内容**右边缘（修复前是左对齐跟着摘要走）',
+    // 注意比的是**内容盒**右边缘，不是 border-box：底栏有 padding-right（让开右下角的
+    // 「回到顶部」圆钮，见 .dshpm-listFooter 注释），拿 border-box 比会差那 40px。
+    !!f && !!p && Math.abs(p.right - (f.right - footer.padRight)) <= 2,
+    JSON.stringify({ footerRight: f?.right, padRight: footer?.padRight, contentRight: f && footer ? f.right - footer.padRight : null, pagerRight: p?.right }),
   )
   expect(
     '摘要里带总数与页码（用户看到的「共 N 个结果 · 第 x/y 页」）',
@@ -1458,6 +1461,119 @@ try {
     /没有结果|No results/i.test(String(single?.summary)),
     JSON.stringify(single),
   )
+
+  // ── [15] 右下角「回到顶部」：能用，且不压住别人 ──────────────────────────
+  // 用户要求：「在页面右下角做一个类似网站那种返回顶层的按钮，不要影响可用的交互系统」。
+  // 后半句是重点，所以这一组除了「点了能回顶」，还必须证明**没盖住分页器**——
+  // 「下一页」就长在右下角，两者算起来会横向重叠（实测过），那是真的会点不到。
+  //
+  // 只量几何、**不碰 DOM**：这一轮我先试过「删掉宿主引导弹窗的遮罩再量命中」，
+  // 结果删掉的是 DSH 应用根（z-index:1000 的 fixed 全屏元素），elementFromPoint
+  // 从此只返回 BODY——那种数据是废的，还会把后面的断言一起带偏。重叠与否几何就能定论。
+  console.log('\n[15] 右下角「回到顶部」：能用且不遮挡分页器')
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1560, height: 980, deviceScaleFactor: 1, mobile: false })
+  // 关键前置：上一段（[14] 单页）把搜索框留在了「查一个不存在的插件」，列表是空的，
+  // root 根本没有可滚内容 —— 那样 scrollTop 永远是 0，回顶按钮也不会出现（第一版就是这么红的）。
+  // 先清空搜索、回到有 189 页的真实目录，并等卡片真的渲染出来。
+  await evaluate(
+    client,
+    `(() => {
+       const i = document.querySelector('.dshpm-root input[type=search], .dshpm-root input');
+       if (!i) return false;
+       const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+       s.call(i, '');
+       i.dispatchEvent(new Event('input', { bubbles: true }));
+       i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+       return true;
+     })()`,
+  )
+  await waitFor(client, `document.querySelectorAll('.dshpm-card').length > 0`, 30000, '[15] 目录卡片回来')
+  await waitFor(
+    client,
+    `(() => { const r = document.querySelector('.dshpm-root'); return !!r && r.scrollHeight > r.clientHeight + 200; })()`,
+    20000,
+    '[15] 面板可滚动',
+  )
+  await evaluate(client, `(() => { const r = document.querySelector('.dshpm-root'); if (r) r.scrollTop = 0; return true; })()`)
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
+  const topAbsent = await evaluate(client, `!document.querySelector('[data-top-btn]')`)
+  expect('未滚动时不显示「回到顶部」（不常驻占着右下角）', topAbsent === true, JSON.stringify({ topAbsent }))
+
+  // 先滚到「按钮可见」的位置拍一张：上面那条断言之后按钮就没了，
+  // 只在结尾截图的话，图里看不到这次要验的东西（第一版就是这样拍了个空）。
+  await evaluate(client, `(() => { const r = document.querySelector('.dshpm-root'); if (r) r.scrollTop = 700; return true; })()`)
+  await waitFor(client, `!!document.querySelector('[data-top-btn]')`, 8000, '[15] 回顶按钮出现')
+  await screenshot(client, join(shotDir, 'market-back-to-top-visible.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-back-to-top-visible.png')}（按钮可见时）`)
+  await evaluate(client, `(() => { const r = document.querySelector('.dshpm-root'); if (r) r.scrollTop = 0; return true; })()`)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+
+  const top = await evaluate(
+    client,
+    `(async () => {
+       const root = document.querySelector('.dshpm-root');
+       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+       const rect = (el) => { if (!el) return null; const b = el.getBoundingClientRect();
+         return { left: Math.round(b.left), top: Math.round(b.top), right: Math.round(b.right), bottom: Math.round(b.bottom), w: Math.round(b.width), h: Math.round(b.height) }; };
+
+       // 滚过阈值（400px）让它出现
+       root.scrollTop = 600; await sleep(300);
+       const btn = document.querySelector('[data-top-btn]');
+       const wrap = document.querySelector('.dshpm-top');
+       const shown = !!btn;
+
+       // 滚到底：分页器进入视口，量两者会不会横向相压
+       root.scrollTop = root.scrollHeight; await sleep(400);
+       const pager = document.querySelector('.dshpm-pager');
+       const nextBtn = [...document.querySelectorAll('.dshpm-pager button')].find(b => /下一页|Next/.test(b.textContent || ''));
+       const btnR = rect(btn), pagerR = rect(pager), nextR = rect(nextBtn);
+       const overlapsX = (a, b) => !!a && !!b && a.left < b.right && b.left < a.right;
+
+       const result = {
+         shown, btn: btnR, pager: pagerR,
+         wrapPosition: wrap ? getComputedStyle(wrap).position : null,
+         wrapZ: wrap ? getComputedStyle(wrap).zIndex : null,
+         btnVsPager: overlapsX(btnR, pagerR),
+         btnVsNext: overlapsX(btnR, nextR),
+         noticeZ: getComputedStyle(document.documentElement).getPropertyValue('--dsw-focus-ring-width').trim() || null,
+         beforeClick: root.scrollTop,
+       };
+
+       // 点它：滚动位置应回到 0，且按钮随之消失（< 阈值）
+       if (btn) { btn.click(); await sleep(1200); }
+       result.afterClick = root.scrollTop;
+       result.btnGoneAfterScroll = !document.querySelector('[data-top-btn]');
+       return result;
+     })()`,
+  )
+  expect(
+    '滚动超过阈值后出现「回到顶部」（右下角固定悬浮）',
+    top?.shown === true && top?.wrapPosition === 'fixed',
+    JSON.stringify({ shown: top?.shown, position: top?.wrapPosition, btn: top?.btn }),
+  )
+  expect(
+    '「回到顶部」浮在通知条/弹窗层之下（z-index 低于 60，不去压必须点的东西）',
+    Number(top?.wrapZ) > 0 && Number(top?.wrapZ) < 60,
+    JSON.stringify({ wrapZ: top?.wrapZ }),
+  )
+  expect(
+    '「回到顶部」与分页器**不横向重叠**（不压住「下一页」——用户要的「不影响交互」）',
+    top?.btnVsPager === false && top?.btnVsNext === false,
+    JSON.stringify({ btnVsPager: top?.btnVsPager, btnVsNext: top?.btnVsNext, btn: top?.btn, pager: top?.pager }),
+  )
+  expect(
+    '点「回到顶部」后滚动位置真的回到 0',
+    Number(top?.beforeClick) > 400 && Number(top?.afterClick) === 0,
+    JSON.stringify({ before: top?.beforeClick, after: top?.afterClick }),
+  )
+  expect(
+    '回到顶部后按钮自己消失（回到阈值以下不再占位）',
+    top?.btnGoneAfterScroll === true,
+    JSON.stringify({ gone: top?.btnGoneAfterScroll }),
+  )
+  await screenshot(client, join(shotDir, 'market-back-to-top.png'))
+  console.log(`  · 截图：${join(shotDir, 'market-back-to-top.png')}`)
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

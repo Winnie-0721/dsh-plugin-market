@@ -80,6 +80,7 @@ window.__ModuleLoader__.load({
         "action.copied": "已复制",
         "action.copyFailed": "复制失败，请手动选中命令",
         "action.firstPage": "第一页",
+        "action.backTop": "回到顶部",
         "action.clear": "清空",
         "action.goDiscover": "去发现页",
         "search.placeholder": "搜索插件名、作者或描述…",
@@ -387,6 +388,7 @@ window.__ModuleLoader__.load({
         "action.copied": "Copied",
         "action.copyFailed": "Copy failed; select the command manually",
         "action.firstPage": "First page",
+        "action.backTop": "Back to top",
         "action.clear": "Clear",
         "action.goDiscover": "Go to Discover",
         "search.placeholder": "Search name, author, or description…",
@@ -1285,6 +1287,96 @@ function errorCopy(error) {
       return svgRoot(size, el("path", { d: d }));
     }
 
+    /** 「回到顶部」的箭头：一条竖线加箭头，比 IconChevron 更像常见的回顶图标。 */
+    function IconArrowUp(props) {
+      var size = (props && props.size) || 15;
+      return svgRoot(size, [
+        el("path", { key: "a", d: "M8 13V3.4" }),
+        el("path", { key: "b", d: "M4.2 7.2 8 3.4l3.8 3.8" })
+      ]);
+    }
+
+    // 显示阈值：与上游 dshmarket 取同一个数（它也是 scrollTop > 400）。
+    // 太早出现会一直挡在右下角，太晚则滚了半屏还没得用。
+    //
+    // 刻意**不**做「接近底部就隐藏」：滚到最底部恰恰是最想回顶的时候，
+    // 那时把按钮藏掉是把功能从最需要的地方撤走（上游也没这么做）。
+    // 与列表底栏「下一页」可能的重叠改用**给底栏留出右侧空位**解决——
+    // 见 .dshpm-listFooter 的 padding-right，那是不牺牲可用性的那一侧。
+    var BACK_TOP_AT = 400;
+
+    /**
+     * 把滚动容器滚回顶部。
+     *
+     * 两个边界都实测过：
+     *  · **reduced-motion 下不用平滑滚动**——用户明确要求减弱动效，滚 1600px 的
+     *    动画正属于该被关掉的那类；
+     *  · 容器的 `scrollTo` 可能不存在（jsdom 桩、老引擎），退回直接赋 scrollTop，
+     *    否则回顶按钮在那种环境里点了没反应。
+     */
+    function scrollContainerToTop(node) {
+      if (!node) return;
+      var reduce = false;
+      try {
+        reduce = !!(typeof window !== "undefined" && window.matchMedia
+          && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+      } catch (mediaError) { reduce = false; }
+      if (typeof node.scrollTo === "function") {
+        node.scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
+      } else {
+        node.scrollTop = 0;
+      }
+    }
+
+    /**
+     * 右下角悬浮的「回到顶部」。
+     *
+     * 「不影响可用交互」落在四点（用户要求）：
+     *  1. **滚动超过阈值才出现**：常驻浮层会平白盖住右下角内容。
+     *  2. **z-index 低于通知条(60)与弹层(70)**（见 .dshpm-top 注释）：它只是便利，
+     *     绝不能压住「必须点」的东西。
+     *  3. 与列表底栏「下一页」的横向重叠由 .dshpm-listFooter 的 padding-right 让开，
+     *     按钮本身**不做**时隐时现——滚到底部正是最需要它的时候。
+     *  4. 滚动监听是 passive 且随卸载移除，不参与 React 渲染循环，也不拖滚动性能。
+     * 挂在 .dshpm-root **外面**（与弹窗同级）还有两个好处：不进入 root.children
+     * （e2e [8] 逐个子项查「有没有被压扁」），也不受 root 的 overflow 影响。
+     */
+    function BackToTop(props) {
+      var visibleState = React.useState(false);
+      var visible = visibleState[0];
+      var setVisible = visibleState[1];
+
+      React.useEffect(function () {
+        var node = props.scrollRef && props.scrollRef.current;
+        if (!node) return undefined;
+        function onScroll() {
+          var next = node.scrollTop > BACK_TOP_AT;
+          // 只在状态真的变了时才 setState：滚动事件每秒能来几十次，
+          // 每次都 setState 就算值相同也会白白重渲整页。
+          setVisible(function (previous) { return previous === next ? previous : next; });
+        }
+        onScroll();   // 挂载时先同步一次（切页签回来时可能已经滚过了）
+        node.addEventListener("scroll", onScroll, { passive: true });
+        return function () { node.removeEventListener("scroll", onScroll); };
+      }, []);
+
+      if (!visible) return null;
+
+      var button = el("button", {
+        type: "button",
+        className: "dshpm-topBtn",
+        "data-top-btn": "true",
+        "aria-label": t("action.backTop"),
+        title: t("action.backTop"),
+        onClick: function () { scrollContainerToTop(props.scrollRef && props.scrollRef.current); }
+      }, el(IconArrowUp, { size: 15 }));
+
+      return el("div", { className: "dshpm-top" },
+        OfficialTooltip
+          ? el(OfficialTooltip, { label: t("action.backTop"), side: "left", delayMs: 500 }, button)
+          : button);
+    }
+
     function IconExternal(props) {
       var size = (props && props.size) || 12;
       return svgRoot(size, [
@@ -1457,8 +1549,15 @@ function errorCopy(error) {
 .dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-lg,16px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
 /* 列表底栏：摘要靠左、翻页按钮靠右（用户要求）。
    窄屏放不下时允许换行；换行后按钮组仍靠右对齐（margin-left:auto），
-   不会滑到左边去。 */
-.dshpm-listFooter { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; padding-top:4px; }
+   不会滑到左边去。
+
+   padding-right 是为了让开右下角那个固定的「回到顶部」圆钮（实测数据）：
+   圆钮 right:18px + 宽 38px → 左边缘在视口右侧 56px 处；而底栏原来的内容右边缘
+   只在 32px 处（.dshpm-root 的 padding-right）——两者横向重叠 24px，圆钮会压住
+   「下一页」的右侧。这里补 40px，让底栏内容右边缘落到 72px ≥ 56px 且留 8px 间隙。
+   之所以放在底栏而不是让圆钮躲开：圆钮的位置是产品要的（右下角），
+   而底栏右侧本来就没有内容，让出空位不牺牲任何东西。 */
+.dshpm-listFooter { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; padding-top:4px; padding-right:40px; }
 .dshpm-listSummary { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; min-width:0; }
 .dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; margin-left:auto; }
 .dshpm-listFooter .dshpm-pager { padding-top:0; }
@@ -1608,6 +1707,20 @@ function errorCopy(error) {
 @keyframes dshpm-pop { 0% { transform:scale(.82); } 60% { transform:scale(1.06); } 100% { transform:scale(1); } }
 @keyframes dshpm-breathe { 0%, 100% { opacity:1; } 50% { opacity:.62; } }
 @keyframes dshpm-glow { 0%, 100% { box-shadow:0 1px 2px rgba(77,107,254,.28); } 50% { box-shadow:0 2px 14px rgba(77,107,254,.55); } }
+
+/* ── 回到顶部（右下角悬浮）────────────────────────────────────────────────
+   用户要求：右下角悬浮、**不要影响可用的交互系统**。三条约束都落在这里：
+   1) position:fixed 相对视口。面板一直延伸到视口右边（实测侧栏占 0–280px、
+      面板从 280 起），所以 fixed 到右下角落在面板内，不会压到左侧栏的入口；
+   2) z-index **低于**通知条(60)与弹层(70)：气泡或弹窗出现时，它不会盖住它们，
+      这是「不影响交互」最要紧的一条——回顶按钮只是便利，绝不能挡住必须点的东西；
+   3) 基础样式不写 opacity/visibility 的隐藏，reduced-motion 下也必须可见可点。
+   另外列表底栏留了 padding-right（见 .dshpm-listFooter），避免它压住右下角的
+   「下一页」——那条由 e2e 的真实命中测试钉着，不是靠这句注释保证。 */
+.dshpm-top { position:fixed; right:18px; bottom:18px; z-index:55; display:flex; }
+.dshpm-topBtn { width:38px; height:38px; padding:0; display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box; border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12)); border-radius:999px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-secondary,#6b6b6b); box-shadow:0 6px 20px rgba(0,0,0,.14), 0 1px 3px rgba(0,0,0,.08); cursor:pointer; transition:background .15s ease, color .15s ease; }
+.dshpm-topBtn:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12)); color:var(--dsw-alias-label-primary,#1a1a1a); }
+.dshpm-topBtn:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#4d6bfe)); outline-offset:2px; }
 
 /* ── 崩溃恢复卡 ──────────────────────────────────────────────────────────
    宿主自己的崩溃面（div[data-slot-error]）无文案无样式；这是我们的替代品，
@@ -4229,12 +4342,17 @@ function errorCopy(error) {
       // `job` 只覆盖单个写操作，「一键更新」每一步之间 job 会短暂为空，所以要并上 batch。
       var writeInFlight = !!job || !!(batch && batch.running);
 
+      // 滚动容器（.dshpm-root）的 ref：「回到顶部」要滚的是它，而不是 window——
+      // 真正滚动的是面板自己（实测 scrollHeight 1616 > clientHeight 885）。
+      var scrollRef = React.useRef(null);
+
       // 弹窗挂成 .dshpm-root 的**兄弟节点**（Fragment 包一层），不做它的子项：
       // .dshpm-root 的直接子项被 e2e [8] 的几何断言盯着（「任何直接子项都不得被压扁」），
       // 而这个覆盖层是 fixed、天然比 root 高，塞进去只会让那条断言变得含糊。
       return el(React.Fragment, null,
         el("div", {
           className: "dshpm-root",
+          ref: scrollRef,
           "data-busy": job ? "true" : "false"
         },
         // 进度已改为头部「刷新目录」按钮里的 spinner + aria-busy（截图里标题上方那条黑杠），
@@ -4358,7 +4476,10 @@ function errorCopy(error) {
             onNow: restartNow,
             onLater: dismissRestartAsk
           })
-          : null
+          : null,
+        // 「回到顶部」：与弹窗同级挂在 root 外面 —— 既躲开 e2e [8] 对 root 直接子项的
+        // 逐项检查，也不受 root 的 overflow 影响。它自带滚动阈值，未超过时渲染 null。
+        el(BackToTop, { scrollRef: scrollRef })
       );
     }
 

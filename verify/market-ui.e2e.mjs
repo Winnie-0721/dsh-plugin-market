@@ -1303,11 +1303,14 @@ try {
     JSON.stringify(enState),
   )
 
-  // ── [14] 列表底栏：摘要与上下页同一行，按钮靠右 ──────────────────────────
-  // 用户报的是**布局**问题（「共 N 个结果 · 第 1/M 页」原来在网格上方、分页器在下方，
-  // 两处各显示一次页码；现在合成一行，摘要靠左、翻页按钮靠右），所以要量的是真实几何，
-  // 不是源码里有没有这个 class——class 在而位置不对，正是这次要修的东西。
-  console.log('\n[14] 列表底栏：摘要与上下页同一行、按钮靠右')
+  // ── [14] 列表底栏：摘要与翻页器凑成一组、整体靠右 ────────────────────────
+  // 用户报的是**布局**问题，前后两次、方向一致：
+  //   ·「共 N 个结果 · 第 1/M 页」原来在网格上方、分页器在下方 → 合成一行；
+  //   · 合成后又用 space-between 把摘要甩到最左边，页码与翻页按钮隔着一整行 →
+  //     要求「和分页器放一起，不然不直观地看到当前在第几页」。
+  // 所以量的是真实几何：摘要右边缘要**紧邻**分页器左边缘，且整组贴右。
+  // 不量「源码里有没有这个 class」——class 在而位置不对，正是这几次要修的东西。
+  console.log('\n[14] 列表底栏：摘要紧邻翻页器、整组靠右')
   // 用 fixture 钉死「多页」这个前提（真实目录有 189 页，但不能指望网络）。
   catalogProbe = true
   // [13] 把浏览器语言覆盖成了 en-US；这里设回去，让断言面对中文观感。
@@ -1384,9 +1387,17 @@ try {
     JSON.stringify({ summary: s, pager: p }),
   )
   expect(
-    '摘要靠左：左边缘贴底栏左边缘',
-    !!f && !!s && Math.abs(s.left - f.left) <= 2,
-    JSON.stringify({ footerLeft: f?.left, summaryLeft: s?.left }),
+    '摘要与翻页器**凑在一起**（摘要右边缘紧邻分页器左边缘，间距就是底栏 gap）',
+    // 用户两次要求的方向：页码要挨着翻页按钮，眼睛不用在整行两端来回找。
+    // 所以量的是「摘要右边缘 → 分页器左边缘」的距离，必须是一个小间距（gap 的量级），
+    // 而不是被 space-between 甩到两端那种一整行的距离。
+    !!s && !!p && (p.left - s.right) >= 0 && (p.left - s.right) <= 24,
+    JSON.stringify({ summaryRight: s?.right, pagerLeft: p?.left, gap: s && p ? p.left - s.right : null, summary: s, pager: p }),
+  )
+  expect(
+    '摘要不再被甩到行首（不再是 space-between 那种两端分布）',
+    !!f && !!s && (s.left - f.left) > 100,
+    JSON.stringify({ footerLeft: f?.left, summaryLeft: s?.left, distanceFromLeft: f && s ? s.left - f.left : null }),
   )
   expect(
     '上下页按钮靠右：按钮组右边缘贴底栏**内容**右边缘（修复前是左对齐跟着摘要走）',

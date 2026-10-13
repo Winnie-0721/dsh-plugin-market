@@ -1547,19 +1547,26 @@ function errorCopy(error) {
 .dshpm-loading { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.85em; }
 .dshpm-skeletonGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:10px; }
 .dshpm-skeleton { height:104px; border-radius:var(--dsw-radius-lg,16px); background:linear-gradient(90deg,var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06)),var(--dsw-alias-bg-layer-2,rgba(127,127,127,.16)),var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06))); background-size:200% 100%; animation:dshpm-shimmer 1.3s linear infinite; }
-/* 列表底栏：摘要靠左、翻页按钮靠右（用户要求）。
-   窄屏放不下时允许换行；换行后按钮组仍靠右对齐（margin-left:auto），
-   不会滑到左边去。
+/* 列表底栏：**摘要与翻页器凑成一组、整体靠右**。
+   用户要求（两次，方向一致）：
+     · 第一次：「摘要要放在上下页那个位置，上下页放右边」；
+     · 第二次：「和分页器放一起吧，不然不直观地看到当前在第几页」——
+       即页码要**紧挨着**翻页按钮，眼睛不用在整行两端来回找。
+   所以是 justify-content:flex-end（整组靠右）+ 摘要紧跟分页器，
+   而不是 space-between（那会把摘要甩到最左边，正是用户说「不直观」的原因）。
+
+   注意 .dshpm-pager **不能**再带 margin-left:auto：那会把剩余空间全吸到分页器左边、
+   把摘要顶回行首，等于又变回 space-between 的效果（改这条时踩过）。
 
    padding-right 是为了让开右下角那个固定的「回到顶部」圆钮（实测数据）：
-   圆钮 right:18px + 宽 38px → 左边缘在视口右侧 56px 处；而底栏原来的内容右边缘
-   只在 32px 处（.dshpm-root 的 padding-right）——两者横向重叠 24px，圆钮会压住
-   「下一页」的右侧。这里补 40px，让底栏内容右边缘落到 72px ≥ 56px 且留 8px 间隙。
+   圆钮 right:18px + 宽 38px → 左边缘在视口右侧 56px 处；而底栏内容右边缘原来只在
+   32px 处（.dshpm-root 的 padding-right）——两者横向重叠 24px，圆钮会压住
+   「下一页」的右侧。这里补 40px，让内容右边缘落到 72px ≥ 56px 且留 8px 间隙。
    之所以放在底栏而不是让圆钮躲开：圆钮的位置是产品要的（右下角），
    而底栏右侧本来就没有内容，让出空位不牺牲任何东西。 */
-.dshpm-listFooter { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; padding-top:4px; padding-right:40px; }
+.dshpm-listFooter { display:flex; align-items:center; justify-content:flex-end; gap:8px 12px; flex-wrap:wrap; padding-top:4px; padding-right:40px; }
 .dshpm-listSummary { display:flex; align-items:center; gap:8px; color:var(--dsw-alias-label-secondary,#6b6b6b); font-size:.82em; min-width:0; }
-.dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; margin-left:auto; }
+.dshpm-pager { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:4px; }
 .dshpm-listFooter .dshpm-pager { padding-top:0; }
 .dshpm-installed { display:flex; flex-direction:column; gap:12px; }
 /* 页签内容的统一外壳（用户报「三个切换页面高度不对齐」）：三个页面共用同一套间距与起点，
@@ -2466,15 +2473,18 @@ function errorCopy(error) {
     }
 
     /**
-     * 列表底栏：**左边**是结果摘要（总数 + 页码），**右边**是上下页按钮。
+     * 列表底栏：结果摘要（总数 + 页码）与翻页按钮**凑成一组、整体靠右**。
      *
-     * 为什么合成一行（用户报的：结果摘要应该放在上下页那个位置，上下页放在右边）：
-     * 原来摘要在网格**上方**、分页器在**下方**，页码被拆到两处显示（顶上摘要里一次、
-     * 底下分页器里又一次），眼睛要上下跑才能对上；合成一行后信息只落在一处，
-     * 翻页控件贴在列表末尾右侧，这是列表页的常规读法。
+     * 为什么是这个形状（用户前后两次要求，方向是一致的）：
+     *  1.「结果摘要应该放在上下页那个位置，上下页放在右边」——原来摘要在网格**上方**、
+     *     分页器在**下方**，页码被拆到两处，眼睛要上下跑才能对上；
+     *  2.「和分页器放一起吧，不然不直观地看到当前在第几页」——合成一行之后我又用
+     *     space-between 把摘要甩到了最左边，页码与翻页按钮隔着一整行，仍然要对角找。
+     *     所以改成 flex-end：摘要紧挨着「上一页」，整组贴右边。
+     *     实测的间距就是 footer 的 gap（12px），e2e [14] 有断言钉着这个距离。
      *
      * 页码**只在摘要里出现一次**——翻页按钮中间原来还有个「第 x/y 页」，
-     * 合成一行后那就是同一行里写两遍页码，所以删掉了（e2e [14] 有一条断言钉着它）。
+     * 凑成一组后那就是相邻两处写同一件事，所以删掉了（e2e [14] 钉着「只出现一次」）。
      *
      * 这一行**总是渲染**，哪怕只有 1 页：结果总数不能因为「不需要翻页」就消失——
      * 摘要原来挂在网格上方时对任意页数都可见，挪进来不能把这个性质弄丢。

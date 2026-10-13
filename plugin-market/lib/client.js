@@ -48,6 +48,14 @@ window.__ModuleLoader__.load({
         "market.catalogMetaUnknown": "目录共 {count} 个插件",
         "market.entry.aria": "打开插件市场",
         "market.entry.disabled": "布局服务不可用，暂时无法打开市场",
+        // 崩溃恢复卡（见 CrashBoundary 的注释：宿主兜底面是无文案无样式的空 div）。
+        "crash.title": "插件市场渲染时出错了",
+        "crash.hint": "这块界面在渲染时抛了异常，已被隔离，DSH 的其它部分不受影响。可以先重试；若重试无效，刷新页面即可恢复。",
+        "crash.retry": "重试",
+        "crash.reload": "刷新页面",
+        "crash.copy": "复制错误信息",
+        "crash.copied": "已复制",
+        "crash.details": "技术详情",
         "tab.discover": "发现",
         "tab.installed": "已安装",
         "tab.updates": "可更新",
@@ -347,6 +355,15 @@ window.__ModuleLoader__.load({
         "market.catalogMetaUnknown": "{count} plugins in the catalog",
         "market.entry.aria": "Open the plugin market",
         "market.entry.disabled": "The layout service is unavailable, so the market cannot open",
+        // Crash recovery card (see the CrashBoundary comment: the host's own crash
+        // face is an unstyled div with no copy at all).
+        "crash.title": "The plugin market failed to render",
+        "crash.hint": "This panel threw while rendering and was isolated — the rest of DSH is unaffected. Try again first; if that does not help, reloading the page recovers it.",
+        "crash.retry": "Try again",
+        "crash.reload": "Reload page",
+        "crash.copy": "Copy error details",
+        "crash.copied": "Copied",
+        "crash.details": "Technical details",
         "tab.discover": "Discover",
         "tab.installed": "Installed",
         "tab.updates": "Updates",
@@ -1588,6 +1605,29 @@ function errorCopy(error) {
 @keyframes dshpm-pop { 0% { transform:scale(.82); } 60% { transform:scale(1.06); } 100% { transform:scale(1); } }
 @keyframes dshpm-breathe { 0%, 100% { opacity:1; } 50% { opacity:.62; } }
 @keyframes dshpm-glow { 0%, 100% { box-shadow:0 1px 2px rgba(77,107,254,.28); } 50% { box-shadow:0 2px 14px rgba(77,107,254,.55); } }
+
+/* ── 崩溃恢复卡 ──────────────────────────────────────────────────────────
+   宿主自己的崩溃面（div[data-slot-error]）无文案无样式；这是我们的替代品，
+   必须自己带样式，且要在侧栏窄条（--compact）和主面板两种宽度下都能用。
+   translate:no 落在元素属性上，这里只负责长得像个能自救的东西。 */
+.dshpm-crashSlot { display:contents; }
+.dshpm-crash { display:flex; flex-direction:column; gap:10px; box-sizing:border-box;
+  padding:14px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));
+  border-left-width:3px; border-left-color:var(--dsw-alias-danger,#e5484d);
+  border-radius:var(--dsw-radius-lg,16px); background:var(--dsw-alias-bg-layer-1,transparent);
+  font-size:.9em; line-height:1.55; min-width:0; }
+.dshpm-crash--compact { padding:8px 10px; gap:6px; font-size:.82em; border-radius:var(--dsw-radius-md,12px); }
+.dshpm-crashTitle { font-weight:600; color:var(--dsw-alias-label-primary,#1a1a1a); }
+.dshpm-crashHint { color:var(--dsw-alias-label-secondary,#5b5b5b); overflow-wrap:anywhere; }
+.dshpm-crashActions { display:flex; gap:8px; flex-wrap:wrap; }
+.dshpm-crash--compact .dshpm-crashActions { gap:6px; }
+.dshpm-crashDetails { font-size:.86em; color:var(--dsw-alias-label-secondary,#5b5b5b); }
+.dshpm-crashSummary { cursor:pointer; }
+.dshpm-crashPre { margin:6px 0 0; white-space:pre-wrap; word-break:break-word;
+  max-height:220px; overflow:auto; font-size:.92em;
+  padding:8px 10px; border-radius:var(--dsw-radius-sm,8px);
+  background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.04)); }
+
 .dshpm-spinner { animation:dshpm-spin .9s linear infinite; }
 @media (prefers-reduced-motion: reduce) {
   /* 动效是装饰：关掉之后每个元素都必须按最终位置、完全可见地渲染。 */
@@ -1889,6 +1929,183 @@ function errorCopy(error) {
       return !!readPanelInfo(function (info) {
         return !!info && info.activePanelId === PANEL_KEY;
       });
+    }
+
+    /**
+     * 渲染崩溃兜底：**最后一道防线**。
+     *
+     * 为什么必须有（实测出来的，不是推测）：
+     * DSH 宿主**确实**在 `@deepseek-ai/dsh-client-ui-renderer` 里给每个 slot entry 套了
+     * `SlotErrorBoundary`，但它的兜底面是 `div[data-slot-error]`——**无文案、无样式、
+     * 无子节点**（`[data-slot-error]` 在 app.css / vendor.css 里零命中）。更糟的是崩溃时
+     * 渲染层用 `abdicate: spec.kind !== "chain"` 上报，而 `main` 是 keyed、
+     * `sidebar.footer.action` 是 list——**都不是 chain**，于是 entry 被塞进 `SlotCore.abdicated`
+     * 的 WeakSet，「excluded from `entriesOfSlot` projections for the rest of their
+     * registration's life」，cell 干涸后落到 `deadCell()`：同一块空 div。
+     *
+     * 净效果：一旦这里抛异常，用户看到的是一块**永久空白**，且**毫无提示**——没有文案、
+     * 没有按钮、连导出日志都点不到（上游 dshmarket 的 #293 就是白屏几个月、报告全空，
+     * 因为它连「导出日志」按钮都一起没了）。只能靠刷新页面恢复，而用户根本不知道要刷新。
+     *
+     * 还有一条：我们的插件在 profile 里是 **bundle**，不走动态沙箱面，所以
+     * `dsh-cordis-client-runner` 的 `owners` 索引（`owners.set` 全档只有 1 处，在
+     * `guardedSurface` 的 `claim()` 里）**够不着我们**——`this.owners.get(component)`
+     * 返回 undefined 后直接 `return`，Cordis 面板那行 `role="alert"`
+     * 「Rendering failed in {slot}」是**动态插件的待遇，不是我们的**。
+     * 也就是说：我们没有第二条可见通道，必须自己给自己兜底。
+     *
+     * 边界放在 entry **内部**（包住我们自己的树），这样崩溃被限制在我们这一格，
+     * 不会触发宿主的 abdicate，也就不会永久留白——重试即可就地恢复。
+     *
+     * 刻意不做自动重试循环：同样的渲染再抛一次还是会回到这里，这比在「坏界面」和
+     * 「恢复卡」之间闪烁、两边都读不了要诚实。
+     */
+    var LAST_CRASH = null;
+
+    /**
+     * React.Component 的**构造器**（不是它的 prototype）。必须防御式取：
+     * 直接写 `React.Component.prototype` 会在模块级求值，任何 React 桩缺 `Component`
+     * 的宿主（含 verify/ 下两个只桩了 hooks 的测试）都会在 `factory()` 阶段就抛错——
+     * 那是「加载期崩溃」，比没有边界更糟。
+     * 注意取的是构造器本身：`ReactComponent.prototype` 与 `ReactComponent.call(...)` 都要用，
+     * 取成 prototype 对象的话这两处都会失败（第一版就是这么错的，被 crash-boundary 测试抓到）。
+     * 真宿主一定给得了 Component；拿不到时退化成空函数，边界语义仍然成立
+     * （render 由 React 调用，我们不依赖基类的任何行为）。
+     */
+    var ReactComponentBase = (React && typeof React.Component === "function") ? React.Component : function () {};
+
+    var CrashBoundary = (function () {
+      function CrashBoundary(props) {
+        ReactComponentBase.call(this, props);
+        this.state = { error: null, generation: 0, copied: false };
+        this.retry = this.retry.bind(this);
+        this.reload = this.reload.bind(this);
+        this.copy = this.copy.bind(this);
+      }
+      CrashBoundary.prototype = Object.create(ReactComponentBase.prototype);
+      CrashBoundary.prototype.constructor = CrashBoundary;
+
+      CrashBoundary.getDerivedStateFromError = function (error) {
+        return { error: error };
+      };
+
+      CrashBoundary.prototype.componentDidCatch = function (error, info) {
+        // componentStack 说的是「哪里」——打包压缩后 JS 栈已经指不出来，而用户
+        // 手工拿不到任何一条。
+        LAST_CRASH = {
+          message: error && error.message ? String(error.message) : String(error),
+          stack: (info && info.componentStack) || (error && error.stack) || null,
+          at: new Date().toISOString(),
+          slot: this.props && this.props.slot
+        };
+        // 同时留在控制台：开发者在现场不该为了看一眼被吞掉的错误去导文件。
+        if (typeof console !== "undefined" && console.error) {
+          console.error("[plugin-market] 市场界面渲染崩溃，已换成恢复卡", error, info && info.componentStack);
+        }
+      };
+
+      CrashBoundary.prototype.retry = function () {
+        // 换 generation 是为了连子树的 identity 一起换掉：只把 error 清空也能重挂，
+        // 但 key 变了才能保证「上一棵已经崩掉的树」不会以任何形式被复用。
+        this.setState(function (prev) {
+          return { error: null, generation: prev.generation + 1, copied: false };
+        });
+      };
+
+      CrashBoundary.prototype.reload = function () {
+        if (typeof window !== "undefined" && window.location && window.location.reload) {
+          window.location.reload();
+        }
+      };
+
+      CrashBoundary.prototype.copy = function () {
+        var self = this;
+        var text = LAST_CRASH
+          ? LAST_CRASH.message + "\n\n" + (LAST_CRASH.stack || "")
+          : "";
+        var done = function () { self.setState({ copied: true }); };
+        try {
+          if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, done);
+            return;
+          }
+        } catch (error) { /* 剪贴板不可用就退回不提示，别为此再抛一次 */ }
+        done();
+      };
+
+      CrashBoundary.prototype.render = function () {
+        var error = this.state.error;
+        if (error === null) {
+          // 用 generation 当 key：重试后子树必然是全新挂载。
+          return el("div", {
+            className: "dshpm-crashSlot",
+            key: "gen" + this.state.generation
+          }, this.props.children);
+        }
+        var compact = this.props.variant === "entry";
+        var message = error && error.message ? String(error.message) : String(error);
+        var stack = (LAST_CRASH && LAST_CRASH.stack) || "";
+
+        // translate="no" + notranslate：浏览器整页翻译会**替换 React 掌握的文本节点**，
+        // 下一次提交就抛 NotFoundError 把整棵树带崩（上游 #293 的原凶，白屏了几个月）。
+        // 恢复卡本身绝不能再被翻译改写。
+        var body = [
+          el("div", { className: "dshpm-crashTitle", key: "title" }, t("crash.title")),
+          el("div", { className: "dshpm-crashHint", key: "hint" }, t("crash.hint")),
+          el("div", { className: "dshpm-crashActions", key: "actions" },
+            el("button", {
+              type: "button",
+              className: "dshpm-btn dshpm-btn--primary",
+              onClick: this.retry,
+              "data-crash-action": "retry"
+            }, t("crash.retry")),
+            compact ? null : el("button", {
+              type: "button",
+              className: "dshpm-btn",
+              onClick: this.reload,
+              "data-crash-action": "reload"
+            }, t("crash.reload")),
+            compact ? null : el("button", {
+              type: "button",
+              className: "dshpm-btn",
+              onClick: this.copy,
+              "data-crash-action": "copy"
+            }, this.state.copied ? t("crash.copied") : t("crash.copy"))
+          ),
+          compact ? null : el("details", { className: "dshpm-crashDetails", key: "details" },
+            el("summary", { className: "dshpm-crashSummary" }, t("crash.details")),
+            el("pre", { className: "dshpm-crashPre" }, message + (stack ? "\n\n" + stack : ""))
+          )
+        ];
+
+        return el("div", {
+          className: "dshpm-crash" + (compact ? " dshpm-crash--compact" : ""),
+          role: "alert",
+          "data-plugin-market-crashed": this.props.slot || "market",
+          translate: "no",
+          lang: "en",
+          // 同时留 console 之外的结构标记：e2e 与日志工具靠它区分
+          // 「崩了」和「没挂载」——这两件是不同的事，不能被读成同一件。
+          "data-dshpm-crash-message": message.slice(0, 200)
+        }, body);
+      };
+
+      return CrashBoundary;
+    })();
+
+    /** 崩溃信息，给测试与日志用（可能为 null）。 */
+    function lastCrash() { return LAST_CRASH; }
+
+    /** 把组件包进崩溃边界。边界在 entry 内部，所以不会触发宿主的 abdicate。 */
+    function withCrashBoundary(Component, variant, slot) {
+      return function GuardedComponent(props) {
+        // 在最外层就补样式，而不是只靠 MarketPage/MarketEntry 内部那一次：
+        // 面板可能在走到自己的 ensureStyles() **之前**就抛（useChangeTick 是第一个 hook），
+        // 那样恢复卡会连 .dshpm-crash 的样式都没有——一张裸奔的恢复卡等于没有恢复卡。
+        // ensureStyles 本身幂等（先查 getElementById），这里重复调用没有代价。
+        ensureStyles();
+        return el(CrashBoundary, { variant: variant, slot: slot }, el(Component, props));
+      };
     }
 
     function MarketEntry(props) {
@@ -4193,8 +4410,8 @@ function errorCopy(error) {
       var slots = readService(ctx, "slots");
       if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
 
-      ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "plugin-market" }, MarketPage));
-      ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "plugin-market", order: 15, label: () => t("market.title") }, MarketEntry));
+      ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "plugin-market" }, withCrashBoundary(MarketPage, "panel", "main")));
+      ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "plugin-market", order: 15, label: () => t("market.title") }, withCrashBoundary(MarketEntry, "entry", "sidebar.footer.action")));
     };
 
     return module.exports;

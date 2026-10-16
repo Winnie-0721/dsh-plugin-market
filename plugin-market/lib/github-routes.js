@@ -32,7 +32,8 @@
  *   - 直连永远在候选表里：加速前缀是第三方，能用不代表该用。
  */
 
-import { Buffer } from 'node:buffer'
+// Buffer 的 import 原先只被 readBody 用；有界读取搬进 http-body.js 后这里是死代码，删掉。
+import { readBoundedBody } from './http-body.js'
 
 /**
  * 会各自独立失败的几类传输。
@@ -48,6 +49,16 @@ export const GITHUB_PROXY_ENV = 'DSHM_GITHUB_PROXY'
 
 /** 单条线路的超时。整条链另有总预算，见 DEFAULT_TOTAL_BUDGET_MS。 */
 export const ROUTE_TIMEOUT_MS = 8_000
+
+/**
+ * 线路响应的字节上限（审查任务 1）。依据是真实测量（`_verify/payload-sizes.mjs`，
+ * 2026-10-16 本机）：GitHub Release API JSON 53 KB、jsDelivr Data API 2.8 KB、
+ * Release 附件 tarball 0.18 MiB。JSON/文本取 4 MiB（约 80 倍余量）、
+ * 二进制取 32 MiB（约 180 倍余量），都远大于合法载荷、远小于能伤到常驻进程的量。
+ * 超限 = 该线路失败并**继续下一条**（不能把坏前缀记成赢家）。
+ */
+export const ROUTE_MAX_JSON_BYTES = 4 * 1024 * 1024
+export const ROUTE_MAX_BYTES_BYTES = 32 * 1024 * 1024
 
 /**
  * 平摊后分给单条线路的**下限**。
@@ -390,20 +401,29 @@ function routeLabel(route) {
  * 分成三态而不是统一 `text()`，是因为**载荷校验的证据不一样**：JSON 源要
  * 解析出目标字段，二进制产物要数字节并算哈希，只有原始文件才看正文。
  * 把二进制当 text 读会悄悄损坏字节（UTF-8 解码不是无损的），所以这里不图省事。
+ *
+ * **两种模式都有字节上限**（审查任务 1）：走这条路的有公共加速前缀与第三方镜像，
+ * 超时管得住时间、管不住"在超时前一直喂数据"的响应。默认值：
+ *   - json/text：4 MiB——实测 GitHub Release API 53 KB、jsDelivr Data API 2.8 KB，
+ *     4 MiB 是约 80 倍余量；
+ *   - bytes：32 MiB——实测自更新 tarball 0.18 MiB；留宽是为了未来包体增长，
+ *     同时远小于能伤到常驻进程的量级。
+ * 超限返回 kind:'too-large' ⇒ 该线路失败、继续下一条、**不记成可用线路**。
  */
-async function readBody(response, accept) {
+async function readBody(response, accept, maxBytes) {
   if (accept === 'bytes') {
-    if (typeof response.arrayBuffer !== 'function') return { ok: false, reason: '响应不支持二进制读取' }
-    const raw = await response.arrayBuffer()
-    return { ok: true, value: Buffer.isBuffer(raw) ? raw : Buffer.from(raw) }
+    const read = await readBoundedBody(response, { mode: 'bytes', maxBytes })
+    return read.ok === true ? read : { ok: false, kind: read.kind, reason: read.reason }
   }
-  const text = await response.text()
+  const read = await readBoundedBody(response, { mode: 'text', maxBytes })
+  if (read.ok !== true) return { ok: false, kind: read.kind, reason: read.reason }
+  const text = read.value
   if (accept === 'text') return { ok: true, value: text }
-  if (looksLikeHtml(text)) return { ok: false, reason: '正文是 HTML（不是 JSON）' }
+  if (looksLikeHtml(text)) return { ok: false, kind: 'payload', reason: '正文是 HTML（不是 JSON）' }
   try {
     return { ok: true, value: JSON.parse(text) }
   } catch (error) {
-    return { ok: false, reason: `不是合法 JSON：${shortError(error)}` }
+    return { ok: false, kind: 'payload', reason: `不是合法 JSON：${shortError(error)}` }
   }
 }
 
@@ -509,7 +529,10 @@ export async function fetchViaGithubRoutes(service, url, options = {}) {
     }
     let body
     try {
-      body = await readBody(response, accept)
+      body = await readBody(response, accept,
+        accept === 'bytes'
+          ? (Number.isSafeInteger(options.maxBytes) && options.maxBytes > 0 ? options.maxBytes : ROUTE_MAX_BYTES_BYTES)
+          : (Number.isSafeInteger(options.maxBytes) && options.maxBytes > 0 ? options.maxBytes : ROUTE_MAX_JSON_BYTES))
     } catch (error) {
       const reason = classify(error, budget)
       noteRouteFailure(key, route, reason)

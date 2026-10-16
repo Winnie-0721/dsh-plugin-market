@@ -18,11 +18,23 @@ import {
   registryHost,
   timeoutSignal
 } from './catalog-npm.js'
+import { readBoundedBody } from './http-body.js'
 
 /** 官方快照地址：npm 路线全部失败时的最后兜底。 */
 export const DEFAULT_SOURCE = 'https://awesome-dsh-plugin.com/plugins.json'
 export const SOURCE_ENV = 'DSHM_REGISTRY_URL'
 export const NPM_MIRROR_ENV = 'DSHM_NPM_MIRROR'
+
+/**
+ * 目录 JSON 的响应体上限（审查任务 1）。
+ *
+ * 真实体积（2026-10-16 本机量，`_verify/payload-sizes.mjs`）：4412 条目录的
+ * plugins.json 是 **5.05 MiB**，目录每日增长。取 16 MiB ≈ 3 倍余量：
+ * 正常增长多年碰不到，而"永远流式吐 JSON"的坏源在 16 MiB 处被停住——
+ * 而不是拖到 15s 超时前吸进几百 MB。别把两个数写反：上限要比现值大，
+ * 又必须小到不可能 OOM（宿主进程是常驻的）。
+ */
+export const MAX_CATALOG_JSON_BYTES = 16 * 1024 * 1024
 
 /** 契约 §3.4：内存缓存 TTL 10 分钟。 */
 export const CACHE_TTL_MS = 10 * 60 * 1000
@@ -837,7 +849,14 @@ export function createCatalogCache(options = {}) {
     }
     let body
     try {
-      body = await response.text()
+      // 有界读取（审查任务 1）：以前这里 text() 没有字节上限，远端在超时前持续喂数据
+      // 就能把任意大的正文吸进宿主内存。超限 = **该源失败**（进 attempts、试下一个源），
+      // 绝不能把超限正文当成空目录——那会把「源坏了」伪装成「没有插件」。
+      const read = await readBoundedBody(response, { maxBytes: MAX_CATALOG_JSON_BYTES })
+      if (read.ok !== true) {
+        return { ok: false, kind: read.kind, reason: read.reason }
+      }
+      body = read.value
     } catch (error) {
       return classifyFetchError(error, source.timeoutMs)
     }

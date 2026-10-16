@@ -13,12 +13,24 @@ import { Buffer } from 'node:buffer'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
 
+import { readBoundedBody } from './http-body.js'
+
 /** 目录包名与包内路径固定，是发布流程的约定。 */
 export const CATALOG_PACKAGE = 'dsh-plugin-catalog'
 export const CATALOG_FILE = 'package/plugins.json'
 
 /** 候选镜像：国内镜像优先（97ms 实测），npm 官方兜底（1.76s 实测）。 */
 export const DEFAULT_NPM_REGISTRIES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org']
+
+/**
+ * 响应体上限（审查任务 1）：packument 是纯元数据，实测 deepseek-harness-market
+ * 的完整 packument 约 23 KB（0.02 MiB），2 MiB 是约 90 倍余量；
+ * 目录 tarball 里装的是 plugins.json（实测 5.05 MiB、gzip 后 1.21 MiB），
+ * 压缩体积必然小于解压后的 8 MiB 上限（MAX_TARBALL_BYTES），16 MiB 足够宽。
+ * 超限 = **该源失败**、进 attempts、继续下一个源——绝不拿被截断的字节去做 integrity 校验。
+ */
+export const MAX_NPM_METADATA_BYTES = 2 * 1024 * 1024
+export const MAX_NPM_TARBALL_BYTES = 16 * 1024 * 1024
 
 /** 元数据只是几 KB 的 JSON；tarball 有 1MB+，给它更宽的下载窗口。 */
 export const NPM_METADATA_TIMEOUT_MS = 15_000
@@ -213,7 +225,13 @@ export async function readCatalogFromNpm(source, options = {}) {
 
   let metadataText
   try {
-    metadataText = await metadataRes.response.text()
+    // 有界读取（审查任务 1）：超限 = 该源失败（进 attempts、继续下一个源），
+    // 绝不拿"被截断的元数据"去做后面的 dist.integrity 校验。
+    const read = await readBoundedBody(metadataRes.response, { maxBytes: MAX_NPM_METADATA_BYTES })
+    if (read.ok !== true) {
+      return { ok: false, kind: read.kind === 'too-large' ? 'too-large' : 'network', reason: `元数据：${read.reason}`, label }
+    }
+    metadataText = read.value
   } catch (error) {
     return { ...classifyFetchError(error, metadataTimeoutMs), reason: `元数据：${shortError(error)}`, label }
   }
@@ -236,11 +254,14 @@ export async function readCatalogFromNpm(source, options = {}) {
 
   let bytes
   try {
-    if (typeof tarballRes.response.arrayBuffer !== 'function') {
-      return { ok: false, kind: 'bad-tarball', reason: 'tarball 响应不支持二进制读取', label }
+    // 有界读取（审查任务 1）：压缩字节也要在**分配之前**受限——原先的 gzip 上限只管
+    // 解压后，而 `arrayBuffer()` 阶段压缩字节已整包进内存；一个持续喂数据的镜像
+    // 能在超时前把宿主吸爆。超限 = 该源失败；dist.integrity 校验原样保留在后面。
+    const read = await readBoundedBody(tarballRes.response, { mode: 'bytes', maxBytes: MAX_NPM_TARBALL_BYTES })
+    if (read.ok !== true) {
+      return { ok: false, kind: read.kind === 'too-large' ? 'too-large' : 'bad-tarball', reason: `tarball：${read.reason}`, label }
     }
-    const raw = await tarballRes.response.arrayBuffer()
-    bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw)
+    bytes = read.value
   } catch (error) {
     return { ...classifyFetchError(error, tarballTimeoutMs), reason: `tarball：${shortError(error)}`, label }
   }

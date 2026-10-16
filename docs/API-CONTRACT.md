@@ -685,6 +685,10 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
     先基于当前跳解析再校验；`opaqueredirect` 或读不到 `Location` ⇒ 按该源失败，**不猜目标**；
   - 被跳过的那一跳正文必须 `cancel()`（手动重定向自带的面：不消费就挂连接）。
   `dist.integrity` 校验原样保留在取回字节之后——经合法重定向投毒的包照样被哈希拦下。
+- **URL 源仍然 `redirect:'follow'`，这是有意的**（与上一条的区别在信任基础）：URL 源的地址是
+  **操作员自己指定的**（`DSHM_REGISTRY_URL`）或仓库里的常量 `DEFAULT_SOURCE`——"跟着它给的重定向走"
+  正是操作员授予的信任范围；而 npm 那条的 `dist.tarball` 是**远端数据里的字符串**，没人授权过它，
+  所以才需要闸门。把两者混为一谈会弄坏正当用法（自有镜像把 plugins.json 301 到 CDN 是常态）。
 - 全部源都失败：无缓存 → `502 catalog-unavailable`（超时导致时 `504 catalog-timeout`），文案说明尝试过哪些源，以及可以设 `DSHM_REGISTRY_URL` / `DSHM_NPM_MIRROR`；有缓存 → 200 + `stale: true`。
 
 其它：

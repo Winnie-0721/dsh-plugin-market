@@ -34,6 +34,17 @@
   只发 10 字节后保持连接不动，会让这个 Promise **永不 settle**——handler 与 socket 一起
   无限期挂着（宿主默认 `requestTimeout` 300s 也只是把「永远」变成「五分钟」）。
   到点按 `bad-request` 明确回错。
+  - **请求体没读完就写错误响应时，响应带 `Connection: close`**（TASK-02）：超时 / 超过 64 KiB /
+    读到一半断开，以及压根没开始读体的 Content-Type 早拒，这四种形状的共同点是那条请求在
+    Node 内部仍算「进行中」——keep-alive 连接既不能复用也不会自己关。实测（本机 Node v24）：
+    修复前超时响应能送达（8/8 收到 408）但**连接释放 0/8**，50 个卡半截的请求就挂 50 条连接，
+    慢客户端可以把宿主 socket 表一点点耗光。收尾手段同样是量的：`Connection: close` 头
+    8/8 送达 + 8/8 释放且**不碰任何句柄**；`req.resume()` 单独用 0/8 释放（「把剩下的读掉就好」
+    在这条路上是错的）；`res.detachSocket()` 在 Node 24 直接抛 `ERR_INTERNAL_ASSERTION`；
+    destroy 类虽能释放但会把 ECONNRESET 甩给客户端，诱发它**重试写操作**——能优雅关就不掐。
+    **判据精确到「没读完」**：请求体已读完、只是内容坏的失败（非法 JSON / 不是对象）**不加**
+    `close`——那条连接本可复用，对所有失败一刀切会误伤浏览器 keep-alive 的正常报错路径。
+    回归见 `verify/body-lifecycle.test.mjs`（含这一正一反两条对照）。
 - 错误码清单：`bad-request`、`cross-origin`、`method-not-allowed`、`not-found`、`catalog-unavailable`、`catalog-timeout`、`manager-unavailable`、`not-in-catalog`、`install-failed`、`remove-failed`、`toggle-failed`、`restart-failed`、`restart-unsupported`、`not-allowed`、`internal`。
 - 面向用户的 `message`/`hint` 用中文短句，遵守「发生了什么 / 为什么 / 现在怎么办」。
 

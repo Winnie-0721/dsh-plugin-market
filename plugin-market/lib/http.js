@@ -232,6 +232,10 @@ export function requireSameOrigin(req, res) {
  * 能占住 handler 五分钟。这里自己给 10 秒上限：写操作（安装/开关/刷新）的请求体
  * 只有几百字节，正常客户端在毫秒级就发完了，10 秒只可能命中「坏了/被掐住」的连接。
  * 到点按 `bad-request` 明确回错，而不是让调用方一直等。
+ *
+ * `bodyComplete`（审查 TASK-02 补）：是否在 'end'（请求体真的读完）时结算。
+ * 超时/超限/断开 ⇒ false；读成功与「读完了但内容坏」⇒ true。调用方用它决定
+ * 连接的收尾，而不是猜「是不是出错了」——这两种失败对连接的含义完全不同。
  */
 export const BODY_READ_TIMEOUT_MS = 10_000
 
@@ -255,7 +259,8 @@ export function readJsonBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_READ_
           status: 408,
           code: 'bad-request',
           message: '请求体读到一半就超时了。',
-          hint: '网络可能不稳定；重新提交一次。'
+          hint: '网络可能不稳定；重新提交一次。',
+          bodyComplete: false
         })
       }, timeoutMs)
       // 定时器不该自己拖住进程退出（宿主还有 HTTP server 在跑，unref 无副作用）。
@@ -271,7 +276,8 @@ export function readJsonBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_READ_
           status: 400,
           code: 'bad-request',
           message: `请求体超过 ${Math.round(limit / 1024)} KiB 上限。`,
-          hint: '这个接口只收很小的 JSON；去掉多余内容后重试。'
+          hint: '这个接口只收很小的 JSON；去掉多余内容后重试。',
+          bodyComplete: false
         })
         // 继续把剩下的字节读掉，否则客户端可能收到 ECONNRESET 而不是上面的说明。
         chunks.length = 0
@@ -283,19 +289,22 @@ export function readJsonBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_READ_
     req.on('end', () => {
       if (settled) return
       if (size === 0) {
-        finish({ ok: true, value: null })
+        // 空体：请求在协议层面已经完整，连接可以复用。
+        finish({ ok: true, value: null, bodyComplete: true })
         return
       }
       const text = Buffer.concat(chunks).toString('utf8')
       try {
-        finish({ ok: true, value: JSON.parse(text) })
+        finish({ ok: true, value: JSON.parse(text), bodyComplete: true })
       } catch {
+        // 体读完了、只是内容坏：请求已完整，连接**不该**被服务端单方面关掉。
         finish({
           ok: false,
           status: 400,
           code: 'bad-request',
           message: '请求体不是合法的 JSON。',
-          hint: '检查 JSON 语法（引号、逗号）后重试。'
+          hint: '检查 JSON 语法（引号、逗号）后重试。',
+          bodyComplete: true
         })
       }
     })
@@ -306,24 +315,46 @@ export function readJsonBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_READ_
         status: 400,
         code: 'bad-request',
         message: '请求体读到一半就断了。',
-        hint: '重新提交一次。'
+        hint: '重新提交一次。',
+        bodyComplete: false
       })
     })
   })
 }
 
-/** 把「Content-Type 校验 + 读体 + 必须是对象」三步合成一步，失败时顺手写响应。 */
-export async function readJsonObject(req, res) {
+/**
+ * 把「Content-Type 校验 + 读体 + 必须是对象」三步合成一步，失败时顺手写响应。
+ *
+ * **收尾规则（审查 TASK-02，实测选的）**：凡是写错误响应而请求体**没有被读完**
+ * （`bodyComplete !== true`，或压根没开始读体的 Content-Type 早拒）的那条路径，
+ * 响应加 `Connection: close`。原因：那条请求在 Node 内部仍算「进行中」，
+ * keep-alive 连接既不能复用也不会自己关——实测 50 个卡半截的请求就挂 50 条连接，
+ * 慢客户端能一点点耗尽宿主 socket 表。
+ * 为什么选 close 头而不是动 socket（同一形状下逐个量的，见 verify/body-lifecycle.test.mjs 头注）：
+ * close 头 8/8 收到响应 + 8/8 释放且**不碰任何句柄**；`req.resume()` 单独用 0/8 释放
+ * （「把剩下的读掉就好」这个直觉在这条路上是错的）；`res.detachSocket()` 在 Node 24
+ * 直接抛 ERR_INTERNAL_ASSERTION；destroy 类虽也能释放，但能优雅关就别掐——
+ * 掐了客户端会把 ECONNRESET 当传输失败去**重试写操作**。
+ * 反之，体已读完的失败（非法 JSON / 不是对象）**不加** close：连接本可复用，
+ * 对所有失败一刀切会误伤浏览器 keep-alive 的正常报错路径（回归里有反向断言）。
+ */
+export async function readJsonObject(req, res, timeoutMs = BODY_READ_TIMEOUT_MS, limit = MAX_BODY_BYTES) {
   if (hasBody(req) && !isJsonContentType(req)) {
     sendError(res, 400, 'bad-request', {
       message: '请求体必须是 application/json。',
-      hint: '把 Content-Type 设为 application/json 后重试。'
+      hint: '把 Content-Type 设为 application/json 后重试。',
+      // 这条路径从没开始读体：请求同样停在「进行中」，收尾规则一致。
+      headers: { connection: 'close' }
     })
     return { ok: false }
   }
-  const read = await readJsonBody(req)
+  const read = await readJsonBody(req, limit, timeoutMs)
   if (read.ok !== true) {
-    sendError(res, read.status, read.code, { message: read.message, hint: read.hint })
+    sendError(res, read.status, read.code, {
+      message: read.message,
+      hint: read.hint,
+      ...(read.bodyComplete === true ? {} : { headers: { connection: 'close' } })
+    })
     return { ok: false }
   }
   // 空体交给字段校验报「缺哪个字段」，比在这里硬说一句「没有 body」更有用。

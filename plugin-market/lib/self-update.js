@@ -39,6 +39,7 @@ import { join } from 'node:path'
 
 import { fileFromTarball } from './catalog-npm.js'
 import { fetchViaGithubRoutes, serviceForUrl, summarizeRouteAttempts, timeoutSignal } from './github-routes.js'
+import { changeResultOk, CHANGE_APPLICATIONS } from './http.js'
 
 /** 固定仓库与通道地址：换仓库要改的是这里与 docs/RELEASING.md。 */
 export const MARKET_REPO = 'Winnie-0721/dsh-plugin-market'
@@ -686,9 +687,15 @@ export function createSelfUpdater(options = {}) {
     const application = typeof value.application === 'string'
       ? value.application
       : 'failed'
-    const ok = application === 'cancelled' || pending.length > 0
-      ? true
-      : (failure === null && application !== 'failed' && confirmed)
+    // 与 index.js 的 sendChangeResult / /toggle **共用同一条规则**（http.js changeResultOk）。
+    // 三处各自手写时已经漂移过一次（v1.2.0 审计就是量出这里少判 pendingBuilds 与空结果），
+    // 这次再收紧成封闭集合，如果不共用就会出现「HTTP 路径报失败、自更新路径报成功」。
+    const ok = changeResultOk({
+      application,
+      hasError: failure !== null,
+      pendingCount: pending.length,
+      confirmed
+    })
     return {
       ok,
       application,
@@ -703,7 +710,21 @@ export function createSelfUpdater(options = {}) {
       // message 变空串、diagnostic 整个丢掉，用户只拿到一句「插件市场内部出错了」，
       // 而真实原因是文件被占用 / 连不上源 —— 客户端那套按 code+diagnostic 选文案的逻辑
       // （errorCopy）在自更新这条路上永远拿不到证据。两个字段都透传。
-      error: failure === null ? null : {
+      // 契约外的 application 且宿主没带 error：与 HTTP 路径合成同一条解释，
+      // 否则 index.js 的 applySelfUpdate 会用 `result.code ?? 'internal'` 兜底成
+      // 「插件市场内部出错了 / 稍后重试」——把「市场读不懂宿主」推给「你网络不好」。
+      // 用 install-failed 而不是新造一个码：自更新本质就是"安装市场自己的包"，
+      // 而 install-failed 已在契约 §1 清单与客户端 ERROR_PREFIXES 里各有正经文案；
+      // 新码会让界面显示一个没人翻译过的键名。
+      error: failure === null
+        ? (ok === false && !CHANGE_APPLICATIONS.has(application)
+          ? {
+            code: 'install-failed',
+            message: `宿主回了一个市场看不懂的结果（application=${JSON.stringify(application)}），不能当成成功。`,
+            diagnostic: 'self-update apply'
+          }
+          : null)
+        : {
         code: typeof failure.code === 'string' ? failure.code : 'install-failed',
         message: typeof failure.message === 'string' ? failure.message : '',
         ...(typeof failure.diagnostic === 'string' && failure.diagnostic !== ''

@@ -190,7 +190,12 @@ check('zh/en 两张表都有 supply-chain 三条文案（缺 en 会显示 key）
 
 console.log('\n[3] 开关回执必须看 changed / application，不能只看有没有 error（MEDIUM-HIGH，v1.2.0 修）')
 // toggleNotice 与 SORTS 同级，是 var/function 声明；单独抠出来。
-const toggleSrc = grab('function toggleNotice(')
+// TASK-02 之后它先查 application 封闭集合 ⇒ 那两个依赖必须一起注入（真的那份）。
+const toggleSrc = [
+  grab('var CHANGE_APPLICATIONS = {'),
+  grab('function applicationKnown('),
+  grab('function toggleNotice(')
+].join('\n')
 const toggleApi = new Function('t', `${toggleSrc}\nreturn { toggleNotice };`)((key, vars) =>
   vars && vars.name ? `${key}:${vars.name}` : key)
 
@@ -259,6 +264,103 @@ check('两条开关路径都改用了这个函数（源码形状：不得再手�
   )
   const uses = source.match(/setNotice\(toggleNotice\(payload,/g) ?? []
   assert.equal(uses.length, 2, `toggleBundle 与 toggleEntry 都应改用 toggleNotice，实际 ${uses.length} 处`)
+})
+
+console.log('\n[3c] application 封闭集合：契约外的值不得渲染成成功（TASK-02 第三项，混版本窗口）')
+// 实测依据（_verify/application-shapes.mjs + unknown-application-client.mjs）：
+// 收紧前宿主回 `application:'unknown'` / `'appliedd'` / 数字 `1` 时，
+// ok = error===null && application!=='failed' 一律放行 ⇒ 客户端 noticeFromResult /
+// toggleNotice 落到默认分支，渲染绿色「已安装/已启用」，批量还按 applied=true 计成功。
+// 服务端半（sendChangeResult）已改成封闭集合；客户端这条是**版本偏移**下的第二道闸：
+// 宿主半缓存在进程里要重启才换（RELEASING §5），而客户端半随 bundle 即时更新 ⇒
+// 新客户端 + 旧宿主半是真实可达窗口。
+// noticeFromResult 依赖 activationNotice（激活回读会覆盖默认文案），必须一起抠、同作用域。
+const noticeBundle = [
+  grab('var CHANGE_APPLICATIONS = {'),
+  grab('function applicationKnown('),
+  grab('function activationNotice('),
+  grab('function noticeFromResult(')
+].join('\n')
+const noticeApi = new Function('t', `${noticeBundle}\nreturn { noticeFromResult, applicationKnown };`)(
+  (key, vars) => (vars
+    ? `${key}|${Object.entries(vars).map(([k, v]) => `${k}=${String(v)}`).join('|')}`
+    : key)
+)
+const UNREADABLE = ['unknown', 'appliedd', 'ok', 'APPLIED', 'Applied ', '']
+check('applicationKnown 只认封闭集合里的字符串（大小写敏感、空白敏感）', () => {
+  for (const good of ['applied', 'restart-required', 'overridden', 'failed', 'cancelled']) {
+    assert.equal(noticeApi.applicationKnown(good), true, `${good} 应在集合里`)
+  }
+  for (const bad of UNREADABLE.filter((v) => v !== '')) {
+    assert.equal(noticeApi.applicationKnown(bad), false, `${bad} 不应被认成合法值`)
+  }
+  for (const bad of [1, true, {}, [], null, undefined]) {
+    assert.equal(noticeApi.applicationKnown(bad), false, `${String(bad)} 不是字符串，不能进集合`)
+  }
+})
+check('开关：契约外的 application 一律 ⇒ error + applied:false（不得谎报「已启用」）', () => {
+  for (const raw of ['unknown', 'appliedd', 'APPLIED']) {
+    const notice = toggleApi.toggleNotice({ ok: true, changed: true, application: raw }, 'p', true)
+    assert.equal(notice.kind, 'error', `${raw} ⇒ 级别必须是 error，实际 ${notice.kind}`)
+    assert.equal(notice.applied, false, `${raw} ⇒ applied 必须为 false（批量据此计失败）`)
+    assert.match(notice.text, /notice\.unknownApplication/, `${raw} ⇒ 要说「无法确认」`)
+  }
+})
+check('开关：数字 1（truthy 非字符串）也被拦——String() 后仍不在集合', () => {
+  const notice = toggleApi.toggleNotice({ ok: true, changed: true, application: 1 }, 'p', true)
+  assert.equal(notice.kind, 'error')
+  assert.match(notice.text, /notice\.unknownApplication/)
+})
+check('安装/卸载：契约外的 application ⇒ error + applied:false，且**优先于**热挂载分支', () => {
+  for (const raw of ['unknown', 'appliedd']) {
+    const outcome = noticeApi.noticeFromResult({ application: raw, changed: true }, 'install', 'b')
+    assert.equal(outcome.kind, 'error', `${raw} ⇒ 级别，实际 ${outcome.kind}`)
+    assert.equal(outcome.applied, false)
+    assert.match(outcome.text, /notice\.unknownApplication/)
+    // 带 application:unknown 的文案里要露出原值，诊断时才知道宿主回了什么
+    assert.match(outcome.text, new RegExp(`application=${raw}`), '原值要透传进文案')
+  }
+  // 守卫在最前：即使宿主（旧半）说热挂载成功，读不懂的结果也不能背书
+  const hot = noticeApi.noticeFromResult({ application: 'unknown', changed: true, hotMounted: true }, 'install', 'b')
+  assert.equal(hot.kind, 'error', '封闭集合检查必须先于 hotMounted 分支')
+})
+check('反向对照：五个合法值各自文案不变（收紧不能误伤）', () => {
+  const t1 = toggleApi.toggleNotice({ ok: true, changed: true, application: 'applied' }, 'p', true)
+  assert.equal(t1.kind, 'success')
+  assert.match(t1.text, /notice\.toggleEnabled/)
+  const t2 = toggleApi.toggleNotice({ ok: true, changed: true, application: 'restart-required' }, 'p', true)
+  assert.match(t2.text, /notice\.toggleRestartOn/)
+  const t3 = toggleApi.toggleNotice({ ok: true, changed: true, application: 'overridden' }, 'p', true)
+  assert.match(t3.text, /notice\.toggleOverriddenOn/)
+  const t4 = toggleApi.toggleNotice({ ok: true, application: 'cancelled' }, 'p', true)
+  assert.match(t4.text, /notice\.toggleCancelled/)
+  const n1 = noticeApi.noticeFromResult({ application: 'applied', changed: true }, 'install', 'b')
+  assert.match(n1.text, /notice\.installApplied/)
+  const n2 = noticeApi.noticeFromResult({ application: 'restart-required', changed: true }, 'remove', 'b')
+  assert.match(n2.text, /notice\.removeRestart/)
+  const n3 = noticeApi.noticeFromResult({ application: 'cancelled', changed: true }, 'install', 'b')
+  assert.match(n3.text, /notice\.installCancelled/)
+})
+check('缺 application（null/undefined/空串/0）⇒ 沿用既有默认 applied，不改老形状', () => {
+  // 这是**有意的**边界：守卫只拦「给了值但读不懂」。falsy 值走不到 String() 判断，
+  // 与宿主旧半根本不发这个字段的形状同路——那是既有契约形状，改它属于另一个决定。
+  for (const missing of [undefined, null, '', 0]) {
+    const outcome = noticeApi.noticeFromResult({ changed: true, application: missing }, 'install', 'b')
+    assert.equal(outcome.kind, 'success', `application=${String(missing)} 应走默认 applied`)
+    const notice = toggleApi.toggleNotice({ ok: true, changed: true, application: missing }, 'b', true)
+    assert.equal(notice.kind, 'success')
+  }
+})
+check('notice.unknownApplication zh/en 各一条（缺 en 直接显示 key）', () => {
+  const count = source.split('"notice.unknownApplication":').length - 1
+  assert.equal(count, 2, `应在 zh/en 各有一条，实际 ${count}`)
+})
+check('两条渲染路径都真的过守卫（源码形状：不得再有绕过 applicationKnown 的回执函数体）', () => {
+  for (const fn of ['function noticeFromResult(', 'function toggleNotice(']) {
+    const body = grab(fn)
+    assert.match(body, /applicationKnown\(/, `${fn} 的函数体必须调用 applicationKnown`)
+    assert.match(body, /notice\.unknownApplication/, `${fn} 必须有「无法确认」出口`)
+  }
 })
 
 console.log('\n[4] readOnlyReason.not-removable 必须有文案（否则开关被误解锁）')

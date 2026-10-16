@@ -70,6 +70,29 @@ function check(name, fn) {
   }
 }
 
+/**
+ * 抠 `const NAME = <表达式>`：从 '=' 之后按括号深度扫，深度为 0 时遇到换行即结束。
+ * （`grab` 只处理函数；`new Set([...])` 这种跨行的常量得单独抠，
+ * 用行切会在第一行就截断——TASK-02 把判定规则抽成 http.js 的常量后，本套件的
+ * 沙箱必须注入**真的**那份，不能塞等价占位：它测的就是 ok 的真实推导。）
+ */
+function grabConst(src, name) {
+  const s = src.indexOf(`const ${name} =`)
+  if (s < 0) return ''
+  const eq = src.indexOf('=', s) + 1
+  let d = 0
+  let i = eq
+  for (; i < src.length; i++) {
+    const c = src[i]
+    if (c === '(' || c === '[' || c === '{') d++
+    else if (c === ')' || c === ']' || c === '}') d--
+    else if (c === '\n' && d === 0) break
+  }
+  // indexOf(`const NAME =`) 命中的是 `export const …` 里 'const' 的位置，
+  // 切出来天然不带 export，正是沙箱要的声明形式。
+  return src.slice(s, i)
+}
+
 // 把服务端**真的** sendChangeResult 抠出来执行（不是用正则去匹配它的源码形状）。
 // 形状断言测不出 `ok` 的推导行为——本轮我已经栽过一次同类跟头。
 function loadSendChangeResult() {
@@ -78,8 +101,16 @@ function loadSendChangeResult() {
   // 依赖的辅助函数一起注入：sendChangeResult 用到 sendJson（在 http.js）、错误投影与文案工具（在 index.js）。
   const helpers = [
     grab(httpSource, 'export function sendJson('),
+    // TASK-02 之后 ok 的推导被抽成了 http.js 的一份规则（三处调用点共用），
+    // 所以沙箱必须注入**真的** changeResultOk 与那两个集合——写死等价占位的话，
+    // 这条链上任何一头的改动都不会在这里反映出来，套件就白测了。
+    grab(httpSource, 'export function changeResultOk('),
+    grabConst(httpSource, 'CHANGE_APPLICATIONS'),
+    grabConst(httpSource, 'APPLIED_APPLICATIONS'),
     grab(hostSource, 'function optionalText('),
     grab(hostSource, 'function projectChangeError('),
+    grab(hostSource, 'function unreadableApplicationError('),
+    grabConst(hostSource, 'STAGE_ERROR_CODE'),
     grab(hostSource, 'function warningsOf('),
     grab(hostSource, 'function tail('),
     // sendChangeResult 现在还会调 noteRestartFromResult 记账「待重启」。

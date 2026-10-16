@@ -218,6 +218,88 @@
   而代理 URL **整个包含**目标主机名，于是第一条规则把经过代理的请求也吃掉，
   测试实际在测"同一条线路被问了两次"——改成带 `://` 的规则按 URL 前缀匹配。
 
+- **security（TASK-01）：外部响应读取加硬性字节上限 + npm tarball URL 与每一跳重定向过 SSRF 闸门。**
+  这一条防的是**外部数据源**，不是自己的接口：目录 JSON、npm 元数据、Release tarball 全部来自
+  可被污染的第三方，以前 `await response.text()` / `arrayBuffer()` 会把**对方给多少读多少**。
+
+  **上限（新文件 `lib/http-body.js`，`readBoundedBody`）**：Content-Length 只用来**提前拒绝**
+  （它可能缺席、可能是 chunked、可能撒谎），**实际字节数**逐块累加，到上限附近就停止读取并
+  `cancel()` 余下的流（优先 `reader.cancel()`，退回 `response.body.cancel()`）。上限表：目录 JSON
+  16 MiB、npm 元数据 2 MiB、npm tarball 压缩 16 MiB、GitHub 线路 JSON 4 MiB / 字节 32 MiB。
+  压缩与解压**两个上限都保留**（解压炸弹那条 v1.1.x 已修，这次不回退）。`dist.integrity`
+  校验**原样保留**——超限与完整性不符都是拒绝，不降级成「没校验就装」。
+  - **自己引入、自己修掉的一个回归**：新读器的 text 模式最初**不剥 UTF-8 BOM**，而它替换掉的
+    `response.text()` 按 fetch 规范是剥的——真实目录 URL 路径带 BOM 会当场报「正文不是合法 JSON」。
+    补上 BOM 剥离（bytes 模式绝不碰字节）＋两条测试；变异对照：故意弄坏剥离 ⇒ 复现生产症状。
+  - **另一条自己引入的泄漏**：手动跟重定向后，每一个被跳过的 302 响应体必须 `cancel()`，
+    否则连接泄漏。补上并在测试里断言「每一跳都被取消过」。
+
+  **SSRF 闸门（`validateRemoteTarget`）**：npm 元数据里的 `dist.tarball` 是**外部可控的字符串**，
+  以前直接交给 fetch——恶意或被污染的源可以指向 `file:` / `http://169.254.169.254` / 内网服务。
+  现在：与配置的 registry **同源**（含运维自己选的 http / 回环 verdaccio）⇒ 放行；跨源 ⇒ 只认
+  **https**、不许 userinfo、不许回环/私有/链路本地/CGNAT/组播/保留地址、不许 `localhost` 与云元数据
+  主机名；**每一跳重定向目标都单独过闸**，相对 `Location` 按当前跳解析，`opaqueredirect` / 无
+  Location ⇒ 该源失败，不猜。**没有域名白名单**（实测 npmmirror 真的 302 到跨主机的
+  `cdn.npmmirror.com`——白名单会打死运维自己配的镜像）。数字 IP 写法（`2130706433`、
+  `::ffff:7f00:1`）先归一化再过闸。
+  - **刻意保留的差异**：`catalog.js` 的 URL 源仍用 `redirect:'follow'`——那是**运维自己配的常量
+    地址**，不是元数据递过来的字符串；这条判断已写进契约文档，不是遗漏。
+  - **已知限制**（写进文档、未做）：闸门校验的是**字面主机名**，不是 DNS 解析后的 IP（防 rebinding
+    要动 undici Agent 的 `lookup` 钩子）；上限是常量，没有配置旋钮。
+
+  **验证**：新增两个门禁套件 `http-body`（16 条，含「chunked 超限在 cap+1 块停下、实际写出
+  ≤17MiB」「撒谎的 Content-Length 不能骗过累加」「后备源超限不污染好缓存」）与 `npm-url`
+  （18 条，`redirectStub` 记录每次请求与每跳取消——**证明危险目标从未被请求过**，而不是只证明
+  返回值不对）。
+
+- **fix（TASK-02）：请求体生命周期 + `application` 封闭集合——消灭「没人确认过的操作被渲染成成功」。**
+
+  **第一项（连接泄漏，`fca3dc1`）**：真实 HTTP 实测（`_verify/lifecycle-probe.mjs`）量到一个
+  此前没人知道的缺陷：请求体中途停发 ⇒ 408 已送达（**8/8 客户端都收到了错误**），但 Node 把请求
+  永远留在 in-progress ⇒ keep-alive 连接**既不归还也不关闭**（**8/8 未释放**；50 个停发请求 =
+  50 条挂着的连接）。试过的错误做法：只 `req.resume()` ⇒ 0/8 释放；`res.detachSocket()` 在
+  Node 24 直接 `ERR_INTERNAL_ASSERTION`；`destroy` 系列能释放但把 ECONNRESET 甩给客户端，可能触发
+  「重试写请求」。最小正确杠杆是响应头 **`Connection: close`**（8/8 收到 + 8/8 释放，不碰句柄）。
+  规则：`readJsonBody` 的每种失败都带 `bodyComplete` 标记，**只有正文没读完的错误路径**加这个头
+  （正文已读完而 JSON 不合法 ⇒ 不加，那是无害的 400）。新增门禁套件 `body-lifecycle`（10 条真实
+  HTTP：停发/超时/断开/超限四 shape，末条断言套件退出时**不留任何非 stdio socket**——这条是
+  我自己写的套件先漏了 `server.close()`、把进程挂 3 秒之后加上的）。
+  顺带修掉两个探针自身的坑：`readableEnded`/`complete` 在 `'request'` 时刻对 GET 和完整小 POST
+  都是 false（不能当同步判据，只有调用方的 `bodyComplete` 事实可用）；断开后的清算路径是
+  **宿主相关**的（装不装 `clientError` 监听器决定 Node 走 req `'error'` 还是直接丢请求），
+  所以断言写「有界」而不是某条具体路径。
+
+  **第三项（假成功）**：`ok = error === null && application !== 'failed'` 会放行**任何认不出的
+  值**——实测 `unknown` / `appliedd` / 数字 `1` 全部 `ok:true`，客户端绿色「已安装/已启用」，
+  批量按 `applied:true` 计成功。现在规则本体收成 `lib/http.js` 的 `changeResultOk` 一份，
+  install / remove / toggle / self-update **四个调用点共用**（三处各自手写已经漂移过一次：
+  v1.2.0 审计就是量出 self-update 少判 pendingBuilds 与空结果）。契约外的 `application` ⇒
+  `ok:false`，宿主没带 error 时市场**合成**一条带阶段码（`install-failed`/`remove-failed`/
+  `toggle-failed`）的「宿主回了一个市场看不懂的结果」，`application` 原样透传——只把 ok 改成
+  false 而不给 error，用户只会看到「插件市场内部出错了 / 稍后重试」，那是把「我们读不懂宿主」
+  推给「你网络不好」。self-update 用 `install-failed` 而不是新造码：新码会让界面显示一个
+  没人翻译过的键名。客户端两条渲染路径（`noticeFromResult` / `toggleNotice`）加**同一条守卫**
+  `applicationKnown`——宿主半被 Loader 缓存在进程里、要重启才换，客户端半随 bundle 即时更新，
+  「新客户端 + 旧宿主半」是真实可达的混版本窗口。守卫只拦「给了值但读不懂」；缺字段仍默认
+  `applied`（既有契约形状，不在这里改）。
+  - **`up-to-date` 不受影响**（核对过）：它是 self-update 在调宿主**之前**的提前返回，
+    从不经过 `changeResultOk`；`applySelfUpdate` 回给客户端的是自己拼的 JSON，也不走
+    `sendChangeResult`。封闭集合管的只有「宿主安装方法回了什么」这一件事。
+  - **变异对照**：把客户端守卫短路 ⇒ `client-errorcopy` 安装路径断言变红（源码形状断言**看不见
+    `false &&`**，这正是行为断言必须在场的理由）；把 `changeResultOk` 退回 `!== 'failed'` 旧形 ⇒
+    `host-contract` 两条变红（契约外表 + 分阶段错误码）。
+
+  **审计过、确认没问题的分支**（只读不改）：`verifyActivation` 六态判定 + 前后差集 +
+  目录来源的 `expectedVersion`；`findCatalogItem` 身份分级与重名 `ambiguous`；
+  `projectChangeError`；目录失败不覆盖好缓存（由 `http-body` [5] + 既有套件覆盖）；
+  待重启水合（e2e `[11]` + `client-errorcopy` [6]）；批量一项失败不阻断后续（既有 e2e 断言）。
+
+- **test：28 → 31 个套件**（TASK-01 新增 `http-body`、`npm-url`；TASK-02 新增 `body-lifecycle`）。
+  `body-lifecycle` 现在是门禁最慢一环（约 2.6 s），因为它跑**真实 HTTP**，超时与断开不能用假时钟。
+  本轮 TASK-02 的断言增量：`host-contract` 44→**46**、`client-errorcopy` 31→**39**、
+  `build-approval` 9/9（把**真实**的 `changeResultOk` 抠出来注入沙箱，不用等价占位——占位等于
+  不测这条链；这是「改一个函数要连带看谁在抠它执行」那个坑又咬了一次，已在套件注释里记名）。
+
 ## 1.2.0
 
 > **本节开头三条是 `v1.2.0` 标签之后追加的记录**（按最新在前排列；提交类型为 `docs:` / `ci:`，

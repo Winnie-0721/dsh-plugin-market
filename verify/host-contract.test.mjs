@@ -150,6 +150,54 @@ check('ok 在 application:"failed" 时为 false，且 cancelled 带 error 时仍
   }
 })
 
+console.log('\n[2b] 契约之外的 application：不能当成成功（TASK-02 第三项）')
+// 契约 §2.4 把 application 写成封闭集合 `applied | restart-required | overridden |
+// failed | cancelled`，而原先的判据是 `application !== 'failed'`——
+// **任何**认不出来的取值都会滑进 ok:true。复现（`_verify/application-shapes.mjs`，
+// 真调 sendChangeResult）：application='unknown' / 'appliedd' / 数字 1 ⇒ 全部 ok=true。
+// 后果不是理论上的：宿主升级后新增一个状态、或换了个措辞，市场就把「看不懂的结果」
+// 报成「装好了」，用户看到绿色成功、插件却没落地——正是本文件第 [2] 节要防的那类假成功，
+// 只是从"漏了 failed"变成了"漏了认不出来"。
+check('overridden（契约内的合法值）仍是 ok:true——收紧判据不能误伤它', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'overridden' }, 'install')
+  assert.equal(JSON.parse(res.body).ok, true, 'overridden 已写进去了，只是被更高层覆盖')
+})
+check('契约外的 application ⇒ ok:false，且带一个能解释的 error', () => {
+  for (const application of ['unknown', 'appliedd', 'ok', 1, true, 'APPLIED']) {
+    const res = capture()
+    sendChangeResult(res, { changed: true, application }, 'install')
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, false, `application=${JSON.stringify(application)} 不该被报成成功`)
+    // 原文必须**原样透传**（契约说 passthrough）：诊断时要知道宿主到底回了什么。
+    assert.equal(String(payload.application), String(application), 'application 要原样回显')
+    assert.ok(payload.error !== null && payload.error !== undefined, '要带 error，否则客户端只会看到「失败」两个字')
+    assert.equal(payload.error.code, 'install-failed', '按 stage 复用既有的错误码，不新增码表')
+    assert.match(payload.error.message, /看不懂|看不懂的结果|不能当成成功/, `要说清为什么：${payload.error.message}`)
+    assert.match(payload.error.message, /unknown|appliedd|ok|1|true|APPLIED/, '要把宿主原话放进文案')
+  }
+})
+check('同一结果在 remove / toggle 路径上用各自的错误码', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'unknown' }, 'remove')
+  assert.equal(JSON.parse(res.body).error.code, 'remove-failed')
+})
+check('宿主已带 error 时不覆盖它（合成错误只在"没有证据"时补位）', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'unknown', error: { code: 'disk-full', message: '磁盘满了' } }, 'install')
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.error.code, 'disk-full', '宿主给的原因比市场的猜测更有价值')
+})
+check('pendingBuilds 非空时仍放行（契约外取值不能把"等你批准"变成失败）', () => {
+  // v1.2.0 修的那条路径不能被这次收紧重新打死：宿主把待批准折成
+  // { application:'failed', pendingBuilds:['cloudflared'] }，ok 必须为 true，
+  // 否则客户端 requestJSON 抛错、「允许并安装」按钮永远不出现。
+  const res = capture()
+  sendChangeResult(res, { changed: false, application: 'failed', pendingBuilds: ['cloudflared'] }, 'install')
+  assert.equal(JSON.parse(res.body).ok, true)
+})
+
 console.log('\n[3] 重名插件：不猜，报歧义（行为测试，真调 findCatalogItem）')
 check('身份字段命中即确定（id / npm / url 都是唯一身份）', () => {
   const items = [

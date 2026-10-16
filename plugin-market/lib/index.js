@@ -14,6 +14,7 @@ import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  changeResultOk,
   createRouteTable,
   pickQueryEnum,
   pickQueryFlag,
@@ -22,7 +23,8 @@ import {
   readJsonObject,
   requireSameOrigin,
   sendError,
-  sendJson
+  sendJson,
+  CHANGE_APPLICATIONS
 } from './http.js'
 import {
   createCatalogCache,
@@ -72,6 +74,19 @@ const MANAGEMENT_MESSAGE = new Map(Object.entries({
   'stale-approval': '构建脚本的批准已经过期。',
   'incompatible-version': '这个版本与当前 DSH 不兼容。',
   'operation-error': '宿主执行这个操作时报错。'
+}))
+
+/**
+ * 阶段 → 契约里的失败码（§1 错误码清单）。
+ * 用途只有一个：当宿主回了一个**市场读不懂**的 application、而宿主自己又没带 error 时，
+ * 市场要合成一条能解释的 error——按阶段选码，而不是全用 internal。
+ * 用 Map 与上面的理由相同（阶段名可能来自外部，不能走原型链取值）。
+ */
+const STAGE_ERROR_CODE = new Map(Object.entries({
+  install: 'install-failed',
+  update: 'install-failed',
+  remove: 'remove-failed',
+  toggle: 'toggle-failed'
 }))
 
 /** 每个宿主错误码对应「现在怎么办」。 */
@@ -299,6 +314,22 @@ function tail(text, limit) {
 
 function warningsOf(value) {
   return Array.isArray(value.warnings) ? value.warnings.filter((entry) => typeof entry === 'string') : []
+}
+
+/**
+ * 宿主回了一个**市场读不懂**的 application、且宿主自己没带 error 时，合成一条能解释的 error。
+ *
+ * 为什么不能只把 ok 改成 false：客户端拿 ok:false 会走 errorCopy，没有 error 时用户只看到
+ * 「插件市场内部出错了 / 稍后重试」——那是把「我们读不懂宿主」推给「你网络不好」，
+ * 而真正该说的是「宿主回了一个契约之外的状态，市场不猜」。
+ * application 原样放进文案（契约 §2.4 是 passthrough），诊断时才知道宿主到底回了什么。
+ */
+function unreadableApplicationError(application, stage) {
+  return {
+    code: STAGE_ERROR_CODE.get(stage) ?? 'internal',
+    message: `宿主回了一个市场看不懂的结果（application=${JSON.stringify(application)}），不能当成成功。`,
+    hint: '看宿主日志里 deepseek-harness-market 的记录；市场不猜没写进契约的状态。'
+  }
 }
 
 /** 装/更新之后能直接回读的 bundle 快照：以小写名字为键，避免大小写差异被当成两个包。 */
@@ -586,7 +617,7 @@ function logHot(hot) {
  *  导出只为让回归测试能真调它读响应体（源码形状断言测不出 `ok` 的推导行为）。 */
 export function sendChangeResult(res, result, stage, activation, hot) {
   const value = result !== null && typeof result === 'object' ? result : {}
-  const error = projectChangeError(value.error)
+  let error = projectChangeError(value.error)
   const application = optionalText(value.application) ?? 'failed'
   const pending = Array.isArray(value.pendingBuilds)
     ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
@@ -594,10 +625,22 @@ export function sendChangeResult(res, result, stage, activation, hot) {
   // 记账「改动已落盘、但当前进程还在跑旧代码」——客户端刷新页面后靠它恢复横幅。
   // 热挂载成功时**不记账**：这一条已经生效了，记进去会弹一条假的「待重启」。
   if (hot?.ok !== true) noteRestartFromResult(value, value.target)
+  const ok = changeResultOk({
+    application,
+    hasError: error !== null,
+    pendingCount: pending.length,
+    // 宿主什么都没回（`{}` / null：既没有 application 也没有 error）时没资格谈成功。
+    confirmed: optionalText(value.application) !== null || error !== null
+  })
+  // **看不懂的结果必须说清楚为什么是失败**（TASK-02 第三项）。
+  // 原先这里只排除 'failed'，所以 `application:'unknown'` 会被报成 ok:true；
+  // 收紧成封闭集合后，如果只把 ok 改成 false 而不给 error，用户只会看到
+  // 「插件市场内部出错了 / 稍后重试」——那是把「我们读不懂宿主」推给「你网络不好」。
+  // application **原样透传**（契约 §2.4 就是 passthrough），诊断时才知道宿主到底回了什么。
+  if (ok === false && error === null && !CHANGE_APPLICATIONS.has(application)) {
+    error = unreadableApplicationError(application, stage)
+  }
   const payload = {
-    // ok 不能只看 error：宿主的 ChangeResult 里 error 是可选的，`application:'failed'`
-    // 完全可能不带 error。只看 error 就会把一次失败的操作报成 ok:true，客户端据此渲染
-    // 绿色「已安装」并把它计为成功。
     // `cancelled` 单独放行：它是用户自己取消的（宿主可能同时带一个 error 说明原因），
     // 客户端要靠 `application` 渲染「已取消」文案——ok:false 会让 requestJSON 直接抛错，
     // 那条文案就永远不可达。`failed` 一律算失败。
@@ -608,7 +651,9 @@ export function sendChangeResult(res, result, stage, activation, hot) {
     // 回 ok:false 会让客户端 requestJSON **直接抛错**，于是客户端那段「读 payload.pendingBuilds
     // 弹批准框」成了**永远不可达的死代码**——用户只看到一条普通错误，**没有任何批准入口**，
     // 装了永远装不上（真实案例：@linxin666/dsh-remote-web-ui 依赖 cloudflared 的 postinstall）。
-    ok: application === 'cancelled' || pending.length > 0 ? true : (error === null && application !== 'failed'),
+    //
+    // 规则本体在 http.js 的 changeResultOk（三处调用点共用一份，见那里的注释）。
+    ok,
     changed: value.changed === true,
     application,
     stage: optionalText(value.stage) ?? stage,
@@ -1145,15 +1190,26 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
       }
 
       const value = result !== null && typeof result === 'object' ? result : {}
-      const error = projectChangeError(value.error)
+      let error = projectChangeError(value.error)
       const application = optionalText(value.application) ?? 'failed'
       // 开关也可能是 restart-required（宿主没有 HMR 时）——同样要记账，
       // 否则刷新页面后这条待重启提示也会丢。
       noteRestartFromResult(value, name ?? id)
+      const ok = changeResultOk({
+        application,
+        hasError: error !== null,
+        pendingCount: 0,
+        confirmed: optionalText(value.application) !== null || error !== null
+      })
+      // 与 sendChangeResult 同一套：认不出来的 application 不算成功，
+      // 而且要说清「是市场读不懂」而不是丢一句内部错误。
+      if (ok === false && error === null && !CHANGE_APPLICATIONS.has(application)) {
+        error = unreadableApplicationError(application, 'toggle')
+      }
       sendJson(res, 200, {
         // 与 sendChangeResult 用**同一条规则**：只看 error 会把 `application:'failed'`
         // 且不带 error 的一次失败开关报成 ok:true。
-        ok: application === 'cancelled' ? true : (error === null && application !== 'failed'),
+        ok,
         changed: value.changed === true,
         application,
         enabled: value.enabled === undefined ? payload.enabled : value.enabled === true,

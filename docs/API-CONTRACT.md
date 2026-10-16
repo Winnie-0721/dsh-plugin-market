@@ -195,10 +195,24 @@ Query 参数（全部可选，未知参数忽略）：
 ```
 
 - `application` ∈ `applied | restart-required | overridden | failed | cancelled`（原样透传）。
+- **`ok` 是封闭集合的判定（TASK-02 第三项，v1.3.0）**：上面这五个值就是宿主 `pluginManager`
+  方法返回的 `application` 的全部合法值。规则本体在 `lib/http.js` 的 `changeResultOk`，
+  install / remove / toggle / self-update 的**安装结果**四处共用一份。
+  旧规则 `ok = error === null && application !== 'failed'` 会把**任何读不懂的值**放行——实测
+  `unknown` / `appliedd` / 数字 `1` 都得到 `ok:true`，界面渲染成绿色成功（一次没人确认过的操作被
+  说成已完成）。现在：不在集合里的 `application` ⇒ `ok=false`，且当宿主没带 `error` 时市场**合成**
+  一条带阶段错误码（`install-failed` / `remove-failed` / `toggle-failed`）的说明「宿主回了一个
+  市场看不懂的结果」——`application` 仍**原样透传**，诊断时能看到宿主到底回了什么。
+  客户端 `noticeFromResult` / `toggleNotice` 有**同一条守卫**（`applicationKnown`）：宿主半缓存在
+  进程里、要重启才换（RELEASING §5），而客户端半随 bundle 即时更新 ⇒ 「新客户端 + 旧宿主半」是
+  真实可达的混版本窗口，那道闸在服务端半换成新版本之前必须由客户端自己守住。
+  **缺省 `application` 字段仍按既有形状默认 `applied`**（老宿主不发这个字段——守卫只拦
+  「给了值但读不懂」，不在这里改兼容形状）。
 - `error` 非空时为 `{ "code": string, "message": string, "diagnostic"?: string, "incompatible"?: unknown }`；`ok` 与 `error` 一致：`error != null` ⇒ `ok=false`。**另（v1.1.6）**：
   - `application === 'failed'` ⇒ `ok=false`，即使宿主没带 `error`（`ChangeResult.error` 是可选的）；
   - `application === 'cancelled'` ⇒ **恒为** `ok=true`（即使宿主同时带了一个说明原因的 `error`）：
     客户端要按 `application` 渲染「已取消」，`ok=false` 会让它直接抛错、那条文案永远不可达。
+  - `pendingBuilds` 非空 ⇒ `ok=true`（v1.2.0）：这是「等你批准构建脚本」，不是失败到底。
 - 按 `name` 安装时（`{name}` 或 `{spec}` 均未给出唯一身份），若该 `name` 在目录里对应**多个条目**，返回 `400 bad-request` 并说明「市场不猜」——真实目录 195 个重名（`dsh-memory` 对应 10 条 5 个不同 spec），原先「第一个匹配就装」会装上别人的包。调用方应改用 `id`（`owner/name`）或 `spec`。
 - `pendingBuilds`：来自 `ChangeResult.pendingBuilds`；非空表示需要用户批准构建脚本后带着 `approvedBuilds` 重新提交。
 - **`activation`（v1.1.7，仅 `install` 路由）**：装完之后**回读**宿主状态的结果，回答 `application` 回答不了的问题——「东西真的落地了吗、落地的是哪个版本、它在跑吗」。

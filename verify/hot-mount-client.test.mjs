@@ -60,6 +60,10 @@ function grab(source, signature) {
  */
 function noticeApi() {
   const bundle = [
+    // TASK-02 noticeFromResult 会先查 application 是否在封闭集合里，
+    // 沙箱必须注入**真的**那份（写死等价占位就等于不测这条链）。
+    grab(src, 'var CHANGE_APPLICATIONS = {'),
+    grab(src, 'function applicationKnown('),
     grab(src, 'function activationNotice('),
     grab(src, 'function noticeFromResult(')
   ].join('\n')

@@ -222,6 +222,48 @@ export function requireSameOrigin(req, res) {
 }
 
 /**
+ * 宿主 `ChangeResult.application` 的**封闭集合**（契约 §2.4，与内核 ChangeResult 对齐）。
+ *
+ * 为什么要单独列出来：原先三处判定都写 `application !== 'failed'`，于是**任何**认不出来
+ * 的取值都会滑进 ok:true。复现（`_verify/application-shapes.mjs`，真调 sendChangeResult）：
+ * `application:'unknown'` / `'appliedd'` / 数字 1 ⇒ 全部报成功。宿主升级后新增一个状态、
+ * 或换了措辞，市场就把「看不懂的结果」说成「装好了」——用户看到绿色成功、插件没落地。
+ * 这与 v1.2.0 修掉的「只看 error 会把 failed 报成成功」是同一类假成功，只是换了个入口。
+ */
+export const CHANGE_APPLICATIONS = new Set([
+  'applied',
+  'restart-required',
+  'overridden',
+  'failed',
+  'cancelled'
+])
+
+/** 认得出来、且代表「事情确实办了」的取值。 */
+export const APPLIED_APPLICATIONS = new Set(['applied', 'restart-required', 'overridden'])
+
+/**
+ * 一条变更结果到底算不算成功——三处调用点（sendChangeResult、/toggle、self-update.apply）
+ * **共用这一条规则**。三处各自手写时已经漂移过一次（v1.2.0 的独立审计就是量出
+ * self-update 少判了 pendingBuilds 与空结果），所以这里收成一份。
+ *
+ * @param application - 归一后的 application（字符串或 null）。
+ * @param hasError - 宿主是否带了 error。
+ * @param pendingCount - pendingBuilds 条数（非空表示「等你批准」，不是失败到底）。
+ * @param confirmed - 宿主是否真的回过话（空结果 `{}` 没资格谈成功）。
+ */
+export function changeResultOk(options = {}) {
+  const application = typeof options.application === 'string' ? options.application : null
+  // cancelled 恒为 true：用户自己取消的，客户端要靠 application 渲染「已取消」，
+  // ok:false 会让 requestJSON 直接抛错、那条文案永远不可达。
+  if (application === 'cancelled') return true
+  if (Number(options.pendingCount) > 0) return true
+  if (options.confirmed === false) return false
+  if (options.hasError) return false
+  // 关键收紧：认不出来 ⇒ 不算成功（原先只排除 'failed'）。
+  return application !== null && APPLIED_APPLICATIONS.has(application)
+}
+
+/**
  * 读请求体：上限 64 KiB，超过就停下不再累积（把响应交给调用方写）。
  * 返回 `{ ok:true, value }` 或 `{ ok:false, status, code, message, hint }`。
  *

@@ -161,6 +161,7 @@ window.__ModuleLoader__.load({
         "notice.installOverridden": "已安装 {name}，但 profile 配置的覆盖层优先",
         "notice.installCancelled": "{name} 的安装已取消",
         "notice.installWarnings": "安装完成，但有提示：{warnings}",
+        "notice.unknownApplication": "操作结果无法确认（宿主回了「{application}」），先别当成成功；看宿主日志后重试。",
         "notice.removeApplied": "已卸载 {name}",
         "notice.removeRestart": "已卸载 {name}，重启 DSH 后生效",
         "notice.removeCancelled": "{name} 的卸载已取消",
@@ -481,6 +482,7 @@ window.__ModuleLoader__.load({
         "notice.installOverridden": "Installed {name}, but a profile override takes precedence",
         "notice.installCancelled": "The install of {name} was cancelled",
         "notice.installWarnings": "Installed, with warnings: {warnings}",
+        "notice.unknownApplication": "Could not confirm the result (the host replied \"{application}\"); do not treat it as success. Check the host log and retry.",
         "notice.removeApplied": "Removed {name}",
         "notice.removeRestart": "Removed {name}; restart DSH to apply",
         "notice.removeCancelled": "The removal of {name} was cancelled",
@@ -3106,8 +3108,37 @@ function errorCopy(error) {
       return null;
     }
 
+    /**
+     * 宿主 `ChangeResult.application` 的封闭集合（契约 §2.4）。
+     *
+     * 为什么客户端也要有一份：宿主半在进程里被 Loader 缓存，**装完新版本后要重启才换**
+     * （docs/RELEASING.md §5），而客户端半随包更新即生效。于是存在一个真实的混版本窗口：
+     * **新客户端 + 旧宿主半**。若那时的内核回了一个旧宿主半没见过的状态，旧半按
+     * `application !== 'failed'` 会回 ok:true，客户端照原样落到「else 成功」分支——
+     * 一次没人确认过的操作被渲染成绿色成功（实测 `_verify/unknown-application-client.mjs`：
+     * 'unknown' / 'appliedd' / 数字 1 全部 ⇒ kind=success, applied=true，批量还按 applied
+     * 计成功）。服务端半收紧后这条只在混版本窗口里可达，但那正是最容易出事的窗口。
+     * 缺 application 字段仍按原样默认 applied（那是既有契约形状，不在这里改）。
+     */
+    var CHANGE_APPLICATIONS = {
+      "applied": true,
+      "restart-required": true,
+      "overridden": true,
+      "failed": true,
+      "cancelled": true
+    };
+
+    function applicationKnown(raw) {
+      return typeof raw === "string" && CHANGE_APPLICATIONS[raw] === true;
+    }
+
     function noticeFromResult(payload, kind, name) {
-      var application = payload && payload.application ? String(payload.application) : "applied";
+      var applicationRaw = payload && payload.application ? String(payload.application) : null;
+      // 只有**给了值但读不懂**才拦（没给值沿用既有的 applied 默认，不改既有形状）。
+      if (applicationRaw !== null && !applicationKnown(applicationRaw)) {
+        return { kind: "error", applied: false, text: t("notice.unknownApplication", { name: name, application: applicationRaw }) };
+      }
+      var application = applicationRaw === null ? "applied" : applicationRaw;
       var changed = !payload || payload.changed !== false;
       var warnings = payload && payload.warnings && payload.warnings.length ? payload.warnings.join("；") : "";
       // 热挂载的结果**优先于** application 那条默认文案。原因：宿主回 restart-required 是
@@ -3163,7 +3194,13 @@ function errorCopy(error) {
      * 安装/卸载早就走 noticeFromResult 处理这两种情况，开关是唯一漏掉的两处。
      */
     function toggleNotice(payload, name, next) {
-      var application = payload && payload.application ? String(payload.application) : "applied";
+      var applicationRaw = payload && payload.application ? String(payload.application) : null;
+      // 与 noticeFromResult 同一条规矩：给了值但读不懂 ⇒ 不能说「已启用/已停用」。
+      // 开关的 applied 直接决定回执行不行、批量计成功还是失败，谎报比报错更糟。
+      if (applicationRaw !== null && !applicationKnown(applicationRaw)) {
+        return { kind: "error", applied: false, text: t("notice.unknownApplication", { name: name, application: applicationRaw }) };
+      }
+      var application = applicationRaw === null ? "applied" : applicationRaw;
       var changed = !payload || payload.changed !== false;
       var successText = next ? t("notice.toggleEnabled", { name: name }) : t("notice.toggleDisabled", { name: name });
       if (application === "cancelled") {

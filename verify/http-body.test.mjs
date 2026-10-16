@@ -130,6 +130,27 @@ await check('Content-Length **撒谎**（声称 10 字节、实际 20 MiB）⇒ 
 
 console.log('\n[3] 正常载荷与模式')
 
+await check('text 模式剥掉开头 UTF-8 BOM（与 response.text() 的规范行为一致）', async () => {
+  // 这不是可有可无的糖：`response.text()` 按 fetch 规范会剥 BOM，而 `catalog.js` 的
+  // URL 源直接 `JSON.parse(body)`。我把那条 text() 换成有界读取后若不剥 BOM，
+  // 一个带 BOM 的 plugins.json 就会从"能用"变成"该源失败"——**我自己引入的回归**。
+  // （REPORT.md:808 记的正是这个差异：npm 路要显式 trimStart，URL 路靠 fetch 剥掉。）
+  const bom = Buffer.from([0xef, 0xbb, 0xbf])
+  const body = Buffer.concat([bom, Buffer.from('{"count":0,"plugins":[]}', 'utf8')])
+  const out = await readBoundedBody(streamResponse([body], body.length), { maxBytes: MiB, mode: 'text' })
+  assert.equal(out.ok, true)
+  assert.equal(out.value.charCodeAt(0), 0x7b, 'BOM 必须被剥掉，首个字符应是 {')
+  assert.deepEqual(JSON.parse(out.value).plugins, [])
+})
+
+await check('bytes 模式**不动**字节（integrity 校验的是原始字节）', async () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf])
+  const body = Buffer.concat([bom, Buffer.from('x')])
+  const out = await readBoundedBody(streamResponse([body], body.length), { maxBytes: MiB, mode: 'bytes' })
+  assert.equal(out.ok, true)
+  assert.deepEqual([...out.value], [...body], 'bytes 模式保留 BOM 原样')
+})
+
 await check('上限内的文本正文完整返回', async () => {
   const out = await readBoundedBody(streamResponse(['{"a"', ':1}'], null), { maxBytes: MiB, mode: 'text' })
   assert.equal(out.ok, true)
@@ -220,6 +241,17 @@ await check('所有源都超限且**无**缓存 ⇒ 返回错误而不是 plugin
   assert.equal(out.code, 'catalog-unavailable')
   assert.match(out.hint, /上限/, `hint 里要能看出是超限，实际：${out.hint}`)
   assert.ok(Array.isArray(out.attempts) && out.attempts.length === 1, 'attempts 要逐源保留')
+})
+
+await check('带 BOM 的目录经 URL 源整条路可用（回归点：这条以前靠 response.text() 代劳）', async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(VALID_CATALOG, 'utf8')])
+  const cache = createCatalogCache({
+    sources: [urlSource('https://bom.example/plugins.json')],
+    fetch: async () => streamResponse([bom], bom.length)
+  })
+  const out = await cache.ensure()
+  assert.equal(out.ok, true, `带 BOM 的目录必须仍可用：${JSON.stringify(out.hint ?? out)}`)
+  assert.equal(out.cache.count, 2)
 })
 
 const total = passed + failures.length

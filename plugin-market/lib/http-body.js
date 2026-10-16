@@ -97,7 +97,15 @@ export async function readBoundedBody(response, options = {}) {
       chunks.push(piece)
     }
     const joined = Buffer.concat(chunks, total)
-    return { ok: true, bytes: total, value: wantBytes ? joined : joined.toString('utf8') }
+    // text 模式剥掉**开头**的 UTF-8 BOM：`response.text()` 按 fetch 规范会剥掉它，
+    // 而 catalog.js 的 URL 源是直接 `JSON.parse(正文)`——不剥就等于我把一条原本能用的
+    // 路径改成失败（npm 那条本来就有显式 trimStart，URL 这条一直靠 fetch 代劳）。
+    // bytes 模式**绝不动字节**：dist.integrity / sha256 校验的是原始字节。
+    if (wantBytes) return { ok: true, bytes: total, value: joined }
+    const text = joined.length >= 3 && joined[0] === 0xef && joined[1] === 0xbb && joined[2] === 0xbf
+      ? joined.toString('utf8', 3)
+      : joined.toString('utf8')
+    return { ok: true, bytes: total, value: text }
   }
 
   // ③ 降级分支（没有可读流的响应替身）：无法在分配前设限，只能拒收超限正文。
@@ -112,11 +120,14 @@ export async function readBoundedBody(response, options = {}) {
       return { ok: true, bytes: bytes.length, value: bytes }
     }
     if (typeof response?.text !== 'function') return { ok: false, kind: 'read-failed', reason: '响应不支持文本读取' }
-    const text = await response.text()
+    let text = await response.text()
     const size = Buffer.byteLength(text)
     if (size > maxBytes) {
       return { ok: false, kind: 'too-large', reason: `响应体 ${size} 字节，超过上限 ${maxBytes} 字节` }
     }
+    // 与主分支同语义：真实 fetch 的 text() 自己会剥 BOM，替身不会——这里统一剥一次，
+    // 幂等（已经剥过的再判一次不成立）。
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
     return { ok: true, bytes: size, value: text }
   } catch (error) {
     return { ok: false, kind: 'read-failed', reason: `读取响应体失败：${error?.message ?? error}` }

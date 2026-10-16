@@ -69,8 +69,39 @@ const INJECTED_INSTALLED = {
       enabled: true,
       market: true,
     },
+    // [17] 用：三种「结构上做不到」的包，用来验「不可以的项目就隐藏控件」。
+    // 全部**不给 latest/updateAvailable**：这一组测的是开关与卸载，不该混进更新按钮的断言。
+    {
+      name: '@fixture/managed-by-host',
+      version: '2.0.0',
+      description: '宿主基础设施托管。',
+      rows: [{ rowId: 'row-d' }],
+      enabled: true,
+      readOnlyReason: 'management-required',
+    },
+    {
+      name: '@fixture/not-removable',
+      version: '2.1.0',
+      description: '宿主说这个包不可移除。',
+      rows: [{ rowId: 'row-e' }],
+      enabled: true,
+      removable: false,
+    },
+    {
+      name: '@fixture/no-entry-id',
+      version: '2.2.0',
+      description: '条目缺 entryId，开关点了也不会做事。',
+      // 关键：rowId 有、entryId 没有。toggleEntry 用 entryId 发请求，缺它就是假开关。
+      rows: [{ rowId: 'row-f' }],
+      enabled: true,
+    },
   ],
-  plugins: [],
+  plugins: [
+    // 让 @fixture/no-entry-id 的详情里出现一个**缺 entryId** 的条目。
+    // `bundle` 必须显式给：真实宿主由 projectPlugin 反查填上（rowId/moduleName → 包名），
+    // 而这里是注入的响应，不填的话 entriesForBundle 匹配不上、条目不会挂到那一行上。
+    { entryId: null, moduleName: '@fixture/no-entry-id', bundle: '@fixture/no-entry-id', enabled: true, fiberPhase: 'active' },
+  ],
 }
 
 const browser = await launchBrowser({ width: 1560, height: 980 })
@@ -82,6 +113,12 @@ let manualUpdateProbe = false
 let buildApprovalProbe = false
 /** [11] 专用：非 null 时 /status 会带上这个 pendingRestart（模拟「宿主进程仍然记得待重启」）。 */
 let statusProbe = null
+/**
+ * [17] 专用：开启后 /status 报 `manager.available=false`（宿主没有 pluginManager）。
+ * 用来验「全局只读时绝不隐藏任何卡片」那条豁免——`readOnly=true` 时每个包都"不可操作"，
+ * 按字面规则会把整页藏空，而那时页面唯一的价值就是「装了什么」这份清单。
+ */
+let noManagerProbe = false
 /**
  * [14] 专用：开启后拦截 /catalog 返回**确定性多页目录**。
  * 底栏那条断言要求页数 > 1 才有翻页按钮；真实目录虽然有 189 页，但那是网络给的，
@@ -154,15 +191,20 @@ try {
     let payload = INJECTED_INSTALLED
     let delay = 0
     if (isStatus) {
-      // [11]：只在探针开启时改写 /status —— 注入「宿主仍然记得待重启」。
-      // 它模拟的正是**刷新页面**那条路径：页面没有任何写操作，横幅只能靠水合出现。
-      if (statusProbe !== null) {
+      // 两种改写 /status 的探针，合一处理：
+      //   [11] statusProbe 非 null ⇒ 注入「宿主仍然记得待重启」；
+      //   [17] noManagerProbe ⇒ 注入 manager.available=false（宿主没有 pluginManager）。
+      // 后者是给「全局只读时绝不隐藏任何卡片」那条豁免用的：`readOnly` 来自 /status
+      // （挂载时读一次），而 /installed 是**另一个请求**——所以"status 说没有管理器、
+      // list 仍回得来内容"是真实可构造的形状（本仓库 index.js 自己就写着
+      // 「宿主服务可能比本插件晚注册」）。没有这个形状，那条豁免就永远测不到。
+      if (statusProbe !== null || noManagerProbe) {
         const body = Buffer.from(
           JSON.stringify({
             ok: true,
             plugin: { name: 'deepseek-harness-market', version: '1.1.6' },
             host: { dsh: null, node: 'v0.0.0', platform: 'win32', profile: 'marketcheck' },
-            manager: { available: true, registries: null },
+            manager: { available: noManagerProbe ? false : true, registries: null },
             // 桌面壳：一键重启不可用（横幅只留说明，不给按钮）——与真实桌面一致。
             restart: { available: false },
             pendingRestart: statusProbe,
@@ -1585,6 +1627,262 @@ try {
   )
   await screenshot(client, join(shotDir, 'market-back-to-top.png'))
   console.log(`  · 截图：${join(shotDir, 'market-back-to-top.png')}`)
+
+  // ── [16] 点「下一页」自动回到列表顶部（用户要求）─────────────────────────
+  // 为什么只给翻页做、而不给搜索/排序/分类做：分页器长在列表**最底部**，点完「下一页」
+  // 时用户正看着新页的**末尾**，最想看的第一条在屏幕外上方；而搜索/排序/分类的控件在
+  // **顶部**——能点到它们就说明人已经在顶部了，再滚一次是白做。
+  // 所以这条测的是「在底部点下一页 ⇒ 回到顶部」，并且**页码真的变了**（否则滚到 0
+  // 也可能只是因为它压根没翻页）。
+  console.log('\n[16] 点「下一页」自动回顶')
+  try {
+    const paging = await evaluate(
+      client,
+      `(async () => {
+         const root = document.querySelector('.dshpm-root');
+         const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+         const summaryText = () => {
+           const s = document.querySelector('.dshpm-listSummary');
+           return s ? (s.textContent || '').trim() : '';
+         };
+         // 先把上一段留在「回到顶部」的位置复位，并确保处于第 1 页。
+         root.scrollTop = 0; await sleep(300);
+         // 滚到底：分页器进视口（用户真实的操作姿势）
+         root.scrollTop = root.scrollHeight; await sleep(400);
+         const before = { scrollTop: root.scrollTop, summary: summaryText() };
+         const nextBtn = [...document.querySelectorAll('.dshpm-pager button')]
+           .find(b => /下一页|Next/.test(b.textContent || ''));
+         if (!nextBtn) return { ok: false, why: 'no next button', before };
+         const disabled = nextBtn.disabled === true;
+         if (disabled) return { ok: false, why: 'next disabled', before };
+         nextBtn.click();
+         await sleep(1500);
+         const after = { scrollTop: root.scrollTop, summary: summaryText() };
+         // 顶部必须是**真的列表顶部**：头部（标题/搜索）应该回到视口内。
+         const head = document.querySelector('.dshpm-header');
+         const headTop = head ? Math.round(head.getBoundingClientRect().top) : null;
+         const rootTop = Math.round(root.getBoundingClientRect().top);
+         return {
+           ok: true, before, after,
+           scrolledToTop: after.scrollTop === 0,
+           pageChanged: before.summary !== after.summary,
+           headerVisibleNearTop: headTop !== null && (headTop - rootTop) < 200,
+         };
+       })()`,
+    )
+    expect(
+      '分页器就在底部（前置条件：点它时确实离家很远）',
+      paging?.ok === true && Number(paging?.before?.scrollTop) > 400,
+      JSON.stringify(paging),
+    )
+    expect(
+      '点「下一页」后滚动位置真的回到 0（不用自己往回滚一整页）',
+      paging?.scrolledToTop === true,
+      JSON.stringify({ before: paging?.before, after: paging?.after }),
+    )
+    expect(
+      '点「下一页」真的换了页（不是「滚到 0 但没翻页」）',
+      paging?.pageChanged === true,
+      JSON.stringify({ before: paging?.before?.summary, after: paging?.after?.summary }),
+    )
+    expect(
+      '回到顶部后列表头部（标题/搜索）在视口内，而不只是 scrollTop 数值归零',
+      paging?.headerVisibleNearTop === true,
+      JSON.stringify({ headerVisibleNearTop: paging?.headerVisibleNearTop }),
+    )
+    await screenshot(client, join(shotDir, 'market-pager-back-to-top.png'))
+    console.log(`  · 截图：${join(shotDir, 'market-pager-back-to-top.png')}`)
+    // 把量到的原始数值也打出来：失败时它就是证据，成功时它能证明这些数字**不是**恒真
+    // （例如 scrollTop 真的从 1500+ 变成 0、摘要真的从「第 1/189 页」变成「第 2/189 页」）。
+    console.log(`  · 实测：scrollTop ${paging?.before?.scrollTop} → ${paging?.after?.scrollTop}`
+      + `；摘要「${paging?.before?.summary}」→「${paging?.after?.summary}」`
+      + `；头部离容器顶 ${paging?.headerVisibleNearTop} = true`)
+  } catch (error) {
+    expect('[16] 点「下一页」回顶 未抛异常', false, error.message)
+  }
+
+  // ── [17] 「已安装」页：结构上做不到的开关/卸载应当**不渲染** ───────────────
+  // 用户要求：「隐藏已安装下的 开关或卸载 不可以的项目」。
+  // 这一组用注入的 /installed 造出四种包，逐个断言"该隐藏的没渲染、该在的还在"——
+  // 光断言"某个按钮 disabled"是不够的：用户要的是**它不出现**。
+  //
+  // 反向对照同样重要：普通包必须**仍然**有开关和卸载。只测"隐藏"的话，
+  // 把整行按钮全删掉也能全绿——那是把功能做没了还能过的测试。
+  console.log('\n[17] 已安装页：不可以的开关/卸载不渲染')
+  try {
+    await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
+    // 注入 6 个包，其中 @fixture/managed-by-host 会被**整卡藏掉**（见 v1.3.0 的
+    // shouldHideInstalledCard），所以实际渲染 5 行。这里等的是"注入已生效"，
+    // 不是"6 行都在"——写 >=6 会永远等不到（第一版就是这么假红的）。
+    await waitFor(client, `document.querySelectorAll('.dshpm-row').length >= 5`, 8000, '[17] 已安装页渲染出注入的包')
+
+    const caps = await evaluate(
+      client,
+      `(() => {
+         const rows = Array.from(document.querySelectorAll('.dshpm-row'));
+         const find = (name) => rows.find(r => {
+           const n = r.querySelector('.dshpm-rowName');
+           return n && n.textContent.trim() === name;
+         });
+         const describe = (name) => {
+           const row = find(name);
+           if (!row) return null;
+           const actions = row.querySelector('.dshpm-rowActions');
+           return {
+             switches: actions ? actions.querySelectorAll('.dshpm-switch').length : -1,
+             buttons: actions ? Array.from(actions.querySelectorAll('button')).map(b => b.textContent.trim()) : [],
+             // **所有** .dshpm-rowMeta，不是第一个：说明文字是**另一个** rowMeta 节点
+             // （第一行放装载行数，第二行放"为什么这个动作被隐藏"）。
+             // 只取 querySelector 会读到第一行，于是这条断言永远看不到原因——第一版就是这样假红的。
+             meta: Array.from(row.querySelectorAll('.dshpm-rowMeta')).map(n => n.textContent.trim()).join(' | '),
+           };
+         };
+         return {
+           normal: describe('@fixture/needs-update'),
+           managed: describe('@fixture/managed-by-host'),
+           notRemovable: describe('@fixture/not-removable'),
+           noEntryId: describe('@fixture/no-entry-id'),
+           market: describe('deepseek-harness-market'),
+         };
+       })()`,
+    )
+
+    // ① 普通包：开关 + 卸载都必须**在**（否则"隐藏"就是把功能删了）
+    expect(
+      '普通包仍然有开关和卸载（反向对照：不能把按钮全删了还叫通过）',
+      caps?.normal?.switches === 1
+        && caps.normal.buttons.some((b) => /卸载|Uninstall/.test(b)),
+      JSON.stringify(caps?.normal),
+    )
+    // ② 宿主托管：开关与卸载都做不到 ⇒ **整张卡片都不渲染**（v1.3.0 用户要求）
+    expect(
+      '宿主基础设施托管的包：整张卡片都不渲染（开关与卸载都做不到）',
+      caps?.managed === null,
+      JSON.stringify(caps?.managed),
+    )
+    // ③ 不可移除：卡片**必须还在**（它还能开关）。这条是"别隐藏过头"的守门人：
+    //    只测"该藏的藏了"的话，把所有卡片都藏掉也能全绿。
+    expect(
+      '宿主说不可移除的包：卡片仍在、开关仍在、只有卸载不渲染（三者是不同能力）',
+      caps?.notRemovable !== null
+        && caps.notRemovable.switches === 1
+        && !caps.notRemovable.buttons.some((b) => /卸载|Uninstall/.test(b)),
+      JSON.stringify(caps?.notRemovable),
+    )
+    // ④ 市场自身：卡片**仍在**（能开关），只有卸载不在
+    expect(
+      '市场自己那一行：卡片仍在、卸载不渲染（市场不能卸载自己，但它能被停用）',
+      caps?.market !== null
+        && caps.market.switches === 1
+        && !caps.market.buttons.some((b) => /卸载|Uninstall/.test(b)),
+      JSON.stringify(caps?.market),
+    )
+    // ⑤ 隐藏了动作就必须**在同一行说明原因**——否则用户只看到"东西不见了"
+    expect(
+      '被隐藏的动作在同一行给出原因（不能只是「按钮没了」）',
+      /不能卸载自己|市场不能卸载自己/.test(String(caps?.market?.meta))
+        && String(caps?.notRemovable?.meta).length > 0,
+      JSON.stringify({ marketMeta: caps?.market?.meta, notRemovableMeta: caps?.notRemovable?.meta }),
+    )
+    // ⑥ 藏了卡片，摘要的数字就**必须等于实际渲染的行数**。这才是不变量：
+    //    只断言"摘要里出现了'已隐藏'字样"是不够的——那句话与计数是两个独立的表达式，
+    //    把计数改回 bundles.length 时那句话照样在，断言会漏（变异体 V4 就是这么活的）。
+    //    所以直接拿"摘要里的数字"和"DOM 里的行数"比。
+    const counts = await evaluate(
+      client,
+      `(() => {
+         const s = document.querySelector('.dshpm-summary');
+         const text = s ? s.textContent.trim() : '';
+         // 「共 N 个插件」/「N plugins」：抓第一段数字
+         const m = text.match(/(\\d+)/);
+         return { text, summaryCount: m ? Number(m[1]) : null, rows: document.querySelectorAll('.dshpm-row').length };
+       })()`,
+    )
+    expect(
+      '摘要里的数字等于实际渲染的行数（藏了卡片就不能再说总数）',
+      counts?.summaryCount !== null && counts.summaryCount === counts.rows,
+      JSON.stringify(counts),
+    )
+    expect(
+      '摘要如实说明有卡片被隐藏（差额写在明面上）',
+      /已隐藏|hidden/.test(String(counts?.text)),
+      JSON.stringify({ summary: counts?.text }),
+    )
+    console.log(`  · 实测：普通 switches=${caps?.normal?.switches} 按钮=${JSON.stringify(caps?.normal?.buttons)}`)
+    console.log(`          托管 整卡是否渲染=${caps?.managed !== null}（期望 false）`)
+    console.log(`          不可移除 switches=${caps?.notRemovable?.switches} 按钮=${JSON.stringify(caps?.notRemovable?.buttons)}`)
+    console.log(`          市场自身 switches=${caps?.market?.switches} 按钮=${JSON.stringify(caps?.market?.buttons)}`)
+    console.log(`          摘要=「${counts?.text}」，数字 ${counts?.summaryCount} vs 行数 ${counts?.rows}`)
+    await screenshot(client, join(shotDir, 'market-installed-hidden-actions.png'))
+    console.log(`  · 截图：${join(shotDir, 'market-installed-hidden-actions.png')}`)
+  } catch (error) {
+    expect('[17] 已安装页隐藏不可以的动作 未抛异常', false, error.message)
+  }
+
+  // ── [18] 全局只读（宿主没有 pluginManager）时**绝不隐藏任何卡片** ──────────
+  // 守的是 shouldHideInstalledCard 的第一行豁免。没有它的话，`readOnly=true` 让每个包
+  // 都"不可操作"，按字面规则会把整页藏空——而那种情况下页面**唯一还有价值的东西**
+  // 就是「这个 profile 装了什么」这份清单。
+  //
+  // 为什么必须单独构造：正常路径下拿不到这个形状（`/installed` 在宿主真没有管理器时
+  // 自己返回空列表，界面到不了过滤器）。这里用探针让 /status 说"没有管理器"、
+  // 而 /installed 仍回内容——对应真实世界里"状态是早先读到的、列表是之后拉到的"
+  // （本仓库 index.js 自己就写着「宿主服务可能比本插件晚注册」）。
+  console.log('\n[18] 全局只读时不隐藏卡片（豁免真的生效）')
+  try {
+    noManagerProbe = true
+    await client.send('Page.navigate', { url: authUrl })
+    // 重载后**必须先点侧边栏入口**面板才会挂载：`.dshpm-root` 不是默认就存在的
+    // （第一版直接等它，于是永远等不到、超时假红）。顺序与本文件其它重载段落一致：
+    // 等入口 → 关掉壳的配置对话框 → 点入口 → 再等面板。
+    await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '[18] 重载后的侧边栏入口')
+    await evaluate(client, dismissApiDialog)
+    await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
+    await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '[18] 面板挂载')
+    // 全局只读时市场顶部会亮「只能浏览」的横幅——先确认探针真的生效了，
+    // 否则下面的断言可能在测一个根本没进入只读态的场景（假绿）。
+    await waitFor(client, `!!document.querySelector('.dshpm-banner')`, 15000, '[18] 只读横幅出现')
+    await evaluate(client, `Array.from(document.querySelectorAll('.dshpm-tab')).find(b => /已安装|Installed/.test(b.textContent)).click(); true`)
+    await waitFor(client, `document.querySelectorAll('.dshpm-row').length >= 5`, 15000, '[18] 已安装页渲染出注入的包')
+
+    const readOnlyView = await evaluate(
+      client,
+      `(() => {
+         const rows = document.querySelectorAll('.dshpm-row');
+         const names = Array.from(rows).map(r => {
+           const n = r.querySelector('.dshpm-rowName');
+           return n ? n.textContent.trim() : '';
+         });
+         const switches = document.querySelectorAll('.dshpm-row .dshpm-switch').length;
+         const s = document.querySelector('.dshpm-summary');
+         return { rows: rows.length, names, switches, summary: s ? s.textContent.trim() : '' };
+       })()`,
+    )
+    // 注入 6 个包；正常态下托管那个被藏（→5 行）。只读态**一个都不该藏**（→6 行）。
+    expect(
+      '宿主没有 pluginManager 时，被宿主托管的卡片也照常渲染（豁免生效，没有整页藏空）',
+      readOnlyView?.rows === 6,
+      JSON.stringify(readOnlyView),
+    )
+    expect(
+      '只读态下并没有凭空多出可点的开关（豁免只是"显示"，不是"解锁"）',
+      readOnlyView?.switches === 0,
+      JSON.stringify({ switches: readOnlyView?.switches }),
+    )
+    console.log(`  · 实测：只读态渲染 ${readOnlyView?.rows} 行（正常态 5 行）、开关 ${readOnlyView?.switches} 个`)
+    console.log(`          摘要=「${readOnlyView?.summary}」`)
+    await screenshot(client, join(shotDir, 'market-installed-readonly-no-hide.png'))
+    noManagerProbe = false
+    // 还原成正常态，别把只读探针留给后面的断言（同样要走"等入口 → 点入口"这套）。
+    await client.send('Page.navigate', { url: authUrl })
+    await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '[18] 还原：侧边栏入口')
+    await evaluate(client, dismissApiDialog)
+    await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
+    await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '[18] 还原：面板挂载')
+  } catch (error) {
+    noManagerProbe = false
+    expect('[18] 全局只读豁免 未抛异常', false, error.message)
+  }
 } catch (error) {
   expect('测试执行未抛异常', false, error.message)
 } finally {

@@ -128,6 +128,9 @@ window.__ModuleLoader__.load({
         "badge.official": "官方",
         "badge.market": "本插件",
         "badge.disabled": "已停用",
+        // v1.3.0：包级开关被隐藏时（宿主托管/不可操作），行内只报状态、不给控件。
+        // 有「已停用」就得有「已启用」，否则启用态那半没有词可用。
+        "badge.enabled": "已启用",
         "badge.update": "有更新",
         "badge.error": "装载失败",
         "fiber.pending": "等待装载",
@@ -143,6 +146,11 @@ window.__ModuleLoader__.load({
         // 当成「没有原因」→ 开关被解锁，但宿主其实会 400 拒绝（v1.2.0 补）。
         "readonlyReason.not-removable": "这个包不允许卸载，市场不能操作它",
         "installed.noEntryId": "宿主没给出这个条目的 id，无法在这里开关",
+        // v1.3.0：整卡不渲染（开关和卸载都做不到）时的两句话。
+        // 「一个都没剩」与「部分被藏」必须分开说——前者不是"没装插件"，是"这页没有可操作的项"。
+        "installed.hiddenCount": "（另有 {count} 个已隐藏：它们既不能开关也不能卸载）",
+        "installed.allHidden.title": "这一页没有可操作的插件",
+        "installed.allHidden.body": "这个 profile 装了 {count} 个插件，但它们既不能在这里开关、也不能在这里卸载（由宿主基础设施管理或无法定位），所以市场不显示它们。要看清单请在终端执行 dsh plugin list。",
         "updates.staleFailure": "下面这份列表是上次读到的，这次读取失败：{reason}",
         "pending.title": "该插件需要执行构建脚本",
         "pending.body": "安装 {name} 前，包管理器要执行这些构建脚本：{builds}。它们会在你的机器上运行。确认后市场会带着你的批准重新提交安装。",
@@ -307,6 +315,8 @@ window.__ModuleLoader__.load({
         // 以前一律写「已安装 {name}」——而宿主说 applied 也可能是「装进了 node_modules，
         // 但 profile 的 bundle 列表里从来没有它」，用户看到绿色回执、插件却永远不出现。
         "notice.installLive": "已安装 {name}，并已在运行。",
+        "notice.installHotMounted": "已安装 {name}，并已挂进正在运行的 DSH——不用重启。",
+        "notice.installHotMountFailed": "已安装 {name}，但没能热挂载（{reason}）——重启 DSH 后生效。",
         "notice.installLiveMismatch": "已安装 {name}，但它实际是 v{installed}（目录里写的是 v{expected}）——可能源同步滞后，重启后再确认。",
         "notice.installInert": "装完了，但 {name} 没有出现在插件的装载列表里：它可能不是一个 bundle 包（只是普通 npm 包装上了）。",
         "notice.installBroken": "{name} 装上了，但宿主报告它装载失败。展开它看服务端说明，或先停用再排查。",
@@ -322,6 +332,15 @@ window.__ModuleLoader__.load({
         "restart.bannerTitle": "有改动待重启生效",
         "restart.bannerBody": "更新（插件或市场自更新）已经把新代码写到磁盘，但宿主进程还在跑旧代码。点「重启 DSH」让新代码生效。",
         "restart.manualBody": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。桌面版不能用一键重启（壳持有应用的单实例锁，从这里拉起的进程会被挡下）：请关掉应用窗口再打开，新代码就会生效。",
+        // v1.3.0：一键重启「为什么不可用」有四种原因，**下一步动作各不相同**。
+        // 合成一句话会让用户去试一个不可能成功的办法——systemd 下让人「关窗重开」
+        // 是毫无意义的（没有窗口），调试器下让人「重装」更是在绕远路。
+        // 宿主半的 restart.reason 给出是哪一种；认不出来时回落到 restart.manualBody。
+        "restart.manualBody.desktop": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。桌面版不能用一键重启——壳持有应用的单实例锁，从这里拉起的替代进程会被锁挡下并静默退出，结果是应用整个关掉且不会自己回来。请关掉应用窗口再打开，新代码就会生效。",
+        "restart.manualBody.systemd": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。当前宿主是 systemd 服务，不能用一键重启——systemd 默认 KillMode=control-group，会连重启助手一起清掉，服务被杀后不会自己起来。请用 systemctl restart <服务名> 重启。",
+        "restart.manualBody.inspector": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。当前宿主正被调试器附着（--inspect），一键重启会打断调试会话，所以这里不提供。断开调试器后按钮会自动回来，或手动重启 DSH。",
+        "restart.manualBody.disabled": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。当前 profile 显式关掉了允许重启（config 下的 allowRestart: false）。改回 true 或删掉它并重启 DSH 后，按钮会回来；现在请手动重启 DSH。",
+        "restart.manualBody.unreachable": "更新已经把新代码写到磁盘，但宿主进程还在跑旧代码。一键重启只接受本机页面直接发起的请求，而当前请求经过了反向代理（宿主的 restart 判定说这个来源过不了围墙）。请用部署工具自己的方式重启，或直接在本机打开 DSH 页面再点「重启 DSH」。",
         "restart.title": "立刻重启 DSH：正在流式输出的回复会被截断；桌面上应用窗口会重新打开。",
         "restart.busy": "有写操作正在进行（安装 / 更新 / 开关），等它结束再重启——否则那一次改动可能只落了一半。",
         "action.restart": "重启 DSH",
@@ -436,6 +455,7 @@ window.__ModuleLoader__.load({
         "badge.official": "Official",
         "badge.market": "This plugin",
         "badge.disabled": "Disabled",
+        "badge.enabled": "Enabled",
         "badge.update": "Update available",
         "badge.error": "Load failed",
         "fiber.pending": "Pending",
@@ -448,6 +468,9 @@ window.__ModuleLoader__.load({
         "readonlyReason.unaddressable": "The host cannot address this package, so the market cannot change it",
         "readonlyReason.not-removable": "This package cannot be removed, so the market cannot change it",
         "installed.noEntryId": "The host did not provide an id for this entry, so it cannot be toggled here",
+        "installed.hiddenCount": "({count} more hidden: they can be neither toggled nor removed)",
+        "installed.allHidden.title": "No actionable plugins on this tab",
+        "installed.allHidden.body": "This profile has {count} plugins, but none of them can be toggled or removed here (they are managed by host infrastructure or cannot be located), so the market does not list them. Run dsh plugin list in a terminal to see them.",
         "updates.staleFailure": "This list was read earlier; the latest read failed: {reason}",
         "pending.title": "This plugin needs install scripts",
         "pending.body": "Before installing {name}, the package manager wants to run these install scripts: {builds}. They run on your machine. Approve to resubmit the install with your approval.",
@@ -609,6 +632,8 @@ window.__ModuleLoader__.load({
         "notice.updateAllNone": "Nothing to update.",
         "notice.installBusy": "{name} is already installing/updating; skipped.",
         "notice.installLive": "Installed {name}, and it is running.",
+        "notice.installHotMounted": "Installed {name} and mounted it into the running DSH — no restart needed.",
+        "notice.installHotMountFailed": "Installed {name}, but it could not be hot-mounted ({reason}) — restart DSH to apply.",
         "notice.installLiveMismatch": "Installed {name}, but what landed is v{installed} (the catalog said v{expected}) — the source may be lagging; recheck after a restart.",
         "notice.installInert": "The install finished, but {name} never appeared in the plugin load list: it may not be a bundle package (a plain npm package got installed).",
         "notice.installBroken": "{name} was installed, but the host reports it failed to load. Expand it for the server detail, or disable it and investigate first.",
@@ -623,7 +648,16 @@ window.__ModuleLoader__.load({
         "notice.restartTimeout": "The host has not come back yet: refresh the page to check, or restart DSH yourself.",
         "restart.bannerTitle": "Changes pending a restart",
         "restart.bannerBody": "An update (a plugin or the market itself) has written the new code to disk, but the host process is still running the old code. Restart DSH to apply it.",
-        "restart.manualBody": "The update has written the new code to disk, but the host process is still running the old code. One-click restart is unavailable in the desktop app (the shell holds the app's single-instance lock, so a process launched from here would be refused): close the app window and open it again to apply the new code.",
+        "restart.manualBody": "The update has written the new code to disk, but the host process is still running the old code. One-click restart is unavailable in this environment. Close and reopen the app, or restart DSH yourself, to apply the new code.",
+        // v1.3.0: "one-click restart is unavailable" has four distinct causes, and the
+        // next step differs for each — collapsing them into one sentence sends the user
+        // to try something that cannot work (there is no window to close under systemd).
+        // The host half reports which one via `restart.reason`.
+        "restart.manualBody.desktop": "The update has written the new code to disk, but the host process is still running the old code. One-click restart is unavailable in the desktop app: the shell holds the app's single-instance lock, so a replacement launched from here is refused and exits silently — leaving the whole app closed with nothing to bring it back. Close the app window and open it again to apply the new code.",
+        "restart.manualBody.systemd": "The update has written the new code to disk, but the host process is still running the old code. This host is a systemd service, so one-click restart is unavailable: systemd's default KillMode=control-group takes the restart helper down with the unit, and the service does not come back. Restart it with systemctl restart <unit>.",
+        "restart.manualBody.inspector": "The update has written the new code to disk, but the host process is still running the old code. A debugger is attached (--inspect), and a one-click restart would cut the debug session, so the button is not offered. Detach the debugger and the button returns, or restart DSH manually.",
+        "restart.manualBody.disabled": "The update has written the new code to disk, but the host process is still running the old code. This profile explicitly disabled restart (allowRestart: false under config). Set it back to true or remove it and restart DSH to get the button back; for now, restart DSH manually.",
+        "restart.manualBody.unreachable": "The update has written the new code to disk, but the host process is still running the old code. One-click restart only accepts requests made directly from a local page, and this request came through a reverse proxy. Restart with your deployment tooling, or open the DSH page on this machine and press Restart DSH there.",
         "restart.title": "Restart DSH right now: replies still streaming will be cut off, and the desktop app reopens its window.",
         "restart.busy": "A write is in progress (install / update / toggle). Wait for it to finish before restarting — otherwise that change may only land half-way.",
         "action.restart": "Restart DSH",
@@ -1308,21 +1342,23 @@ function errorCopy(error) {
     /**
      * 把滚动容器滚回顶部。
      *
-     * 两个边界都实测过：
+     * 三个边界都实测过：
      *  · **reduced-motion 下不用平滑滚动**——用户明确要求减弱动效，滚 1600px 的
      *    动画正属于该被关掉的那类；
      *  · 容器的 `scrollTo` 可能不存在（jsdom 桩、老引擎），退回直接赋 scrollTop，
-     *    否则回顶按钮在那种环境里点了没反应。
+     *    否则回顶按钮在那种环境里点了没反应；
+     *  · `instant` 为真时**无论如何都瞬时**（翻页用，见 goToPage）。
      */
-    function scrollContainerToTop(node) {
+    function scrollContainerToTop(node, instant) {
       if (!node) return;
       var reduce = false;
       try {
         reduce = !!(typeof window !== "undefined" && window.matchMedia
           && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
       } catch (mediaError) { reduce = false; }
+      var behavior = (instant === true || reduce) ? "auto" : "smooth";
       if (typeof node.scrollTo === "function") {
-        node.scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
+        node.scrollTo({ top: 0, behavior: behavior });
       } else {
         node.scrollTop = 0;
       }
@@ -2748,21 +2784,62 @@ function errorCopy(error) {
       return matched;
     }
 
+    /**
+     * 「已安装」页：某个包在这台宿主上**哪些控件根本不该渲染**。
+     *
+     * 用户要求「隐藏已安装下的开关或卸载不可以的项目」。这里的关键是把两种"不能点"
+     * 严格分开——它们的正确处置是**相反**的：
+     *
+     *   - **结构上做不到**（宿主说这个包不能开关/不能卸载、根本没有 pluginManager、
+     *     市场自己不能卸载自己、宿主要求不可移除）⇒ **不渲染**。渲染成永远点不动的
+     *     灰按钮不是"保守"，而是在承诺一个永远不会发生的动作：用户会反复点、去猜
+     *     为什么点不动，而按钮占着位置却没有出路。
+     *   - **临时不可用**（写操作进行中、批量更新正在跑、这一条正在处理）⇒ **保留控件、只禁用**。
+     *     否则操作期间按钮时隐时现，用户会以为功能丢了——那是另一种坏，而且更吓人。
+     *     这一类**不在本函数里判**，由调用方用 `busy` / `batchRunning` 单独禁用。
+     *
+     * `notes` 是**必须补上**的说明：控件被隐藏后就没了 tooltip，若不把原因写进行内，
+     * 用户只会看到"东西不见了"——那比"东西在但点不动"更难排查。所以隐藏一个动作，
+     * 就得在同一行说清为什么。
+     *
+     * 导出**不是**刻意不做：本文件是宿主直接加载的 factory 闭包
+     * （`window.__ModuleLoader__.load({ factory })`），整个文件没有 ESM 导出，
+     * 所以这段逻辑**只能靠源码形状 + 真浏览器 e2e 来钉**（`verify/client-copy.test.mjs`
+     * 与 `market-ui.e2e.mjs` 各有一条）。写测试时别指望 import 它。
+     */
+    function installedCapabilities(bundle, readOnly) {
+      var source = bundle !== null && typeof bundle === "object" ? bundle : {};
+      // readOnlyReason 查不到文案时**当作没有原因**：这是 v1.2.0 就定下的约定——
+      // 把「查不到文案」当封锁会凭空锁住控件，而宿主那边本来会自己拒绝。
+      var reasonKey = source.readOnlyReason ? "readonlyReason." + String(source.readOnlyReason) : "";
+      var hostReason = reasonKey ? t(reasonKey) : "";
+      if (hostReason === reasonKey) hostReason = "";
+      var locked = readOnly === true || !!hostReason;
+      var marketSelf = source.market === true;
+      var notRemovable = source.removable === false;
+      var notes = [];
+      // 只在「没被宿主整体锁住」时补额外说明：那时 hostReason 已经写在行内了。
+      if (!locked) {
+        if (marketSelf) notes.push(t("installed.self"));
+        else if (notRemovable) notes.push(t("installed.notRemovable"));
+      }
+      return {
+        toggle: !locked,
+        remove: !locked && !marketSelf && !notRemovable,
+        hostReason: hostReason,
+        locked: locked,
+        notes: notes
+      };
+    }
+
     function BundleRow(props) {
       var bundle = props.bundle;
       var entries = props.entries || [];
       var rows = bundle.rows || [];
       // BundleInfo 可能带 readOnlyReason（宿主基础设施托管或无法定位）：这类包只能看，不能开关或卸载。
-      var hostReasonKey = bundle.readOnlyReason ? "readonlyReason." + String(bundle.readOnlyReason) : "";
-      var hostReason = hostReasonKey ? t(hostReasonKey) : "";
-      if (hostReason === hostReasonKey) hostReason = "";
-      var locked = props.readOnly || !!hostReason;
-      var removeDisabled = locked || bundle.removable === false || bundle.market;
-      var removeTitle = bundle.market
-        ? t("installed.self")
-        : bundle.removable === false
-          ? t("installed.notRemovable")
-          : hostReason || (props.readOnly ? t("readonly.body") : "");
+      var caps = installedCapabilities(bundle, props.readOnly);
+      var hostReason = caps.hostReason;
+      var locked = caps.locked;
       var confirm = props.confirming;
       return el("div", {
         className: "dshpm-row",
@@ -2783,17 +2860,26 @@ function errorCopy(error) {
               t("installed.rows", { count: rows.length }),
               entries.length ? " · " + t("installed.plugins") + " " + entries.length : "",
               hostReason ? " · " + hostReason : ""),
+            // 被隐藏的动作必须在**同一行**说出来。控件没了 tooltip 也没了，
+            // 只留一个"东西不见了"是最难排查的状态（用户会以为是 bug）。
+            caps.notes.length
+              ? el("div", { className: "dshpm-rowMeta" }, caps.notes.join(" · "))
+              : null,
             bundle.error
               ? el("div", { className: "dshpm-rowError" }, t("installed.rowError", { message: shortFailureText(bundle.error) || (bundle.error.code || "") }))
               : null),
           el("div", { className: "dshpm-rowActions" },
-            el(Switch, {
-              checked: bundle.enabled !== false,
-              disabled: locked || props.busy,
-              title: hostReason || (props.readOnly ? t("readonly.body") : ""),
-              label: bundle.enabled === false ? t("action.enable") + " " + bundle.name : t("action.disable") + " " + bundle.name,
-              onToggle: props.onToggle
-            }),
+            // 开关：结构上不可用时**不渲染**（见 installedCapabilities）；
+            // 只是忙就保留、禁用——否则操作期间按钮时隐时现，比灰着更让人以为功能丢了。
+            caps.toggle
+              ? el(Switch, {
+                checked: bundle.enabled !== false,
+                disabled: props.busy,
+                title: t("action.disable") + " " + bundle.name,
+                label: bundle.enabled === false ? t("action.enable") + " " + bundle.name : t("action.disable") + " " + bundle.name,
+                onToggle: props.onToggle
+              })
+              : null,
             bundle.updateAvailable && bundle.latest
               ? el("button", {
                 type: "button",
@@ -2813,13 +2899,16 @@ function errorCopy(error) {
                   props.busyKind === "remove" ? el(IconSpinner, { size: 12 }) : el(IconTrash, { size: 12 }),
                   props.busyKind === "remove" ? t("action.uninstalling") : t("action.confirmUninstall")),
                 el("button", { type: "button", className: "dshpm-btn dshpm-btn--quiet", disabled: props.busy, onClick: props.onCancelRemove }, t("action.cancel")))
-              : el("button", {
-                type: "button",
-                className: "dshpm-btn",
-                disabled: removeDisabled || props.busy,
-                title: removeTitle,
-                onClick: props.onAskRemove
-              }, el(IconTrash, { size: 12 }), t("action.uninstall")),
+              // 卸载：同样只在**结构上可以**时渲染。注意确认态（confirm）在上面那一支，
+              // 它是用户已经点过按钮的后续步骤，必须照常渲染，不能被这里挡掉。
+              : caps.remove
+                ? el("button", {
+                  type: "button",
+                  className: "dshpm-btn",
+                  disabled: props.busy,
+                  onClick: props.onAskRemove
+                }, el(IconTrash, { size: 12 }), t("action.uninstall"))
+                : null,
             el("button", {
               type: "button",
               className: "dshpm-btn dshpm-btn--quiet",
@@ -2853,22 +2942,54 @@ function errorCopy(error) {
                     // 看起来能点，点下去静默返回：没有请求、没有回执、状态也不变。
                     // 宿主允许 entryId 为空（index.js 用 optionalText）。缺 id 就不渲染开关，
                     // 改为如实说明「这个条目不能在这里开关」。
+                    //
+                    // 外层包被宿主锁住时（locked）同理：开关一样是假的，所以**只报状态、不给控件**——
+                    // 与行首那颗包级开关的处理保持一致（用户要求：不可以的项目就隐藏）。
+                    // 状态文字仍要留着，否则用户连"它是开还是关"都看不到。
                     entry.enabled === undefined ? null
-                      : entry.entryId
-                        ? el(Switch, {
-                            checked: entry.enabled !== false,
-                            disabled: locked || props.entryBusyKey === "toggle:" + entry.entryId,
-                            label: entry.enabled === false
-                              ? t("action.enable") + " " + (entry.entryId || entry.moduleName || "")
-                              : t("action.disable") + " " + (entry.entryId || entry.moduleName || ""),
-                            onToggle: function () { props.onToggleEntry(entry); }
-                          })
-                        : el("span", { className: "dshpm-rowMeta" }, t("installed.noEntryId")))
+                      : (locked || !entry.entryId)
+                        // 只报状态、不给控件。用**已有的**两个文案键，不新造：
+                        //   - 缺 entryId（宿主没给 id）⇒ installed.noEntryId 说明为什么不能开关；
+                        //   - 被宿主锁住 ⇒ badge.disabled / badge.enabled 报它是开还是关。
+                        ? el("span", { className: "dshpm-rowMeta" }, entry.entryId
+                          ? (entry.enabled === false ? t("badge.disabled") : t("badge.enabled"))
+                          : t("installed.noEntryId"))
+                        : el(Switch, {
+                          checked: entry.enabled !== false,
+                          disabled: props.entryBusyKey === "toggle:" + entry.entryId,
+                          label: entry.enabled === false
+                            ? t("action.enable") + " " + (entry.entryId || entry.moduleName || "")
+                            : t("action.disable") + " " + (entry.entryId || entry.moduleName || ""),
+                          onToggle: function () { props.onToggleEntry(entry); }
+                        }))
                 }))
                 : el("span", null, t("installed.noPlugins"))))
           )
           : null
       );
+    }
+
+    /**
+     * 这一行要不要**整张卡片都不渲染**（v1.3.0）。
+     *
+     * 判据：**开关和卸载都做不到**时才整张藏掉——那时这一行对用户没有任何可执行的动作，
+     * 留着只是占位置；而只要还有一个动作能用（例如 `removable:false` 但可以开关），
+     * 卡片就必须留着，否则会把一个**本来可用**的功能一起藏掉。
+     *
+     * **两个不能省的例外**：
+     *
+     * 1. **全局只读（宿主没有 pluginManager）→ 绝不隐藏任何卡片。**
+     *    那种情况下每个包的 `toggle`/`remove` 都不可用，按上面那条字面规则会**把整页藏空**，
+     *    而顶部已经有一条横幅解释"只能浏览"了。更要紧的是：那时页面唯一的价值就是
+     *    「这个 profile 装了什么」这份清单，藏掉它等于把仅剩的信息也扔掉，
+     *    而且摘要里的计数还会继续说谎（见下面 InstalledPane 的 hidden 处理）。
+     * 2. `installedCapabilities` 把「readOnlyReason 查不到文案」当**没有原因**（v1.2.0 的约定），
+     *    所以这里也只在**确实拿到了原因**时才认为它是结构性的。
+     */
+    function shouldHideInstalledCard(bundle, readOnly) {
+      if (readOnly === true) return false;
+      var caps = installedCapabilities(bundle, readOnly);
+      return !caps.toggle && !caps.remove;
     }
 
     function InstalledPane(props) {
@@ -2898,14 +3019,35 @@ function errorCopy(error) {
           onAction: props.onDiscover
         });
       }
+      // 整卡不渲染的用户要求（见 shouldHideInstalledCard）：先算出**这一页真正要画的**那些，
+      // 因为摘要计数与"空页"判断都得分依据**可见的**行，否则界面会自相矛盾——
+      // 「共 3 个插件」下面一行都没有，正是那种"数字在说谎"。
+      var visible = bundles.filter(function (bundle) {
+        return !shouldHideInstalledCard(bundle, props.readOnly);
+      });
+      if (!visible.length) {
+        // 全都被藏掉了：**不能回落到"空列表"**。那不是"没装东西"，是"这一页没有可操作的项"，
+        // 两者对用户的意义完全不同（一个该去发现页装，一个该去终端/别处管）。
+        return el(EmptyState, {
+          title: t("installed.allHidden.title"),
+          body: t("installed.allHidden.body", { count: bundles.length }),
+          actionLabel: t("action.goDiscover"),
+          onAction: props.onDiscover
+        });
+      }
       return el("div", { className: "dshpm-installed" },
         el("div", { className: "dshpm-summary" },
-          el("span", null, t("installed.count", { count: bundles.length })),
+          el("span", null, t("installed.count", { count: visible.length })),
+          // 藏了东西就把差额如实说出来：不说的话，"共 N 个"与列表长度对不上，
+          // 用户会以为界面漏了东西（或以为有 bug）。
+          visible.length < bundles.length
+            ? el("span", null, t("installed.hiddenCount", { count: bundles.length - visible.length }))
+            : null,
           state.phase === "loading" ? el("span", null, t("list.updating")) : null),
         state.phase === "error" && state.data
           ? el(ErrorState, { error: state.error, onRetry: props.onRetry })
           : null,
-        bundles.map(function (bundle, index) {
+        visible.map(function (bundle, index) {
           var key = bundle.name;
           return el(BundleRow, {
             key: key,
@@ -2968,8 +3110,26 @@ function errorCopy(error) {
       var application = payload && payload.application ? String(payload.application) : "applied";
       var changed = !payload || payload.changed !== false;
       var warnings = payload && payload.warnings && payload.warnings.length ? payload.warnings.join("；") : "";
+      // 热挂载的结果**优先于** application 那条默认文案。原因：宿主回 restart-required 是
+      // 它对「自己能不能热应用」的判断，而市场随后替它挂上了（见 host 半的 hot-mount.js）。
+      // 此时若照着 application 写「重启 DSH 后生效」，用户会看到一条**假的**待重启提示——
+      // 东西已经在跑了，而重启横幅也会跟着亮起来。反过来，挂载失败时必须把失败原因说出来，
+      // 否则用户只知道「要重启」，不知道市场替他试过、以及为什么没成。
+      var hotMounted = payload && payload.hotMounted === true;
+      var hotFailed = payload && payload.hotMounted === false;
       var base;
-      if (!changed && application !== "restart-required" && application !== "overridden" && application !== "cancelled") {
+      if (hotMounted && changed !== false) {
+        base = { kind: "success", applied: true, text: t("notice.installHotMounted", { name: name }) };
+      } else if (hotFailed && changed !== false) {
+        var reason = payload.hotMountReason ? String(payload.hotMountReason) : "";
+        base = {
+          kind: "warn",
+          applied: true,
+          text: reason === ""
+            ? t("notice.installRestart", { name: name })
+            : t("notice.installHotMountFailed", { name: name, reason: reason })
+        };
+      } else if (!changed && application !== "restart-required" && application !== "overridden" && application !== "cancelled") {
         base = { kind: "info", applied: false, text: t("notice.noChange") };
       } else if (application === "restart-required") {
         base = { kind: "warn", applied: true, text: kind === "remove" ? t("notice.removeRestart", { name: name }) : t("notice.installRestart", { name: name }) };
@@ -2984,9 +3144,11 @@ function errorCopy(error) {
       // 唯一例外：`changed === false`（宿主说这次什么都没改）时保留「没有产生变更」——
       // 那句本身是重要信息，用「并已在运行」盖掉就等于把「你的更新其实没落地」瞒下来了。
       // 但**版本对不上**时必须盖：那正是「说更新了、磁盘还是旧版」的那一类。
+      // 热挂载成功时也**不**覆盖：市场已经给了比 activation 更准的一句（上面那条），
+      // 再用「并已在运行」盖一遍反而丢掉了「不用重启」这个对用户最关键的信息。
       var detailed = activationNotice(payload && payload.activation, name);
       var mismatch = !!(payload && payload.activation && payload.activation.versionMatches === false);
-      if (detailed !== null && (changed !== false || mismatch)) base = detailed;
+      if (detailed !== null && !hotMounted && (changed !== false || mismatch)) base = detailed;
       if (warnings) base.text = base.text + " · " + t("notice.installWarnings", { warnings: warnings });
       return base;
     }
@@ -3267,6 +3429,39 @@ function errorCopy(error) {
       var page = pageState[0];
       var setPage = pageState[1];
 
+      // 滚动容器（.dshpm-root）的 ref。真正滚动的是**面板自己**（实测
+      // scrollHeight 1616 > clientHeight 885），不是 window——所以「回到顶部」与翻页
+      // 都要滚它。声明放在这里（而不是 return 之前）：`goToPage` 要用它，
+      // 而函数在模块级顺序上先于 return 出现更容易读。
+      var scrollRef = React.useRef(null);
+
+      /**
+       * 翻页：改页码，并**把列表滚回顶部**（用户要求）。
+       *
+       * 为什么翻页必须回顶：分页器长在列表**最底部**，所以点完「下一页」时用户正看着
+       * 新页的**末尾**——最想看的第一条在屏幕外上方，还得自己往回滚一整页。
+       * 这与搜索/排序/分类不同：那些控件在**顶部**，能点到它们就说明人已经在顶部了，
+       * 所以那些 `setPage(1)` 不需要回顶（多做反而会在用户已经置顶时白滚一次）。
+       *
+       * `instant`：翻页时用**瞬时**而不是平滑滚动。列表内容马上会被整体换掉，
+       * 在正在重排的列表上放长距离动画容易显得"打架"；而且用户要的就是「自动调转到
+       * 最顶部」，瞬时本来就是他说的那个效果。
+       *
+       * **一条实测更正**：我起初把 instant 的理由写成「异步滚动会与内容替换打架」。
+       * 用变异体把这两句**调换顺序**（先回顶再 setPage）真跑了一遍 e2e，量到的数值与基线
+       * **逐位相同**（scrollTop 526 → 0、第 1/195 页 → 第 2/195 页、头部都在视口内）
+       * ⇒ 在这条路径上**顺序无所谓**，`behavior:"auto"` 是同步的、容器节点又被 React 复用，
+       * scrollTop 不会被带回去。所以那是 **UX 取舍**，不是「避免某个已复现的 bug」；
+       * 「smooth 会打架」我没量过，不当结论用。
+       *
+       * reduced-motion 的判定在 scrollContainerToTop 里，两条路都受它管。
+       */
+      function goToPage(value) {
+        var next = value < 1 ? 1 : value;
+        setPage(next);
+        scrollContainerToTop(scrollRef.current, true);
+      }
+
       // 两个独立的重读计数器（性能）：写操作只该重读**已安装列表**，刷新目录才该重读**目录**。
       // 早先这里是一个共享 tick，三个 effect 全挂在它上面——点一次「停用/卸载」会连带触发
       // /status + /catalog + /installed 三个请求，其中前两个是浪费（status 只在启动时定下来，
@@ -3363,16 +3558,45 @@ function errorCopy(error) {
       restartAskRef.current = restartAsk;
 
       /**
-       * 宿主能不能一键重启（`/status` 的 `restart.available`）。
+       * 宿主能不能一键重启（`/status` 的 `restart.available`），以及**为什么不能**。
        *
-       * 桌面壳管理的宿主里一键重启**必然失败**且代价是「应用整个关掉、不会自己回来」
-       * （壳持有单实例锁，替代进程被挡下后静默退出 —— 见 restart.js 的完整推理）。
-       * 所以判定为不可用时：**不弹询问窗、不显示重启横幅按钮**，改为直接告诉用户
-       * 「这个改动要重启才生效，桌面版请关掉窗口再打开」。把不可能的动作摆给用户点，
-       * 比不给按钮更糟。
+       * 宿主半按部署环境判（systemd / 桌面壳 / 调试器 / 显式关闭，见 restart-policy.js），
+       * 并在 `restart.reason` 里给出是哪一种。原因不同则下一步动作不同，所以文案也分四条
+       * （`restart.manualBody.<reason>`）——把它们压成一句会让用户去试一个不可能成功的办法。
+       *
+       * 还有一条**独立**的原因：`restart.available` 为 true 但当前请求过不了围墙
+       * （`reachable === false`，例如经过反向代理）。那种情况下按钮点下去必然 403，
+       * 所以也当作"不可用"处理，文案走 `unreachable`。
+       *
        * 默认 true（读不到 /status 时保持旧行为）；只有宿主明确说 false 才降级。
        */
-      var restartAvailable = !(status.data && status.data.restart && status.data.restart.available === false);
+      var restartInfo = (status.data && status.data.restart) || null;
+      var restartAvailable = !(restartInfo && restartInfo.available === false);
+      var restartReason = restartInfo && restartInfo.reason ? String(restartInfo.reason) : null;
+      // 可点 = 宿主允许 **且** 这个来源过得了围墙。缺一条都不给按钮。
+      if (restartAvailable && restartInfo && restartInfo.reachable === false) {
+        restartAvailable = false;
+        restartReason = "unreachable";
+      }
+
+      /**
+       * 「不能一键重启」时该说的那句话。
+       *
+       * v1.3.0：原因不同则**下一步动作不同**，所以文案分四份，回落到通用的那条。
+       * 用 `t("restart.manualBody." + reason)` 这种**字面量前缀**写法，而不是自己拼
+       * `"restart.manualBody." + reason` 再交给 t()——后者静态扫描看不到这些键，
+       * 会被 verify/client-copy 的「没有僵尸文案」那条判成五个没人用的键（它真的报了）。
+       * t() 对缺失键会回键名本身，所以这里要先确认拿到的是文案而不是键名，
+       * 否则用户会看到 `restart.manualBody.systemd` 这种东西。
+       */
+      var RESTART_MANUAL_REASONS = ["desktop", "systemd", "inspector", "disabled", "unreachable"];
+      function restartManualBody() {
+        if (restartReason !== null && RESTART_MANUAL_REASONS.indexOf(restartReason) !== -1) {
+          var text = t("restart.manualBody." + restartReason);
+          if (text !== "restart.manualBody." + restartReason) return text;
+        }
+        return t("restart.manualBody");
+      }
 
       /**
        * 记一笔「这个改动要重启才生效」，并在**合适的时机**弹一次询问。
@@ -3384,6 +3608,12 @@ function errorCopy(error) {
        */
       function noteRestartFrom(payload, options) {
         if (!payload) return;
+        // 热挂载成功 = 这次改动**已经生效**（市场替宿主把新插件挂进了运行中的组合，
+        // 见 host 半的 hot-mount.js）。此时宿主虽然回的是 restart-required，但那条横幅
+        // 会说一句假话：「还有 1 项变更需重启」——东西明明在跑。
+        // 宿主半的 sendChangeResult 同样不为它记账（两边一致），这里再挡一道：
+        // 客户端的这条路径是横幅**当场**亮起的来源。
+        if (payload.hotMounted === true) return;
         var needs = payload.application === "restart-required" || payload.requiresRestart === true;
         if (!needs) return;
         var opts = options || {};
@@ -3419,10 +3649,17 @@ function errorCopy(error) {
         var names = Array.isArray(pendingRestart.names) ? pendingRestart.names : [];
         var marketVersion = pendingRestart.marketVersion ? String(pendingRestart.marketVersion) : null;
         if (names.length === 0 && marketVersion === null) return;
+        // 宿主同一份快照里的热挂载清单。宿主半已经保证这两者不会互相矛盾
+        // （热挂载成功的不进 pendingRestart，见 sendChangeResult），这里再按它滤一道：
+        // 万一两半的版本对不上（旧宿主半 + 新客户端），也不会因为一个已经在跑的插件
+        // 亮起「还有 1 项变更需重启」——横幅说假话比少说一次更坏。
+        var hot = Array.isArray(payload.hotMounts) ? payload.hotMounts.map(function (entry) { return String(entry).toLowerCase(); }) : [];
         for (var i = 0; i < names.length; i++) {
           var name = String(names[i]);
+          if (hot.indexOf(name.toLowerCase()) !== -1) continue;
           if (restartNamesRef.current.indexOf(name) === -1) restartNamesRef.current.push(name);
         }
+        if (restartNamesRef.current.length === 0 && marketVersion === null) return;
         setRestart(function (previous) {
           return { pending: true, phase: previous && previous.phase === "restarting" ? "restarting" : "idle" };
         });
@@ -4281,7 +4518,7 @@ function errorCopy(error) {
             onQueryClear: function () { resetFilters(); },
             onSort: function (value) { setSort(value); setPage(1); },
             onCategory: function (value) { setCategory(value); setPage(1); },
-            onPage: function (value) { setPage(value < 1 ? 1 : value); },
+            onPage: goToPage,
             onResetFilters: resetFilters,
             onInstall: installItem,
             onToggleDetails: toggleDetails,
@@ -4352,9 +4589,7 @@ function errorCopy(error) {
       // `job` 只覆盖单个写操作，「一键更新」每一步之间 job 会短暂为空，所以要并上 batch。
       var writeInFlight = !!job || !!(batch && batch.running);
 
-      // 滚动容器（.dshpm-root）的 ref：「回到顶部」要滚的是它，而不是 window——
-      // 真正滚动的是面板自己（实测 scrollHeight 1616 > clientHeight 885）。
-      var scrollRef = React.useRef(null);
+      // （滚动容器的 ref 与 goToPage 在组件顶部声明——见「翻页：改页码并回顶」那一段。）
 
       // 弹窗挂成 .dshpm-root 的**兄弟节点**（Fragment 包一层），不做它的子项：
       // .dshpm-root 的直接子项被 e2e [8] 的几何断言盯着（「任何直接子项都不得被压扁」），
@@ -4428,7 +4663,7 @@ function errorCopy(error) {
             body: restart.phase === "restarting"
               ? t("notice.restartQueued")
               : writeInFlight ? t("restart.busy")
-                : restartAvailable ? t("restart.bannerBody") : t("restart.manualBody")
+                : restartAvailable ? t("restart.bannerBody") : restartManualBody()
           }, restartAvailable
             ? el("div", { className: "dshpm-bannerActions" },
               el("button", {

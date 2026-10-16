@@ -475,19 +475,36 @@ if ($version -ne $current) {
 }
 
 # 行为回归测试：verify/ 下所有 *.test.mjs 必须全绿（与门禁里的其它检查同等对待）。
-$regressionTests = @(Get-ChildItem (Join-Path $root 'verify') -Filter '*.test.mjs' -ErrorAction SilentlyContinue)
-foreach ($test in $regressionTests) {
-  & $node $test.FullName | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "回归测试未通过：verify/$($test.Name)" }
-}
-if ($regressionTests.Count -gt 0) { Ok ("回归测试通过：" + (($regressionTests | ForEach-Object { $_.Name }) -join '、')) }
+#
+# 执行交给 scripts/run-tests.mjs（而不是在这里写 PowerShell 循环），因为它管的三件事
+# 在 PowerShell 里都不好写对，而每一件出错都是**静默**的：
+#   1. **递归发现**：Get-ChildItem 不带 -Recurse 时只有顶层测试会被跑，子目录里的一次都不跑，
+#      而门禁照样打勾 —— 那不是「通过了」，是「没跑」。
+#   2. **数量下限**：0 个测试的空跑也是全绿。目录被改名/被清空/路径算错时必须拦住。
+#   3. **单测超时**：原来的循环**没有任何超时**。某个测试一旦挂住（socket 没关、await 不到头），
+#      门禁就永不返回 —— 发布流程卡死，而且没有任何输出说明卡在哪。
+# 另外 22 个测试彼此独立（都写系统 tmpdir、都用 listen(0) 拿临时端口、无共享状态），
+# 串行纯属浪费；执行器按有界并发跑（实测约 2.7x），并发上限保守取 min(4, CPU)。
+# 执行器自身由 verify/run-tests.test.mjs 覆盖：用伪造的测试目录验证
+# 「失败/超时/子目录/数量下限」四种情况都会被抓住。可用 DSHM_GATE_JOBS 覆盖并发数。
+$runner = Join-Path $root 'scripts\run-tests.mjs'
+if (-not (Test-Path $runner)) { throw '找不到 scripts/run-tests.mjs（门禁的测试执行器）' }
+$runnerArgs = @($runner)
+if ($env:DSHM_GATE_JOBS) { $runnerArgs += @('--jobs', $env:DSHM_GATE_JOBS) }
+& $node @runnerArgs
+if ($LASTEXITCODE -ne 0) { throw '回归测试未通过（verify/**/*.test.mjs，失败明细见上）' }
 
+# 来源判定矩阵单独再点名一次：它本来也在上面的回归集里，这里给一条**带名字的成功/失败行**，
+# 方便一眼确认「同源校验」这道与安全直接相关的门禁确实跑了。
+# 注意：文件缺失必须**报错**而不是安静跳过——`if (Test-Path ...)` 那种写法下，
+# 文件一旦被改名/删掉，这里会无声通过，而「没跑」看起来和「通过」一模一样。
 $guardTest = Join-Path $root 'verify\origin-guard.test.mjs'
-if (Test-Path $guardTest) {
-  & $node $guardTest | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw '来源判定矩阵测试未通过（verify/origin-guard.test.mjs）' }
-  Ok '来源判定矩阵测试通过'
+if (-not (Test-Path $guardTest)) {
+  throw '找不到 verify/origin-guard.test.mjs —— 来源判定矩阵门禁无法执行（不是「跳过」，是必须拦住）'
 }
+& $node $guardTest | Out-Null
+if ($LASTEXITCODE -ne 0) { throw '来源判定矩阵测试未通过（verify/origin-guard.test.mjs）' }
+Ok '来源判定矩阵测试通过'
 
 Push-Location $root
 try {

@@ -216,12 +216,15 @@ try {
 
   await checkAsync('父进程活着 → 等到期限就放弃，绝不拉起（防双实例）', async () => {
     const marker = join(tmp, 'never.json')
+    // 期限只用 250ms：这条测的是「父进程活着 ⇒ 到点放弃、绝不拉起」，该性质与期限长短无关
+    // （拉起与否是同一个判据）。原来写 700ms，纯粹是白等出来的 700ms 门禁时间。
+    const waitMs = 250
     const payload = buildRestartPayload({
       pid: process.pid, // 测试进程自己：肯定一直活着
       execPath: process.execPath,
       args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
-      waitMs: 700,
-      pollMs: 100
+      waitMs,
+      pollMs: 50
     })
     const helper = spawn(process.execPath, [helperPath(), payload], {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -230,7 +233,16 @@ try {
       windowsHide: true
     })
     helper.unref()
-    await delay(1600)
+    // 等助手**自己退出**，而不是固定睡 1600ms：
+    // 助手在 waitMs 用尽后必然主动 exit(0)，这个事件就是「它已放弃」的精确时刻
+    // （实测 700ms 期限 → 约 830ms 退出，固定睡眠白等一半时间）。
+    // 注意 unref 的子进程不维持事件循环，所以这里必须挂 'exit' 监听等待，
+    // 不能改成 sleep 更短——那会变成「没等到就断言」，沦为一条靠运气的测试。
+    const exited = await new Promise((resolve) => {
+      const safety = setTimeout(() => resolve(false), 8000)
+      helper.on('exit', () => { clearTimeout(safety); resolve(true) })
+    })
+    assert.equal(exited, true, '助手应在 waitMs 用尽后主动退出（不是在等我们）')
     assert.equal(existsSync(marker), false, '父进程没死，绝不能拉起第二个实例')
   })
 } finally {

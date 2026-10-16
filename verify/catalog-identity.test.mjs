@@ -335,26 +335,60 @@ if (existsSync(snapshotPath)) {
   })
   check('npm 为空的条目仍能用仓库名认回自己（歧义键除外）', () => {
     // 旧逻辑（剥 scope + 取尾段）能认回 1755 条；新逻辑必须**不比它差**。
+    //
+    // 用**一次** join 取代 2124 次逐个 join：每个 bundle 单独 join 都要走一遍整份目录的
+    // 匹配流程，2124 次实测 ~409ms，几乎全是重复劳动。批量 join 后按 id 取标记 ——
+    // 这两者是否逐项等价不是显然的（批量时某条可能被**别的** bundle 标成已安装），
+    // 所以下面用抽样**当场验证等价**，而不是只在注释里声称。
     const npmLess = items.filter((item) => item.npm === null && item.url)
+    const names = npmLess.map((item) => repoTail(item.url)).filter((name) => name)
+    const joined = joinInstalled(items, names.map((name) => ({ name, version: '0.0.1' })))
+    const batchFlag = new Map(joined.map((item) => [item.id, item.installed === true]))
+
     let recognized = 0
-    for (const item of npmLess) {
-      const name = repoTail(item.url)
-      if (!name) continue
-      const hit = joinInstalled(items, [{ name, version: '0.0.1' }]).find((i) => i.id === item.id)
-      if (hit && hit.installed === true) recognized += 1
-    }
+    for (const item of npmLess) if (batchFlag.get(item.id) === true) recognized += 1
     assert.ok(recognized >= 1755, `只认回 ${recognized} 条（旧逻辑是 1755，不能倒退）`)
+
+    // 等价性抽样：对跨全表的固定步长样本，逐条 join 与批量 join 必须给出**相同**判定。
+    // 这一步是「快路径没有偷偷放宽断言」的证据；样本跨全表取，不是只取前 N 条。
+    const stride = Math.max(1, Math.floor(npmLess.length / 120))
+    let sampled = 0
+    for (let index = 0; index < npmLess.length; index += stride) {
+      const item = npmLess[index]
+      const name = repoTail(item.url)
+      const perItem = name
+        ? !!joinInstalled(items, [{ name, version: '0.0.1' }]).find((i) => i.id === item.id && i.installed === true)
+        : false
+      assert.equal(batchFlag.get(item.id) === true, perItem, `抽样不等价：${item.id}（批量 vs 逐条）`)
+      sampled += 1
+    }
+    assert.ok(sampled >= 100, `抽样量太小（${sampled}），等价性没有真正被验证`)
   })
   check('真实规模：@owner/name 别名认回 ≥1400 条（「从 git 安装」的合法场景）', () => {
     // 这条拦的是「为了修张冠李戴而把 scope 兜底整体删掉」的过度修复：那会让 1431 条
     // 「无 scope 且 npm===name」的条目在 _install 路径上认不回来。
+    //
+    // 同样把「每个条目各 join 一次」换成一次批量 join（实测 1431 次逐条 join ≈ 300ms，
+    // 且每次都在重复整份目录的匹配流程）。等价性用跨全表抽样当场验证，理由同上一条。
     const targets = items.filter((i) => i.npm && !i.npm.includes('/') && i.npm === i.name && i.owner)
+    const aliasOf = new Map(targets.map((item) => [item.id, `@${item.owner}/${item.name}`]))
+    const joined = joinInstalled(items, [...aliasOf.values()].map((name) => ({ name, version: '0.0.1' })))
+    const batchFlag = new Map(joined.map((item) => [item.id, item.installed === true]))
+
     let reclaimed = 0
-    for (const item of targets) {
-      const hit = joinInstalled(items, [{ name: `@${item.owner}/${item.name}`, version: '0.0.1' }]).find((i) => i.id === item.id)
-      if (hit && hit.installed === true) reclaimed += 1
-    }
+    for (const item of targets) if (batchFlag.get(item.id) === true) reclaimed += 1
     assert.ok(reclaimed >= 1400, `只认回 ${reclaimed}/${targets.length}，疑似把 @owner/name 别名一起去掉了`)
+
+    const stride = Math.max(1, Math.floor(targets.length / 120))
+    let sampled = 0
+    for (let index = 0; index < targets.length; index += stride) {
+      const item = targets[index]
+      const name = aliasOf.get(item.id)
+      const perItem = !!joinInstalled(items, [{ name, version: '0.0.1' }]).find((i) => i.id === item.id && i.installed === true)
+      assert.equal(batchFlag.get(item.id) === true, perItem, `抽样不等价：${item.id}（批量 vs 逐条）`)
+      sampled += 1
+    }
+    assert.ok(sampled >= 100, `抽样量太小（${sampled}），等价性没有真正被验证`)
   })
   check('所有 npm 条目的精确匹配都还能命中（修复未误伤）', () => {
     const withNpm = items.filter((item) => item.npm !== null)

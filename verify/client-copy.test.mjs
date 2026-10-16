@@ -554,7 +554,16 @@ check('分页超出末页时收敛：不会出现「第 5/2 页」+ 空网格', 
   // 客户端只在改搜索条件时重置页码，目录刷新让它变短时不会重置；
   // 后端收敛到末页后这里也就自然一致了。同时把 requestedPage 交出来便于诊断。
   assert.match(source, /var page = payload\.page \|\| \{ page: 1, pages: 1, total: items\.length \};/, '仍按响应里的 page 渲染')
-  assert.match(source, /onPage: function \(value\) \{ setPage\(value < 1 \? 1 : value\); \}/, '页码下限仍是 1')
+  // v1.3.0：翻页逻辑搬进了 `goToPage`（它还要负责回顶，见 API-CONTRACT §2.2），
+  // 所以这里不再钉「onPage 那一行长什么样」，而是钉**两件事**：
+  //   ① onPage 仍然走 goToPage（没有绕过它直接 setPage —— 那样会漏掉下限或回顶）；
+  //   ② goToPage 里**仍然**有下限 1（这才是「不会出现第 0 页 / 空网格」的那条不变量）。
+  // 只钉形状会在无关重构时假警报；钉不变量则搬家也不会丢。
+  assert.match(source, /onPage: goToPage,/, 'onPage 必须走 goToPage（不许绕过）')
+  const at = source.indexOf('function goToPage(')
+  assert.ok(at > 0, '找得到 goToPage')
+  const body = source.slice(at, source.indexOf('\n      }', at))
+  assert.match(body, /value < 1 \? 1 : value/, '页码下限仍是 1（在 goToPage 里）')
 })
 
 
@@ -580,7 +589,9 @@ check('装后激活校验：回读状态决定文案，不再一律写「已安�
   assert.match(source, /if \(state === "inert"\) return \{ kind: "warn", applied: false/, 'inert 不算成功')
   assert.match(source, /if \(state === "broken"\) return \{ kind: "error", applied: false/, 'broken 不算成功')
   // changed === false（宿主说这次什么都没改）时保留「没有产生变更」，除非版本对不上。
-  assert.match(source, /if \(detailed !== null && \(changed !== false \|\| mismatch\)\) base = detailed;/, '没变更时不要被「并已在运行」盖掉')
+  // v1.3.0 起前面多一个 `!hotMounted`：热挂载成功时那句「不用重启」比 activation 更准，
+  // 不能被「并已在运行」盖回去（行为断言在 hot-mount-client.test.mjs）。
+  assert.match(source, /if \(detailed !== null && !hotMounted && \(changed !== false \|\| mismatch\)\) base = detailed;/, '没变更时不要被「并已在运行」盖掉')
   // activation 缺省时行为完全不变（老宿主/老响应形状不能受影响）。
   assert.match(source, /if \(!activation \|\| typeof activation\.state !== "string"\) return null;/, '没有 activation 时返回 null，保持原文案')
 })

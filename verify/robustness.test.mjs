@@ -47,14 +47,19 @@ async function checkAsync(name, fn) {
 console.log('\n[1] gunzip 解压炸弹：必须有输出上限')
 check('gzip 炸弹被挡在分配之前（不是先解压再检查长度）', () => {
   // 反向保证：正常的小 tarball 仍要能解压出来。
-  // 255 KiB 压缩 → 256 MB 解压：integrity 校验挡不住它（校验的是**压缩**字节，
+  // 32 MiB 解压（= 上限的 4 倍）：integrity 校验挡不住它（校验的是**压缩**字节，
   // 而且那个 hash 来自同一份元数据），所以必须在解压这一步限长。
-  const bomb = gzipSync(Buffer.alloc(256 * 1024 * 1024), { level: 9 })
+  //
+  // 尺寸是用探针挑的，不是拍的：原先用 256 MiB + level 9，构造炸弹自己就要 ~830 ms，
+  // 而这 830 ms 与「限长是否生效」毫无关系（唯一判据是解压后超过 maxOutputLength）。
+  // 32 MiB + level 1 构造 ~37 ms，仍是上限的 4 倍，同一判据、同一断言强度。
+  const bomb = gzipSync(Buffer.alloc(32 * 1024 * 1024), { level: 1 })
   assert.ok(bomb.length < 1024 * 1024, `前置条件：炸弹压缩后应远小于 1 MiB，实际 ${bomb.length}`)
+  assert.ok(32 * 1024 * 1024 > MAX_TARBALL_BYTES, '前置条件：解压后必须真的超过上限，否则这条测试没在测限长')
   assert.throws(
     () => fileFromTarball(bomb, 'plugins.json'),
     (error) => error.code === 'ERR_BUFFER_TOO_LARGE' || /maxOutputLength|output length/i.test(String(error.message)),
-    '超限解压必须抛错（ERR_BUFFER_TOO_LARGE），不得静默分配 256 MB'
+    '超限解压必须抛错（ERR_BUFFER_TOO_LARGE），不得静默分配 32 MiB'
   )
   assert.ok(MAX_TARBALL_BYTES > 0 && MAX_TARBALL_BYTES <= 64 * 1024 * 1024, '上限本身应是个合理的小值')
 })
@@ -94,16 +99,29 @@ await checkAsync('客户端发一半就不动 ⇒ 超时后 settle（以前永�
     await new Promise((resolve) => socket.once('connect', resolve))
 
     let outcome = null
+    let settledAt = 0
+    const timeoutMs = 300
+    const startedAt = Date.now()
     server.on('request', (req) => {
-      // 用 300ms 上限做实测，避免测试变慢
-      readJsonBody(req, 64 * 1024, 300).then((result) => { outcome = result })
+      readJsonBody(req, 64 * 1024, timeoutMs).then((result) => { outcome = result; settledAt = Date.now() })
     })
     socket.write('POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"a":1}')
-    await new Promise((resolve) => setTimeout(resolve, 900))
-    assert.ok(outcome !== null, '超时后必须 settle（否则 handler 无限期挂着）')
+
+    // 有界等待「真的 settle」：原来是固定 sleep(900) 再断言，那既慢又弱 ——
+    // 它分不清「300ms 超时生效」还是「超时被改成了 880ms 但恰好没超过 900」。
+    // 现在等事件本身，并把**实测耗时**夹在一个区间里：
+    //   下界 —— 必须至少等到超时点，不能被「立即失败」蒙混过关；
+    //   上界 —— 必须在超时的合理倍数内回头，不能靠宿主的 300s 兜底。
+    const deadline = startedAt + 1500
+    while (outcome === null && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+    const elapsed = (settledAt || Date.now()) - startedAt
+
+    assert.ok(outcome !== null, `超时后必须 settle（等了 ${Date.now() - startedAt}ms 仍未回头，否则 handler 无限期挂着）`)
     assert.equal(outcome.ok, false)
     assert.equal(outcome.code, 'bad-request')
     assert.match(outcome.message, /超时/)
+    assert.ok(elapsed >= timeoutMs - 60, `必须真的等满超时点才回头（实测 ${elapsed}ms，超时上限 ${timeoutMs}ms）—— 小于下界说明是提前放弃，不是超时保护`)
+    assert.ok(elapsed < timeoutMs * 4, `必须在超时的合理倍数内回头（实测 ${elapsed}ms，超时上限 ${timeoutMs}ms）—— 拖太久说明在等宿主兜底`)
   } finally {
     // **必须 finally 清理**：断言失败（实现回归）时 socket 还在，会把这个测试进程一直挂住
     // ——我第一版就踩了这个坑，变异测试因此跑了 5 分钟不结束。

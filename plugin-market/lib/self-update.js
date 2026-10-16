@@ -37,7 +37,8 @@ import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { fileFromTarball, timeoutSignal } from './catalog-npm.js'
+import { fileFromTarball } from './catalog-npm.js'
+import { fetchViaGithubRoutes, serviceForUrl, summarizeRouteAttempts, timeoutSignal } from './github-routes.js'
 
 /** 固定仓库与通道地址：换仓库要改的是这里与 docs/RELEASING.md。 */
 export const MARKET_REPO = 'Winnie-0721/dsh-plugin-market'
@@ -50,6 +51,16 @@ export const GITHUB_RELEASE_API = `https://api.github.com/repos/${MARKET_REPO}/r
 export const CHECK_CACHE_MS = 10 * 60 * 1000
 export const METADATA_TIMEOUT_MS = 12_000
 export const TARBALL_TIMEOUT_MS = 30_000
+
+/**
+ * 注：元数据与产物都**不传 `totalBudgetMs`**，于是它回落到本次调用的 `timeoutMs`
+ * （多线路的默认口径，见 github-routes.js）。
+ *
+ * 这是刻意的，别"顺手加一个更大的预算"：`check()` 会依次问 3 个列表源、再探至多 3 个
+ * 候选标签，也就是 `getJson` 最多被调 6 次；若每次给 20s，最坏情况是 6 × 20s = **120s**
+ * 全挂在一次点击上（改装前的上界是 6 × 12s）。让预算等于单次超时，最坏耗时与改装前
+ * **一模一样**——只是那 12s 现在被摊给几条线路，而不是全砸在第一条坏线路上。
+ */
 
 /** 下载目录：用户主目录下，重启后仍在——安装后 profile 记的是这个路径的 file: 依赖。 */
 export function defaultDownloadDir() {
@@ -218,7 +229,22 @@ function classify(error, timeoutMs) {
   return timedOut ? `超时（${Math.round(timeoutMs / 1000)}s）` : `请求失败：${shortError(error)}`
 }
 
-async function getJson(fetchImpl, url, timeoutMs) {
+async function getJson(fetchImpl, url, timeoutMs, service = null) {
+  // 走了多线路：GitHub 的几条通道各自独立地挂（限流 / 连接超时 / 加速前缀下线），
+  // 写死单条地址的实现迟早整条失效——本机实测 api.github.com 与 raw 都会时通时断。
+  // service 为 null 表示这条地址没有镜像（jsDelivr Data API 就是），保持直连单跳。
+  if (service !== null) {
+    const routed = await fetchViaGithubRoutes(service, url, {
+      fetchImpl,
+      accept: 'json',
+      timeoutMs,
+      headers: { accept: 'application/json' }
+    })
+    if (routed.ok !== true) {
+      return { ok: false, reason: summarizeRouteAttempts(routed.attempts) || '所有线路都失败', attempts: routed.attempts }
+    }
+    return { ok: true, raw: routed.value, via: routed.viaLabel, attempts: routed.attempts }
+  }
   let response
   try {
     response = await fetchImpl(url, {
@@ -242,30 +268,24 @@ async function getJson(fetchImpl, url, timeoutMs) {
   }
 }
 
-async function getBytes(fetchImpl, url, timeoutMs) {
-  let response
-  try {
-    response = await fetchImpl(url, {
-      method: 'GET',
-      redirect: 'follow',
-      credentials: 'omit',
-      headers: { accept: 'application/octet-stream' },
-      signal: timeoutSignal(timeoutMs)
-    })
-  } catch (error) {
-    return { ok: false, reason: classify(error, timeoutMs) }
+async function getBytes(fetchImpl, url, timeoutMs, service = null) {
+  // 产物同样多线路：本机实测直连 github.com 附件 10.5s 超时，而四个公共前缀
+  // 全部 200 且 sha256 与 GitHub 报的 digest **逐字节一致**（`_verify/asset-routes.mjs`）。
+  // 完整性由调用方按 sha256 判，所以「从哪条路取」不影响安全，只影响能不能取到。
+  //
+  // service 为 null 时**按 URL 自己判**是哪个服务：下载循环里混着 jsDelivr 地址与
+  // GitHub 附件地址，用同一张表会把 jsDelivr 的地址拼到 GitHub 前缀后面（纯错，
+  // 只会拿回前缀自己的错误页）。判主机这件事只有一个地方该做，就是 serviceForUrl。
+  const routed = await fetchViaGithubRoutes(service ?? serviceForUrl(url), url, {
+    fetchImpl,
+    accept: 'bytes',
+    timeoutMs,
+    headers: { accept: 'application/octet-stream' }
+  })
+  if (routed.ok !== true) {
+    return { ok: false, reason: summarizeRouteAttempts(routed.attempts) || '所有线路都失败', attempts: routed.attempts }
   }
-  if (response === null || typeof response !== 'object' || typeof response.ok !== 'boolean') {
-    return { ok: false, reason: '响应无法识别' }
-  }
-  if (response.ok !== true) return { ok: false, reason: `HTTP ${response.status}` }
-  try {
-    if (typeof response.arrayBuffer !== 'function') return { ok: false, reason: '响应不支持二进制读取' }
-    const raw = await response.arrayBuffer()
-    return { ok: true, bytes: Buffer.isBuffer(raw) ? raw : Buffer.from(raw) }
-  } catch (error) {
-    return { ok: false, reason: classify(error, timeoutMs) }
-  }
+  return { ok: true, bytes: routed.value, via: routed.viaLabel, attempts: routed.attempts }
 }
 
 /** 三个候选源，按「新鲜度」排序；每个都如实记录自己为什么失败。 */
@@ -275,7 +295,7 @@ function buildSources() {
       id: 'github-release',
       label: 'GitHub Releases API',
       async read(fetchImpl) {
-        const res = await getJson(fetchImpl, GITHUB_RELEASE_API, METADATA_TIMEOUT_MS)
+        const res = await getJson(fetchImpl, GITHUB_RELEASE_API, METADATA_TIMEOUT_MS, 'api')
         if (res.ok !== true) return res
         const tag = typeof res.raw?.tag_name === 'string' ? res.raw.tag_name : ''
         const version = parseVersion(tag)
@@ -323,7 +343,7 @@ function buildSources() {
       id: 'jsdelivr-index',
       label: `jsDelivr CDN（main 分支 releases/index.json）`,
       async read(fetchImpl) {
-        const res = await getJson(fetchImpl, `${CDN_BASE}@main/releases/index.json`, METADATA_TIMEOUT_MS)
+        const res = await getJson(fetchImpl, `${CDN_BASE}@main/releases/index.json`, METADATA_TIMEOUT_MS, 'cdn')
         if (res.ok !== true) return res
         const index = readIndex(res.raw)
         if (index === null || index.latest === null) return { ok: false, reason: 'index.json 里没有可用版本' }
@@ -353,7 +373,7 @@ export function createSelfUpdater(options = {}) {
 
   /** 该标签下这一版的条目：标签内容不可变，所以取回后可以放心缓存。 */
   async function entryForTag(fetchImplTag, tag, expectedVersion, fallback) {
-    const res = await getJson(fetchImplTag, `${CDN_BASE}@${encodeURIComponent(tag)}/releases/index.json`, METADATA_TIMEOUT_MS)
+    const res = await getJson(fetchImplTag, `${CDN_BASE}@${encodeURIComponent(tag)}/releases/index.json`, METADATA_TIMEOUT_MS, 'cdn')
     if (res.ok === true) {
       const index = readIndex(res.raw)
       if (index !== null) {
@@ -534,21 +554,34 @@ export function createSelfUpdater(options = {}) {
   /**
    * 下载 + 三道校验 + 落盘；任何一道不过都返回失败，绝不把未校验的字节交给 pnpm。
    * 参数就是 check() 的结果对象（它同时带 url / tarball / sha256 / bytes）。
+   *
+   * 两条正交的容错，**不要混淆**：
+   *   - **跨候选地址**（本函数的外层循环）：CDN 标签地址 → CDN main → GitHub Release 附件。
+   *     这是三个不同的东西，只有第一条是「内容不可变」的规范地址。
+   *   - **跨线路**（getBytes 内部）：同一个地址，直连或经某个加速前缀。
+   *   GitHub 附件是本机唯一真的能下到的那条（直连 github.com 10.5s 超时，
+   *   四个前缀都 200），所以它虽然排在最后，实际经常是决定成败的那一跳。
    */
   async function download(status) {
     // 传输层失败（404/超时/断流）可以换下一条路；一旦拿到字节，哈希不符就是硬失败，不再试别的。
     const urls = [...new Set([status.url, ...tarballUrls(status)])]
     let res = null
     let lastReason = ''
+    const attempts = []
     for (const url of urls) {
       const attempt = await getBytes(fetchImpl, url, TARBALL_TIMEOUT_MS)
+      if (attempt.attempts !== undefined) {
+        for (const entry of attempt.attempts) {
+          attempts.push({ ...entry, label: `${entry.label}（${url.includes('@main') ? 'main 分支' : '规范地址'}）` })
+        }
+      }
       if (attempt.ok === true) {
         res = attempt
         break
       }
-      lastReason = `${attempt.reason}（${url.includes('@main') ? 'main 分支' : '标签地址'}）`
+      lastReason = `${attempt.reason}`
     }
-    if (res === null) return { ok: false, code: 'self-update-download', message: `下载失败：${lastReason}` }
+    if (res === null) return { ok: false, code: 'self-update-download', message: `下载失败：${lastReason}`, attempts }
     const bytes = res.bytes
     if (status.bytes !== null && bytes.length !== status.bytes) {
       return { ok: false, code: 'self-update-integrity', message: `字节数与清单不符（清单 ${status.bytes}，实际 ${bytes.length}）。` }

@@ -231,9 +231,65 @@ Query 参数（全部可选，未知参数忽略）：
   - 回归：`verify/host-contract.test.mjs` 的真调行为断言（8 条）；对应文案与「不算成功」的语义在
     `verify/client-copy.test.mjs`。这 8 处语义**逐个做过变异测试**（每处破坏都必须被测试抓到，实际 8/8 全被抓到）。
 - `output`：`packageResult.output` 截断到末尾 2000 字符（可选）。
+- **`hotMounted` / `hotMountReason`（v1.3.0 新增，可选）**：宿主返回 `restart-required` 时，市场会**替它**
+  把那一步做掉（热挂载，见 §2.4.1）。这两个字段是那次尝试的结果：
+
+  - `hotMounted: true` —— 已经挂进正在运行的组合，**这次改动真的生效了**，不需要重启；
+  - `hotMounted: false` + `hotMountReason` —— 试过但没成，原因是给用户看的下一步；此时**照常**
+    记入待重启（`/status` 的 `pendingRestart`），横幅该亮就亮；
+  - 字段**缺省**表示「本次根本没尝试热挂载」（升级、已经 `live`、认不出是哪个包……），
+    客户端不得把它读成失败；老响应形状因此完全不变。
+
+  附带语义：`hotMounted: true` 时 `/status` 的 `pendingRestart` **不含**这个包，且 `activation.state`
+  会被改成 `live`（挂上了就是真的在跑，回读不该还说 `restart`）。
 - 宿主缺 `pluginManager` ⇒ `502 manager-unavailable`。
 - 安装进行中重复提交同名 spec：透传宿主的 `changed:false` 与 `error.code='operation-error'`。
 - 错误响应的 `diagnostic`：`sendError` 会**透传** `overrides.diagnostic`（v1.1.6 修——此前只写 message/hint，§2.8 的 diagnostic 永远不会出现在响应里）。
+
+### 2.4.1 热挂载（v1.3.0）：宿主不做的那一步，市场替它做
+
+**为什么需要有这一节**：`pluginManager.installBundle` 对**已经装过**的包在调用 `reload()` **之前**就返回
+`restart-required`（内核 `dsh-plugin-manager/lib/index.js:1801`：`if (Object.hasOwn(before, name)) return "restart-required";`
+出现在第 1802 行的 `result.warnings = await this.reload()` 之前）。也就是说**升级一个已装的包时，宿主自己从不
+尝试热应用**。所以「装完就能用」这条能力不能等宿主给，得市场自己做。
+
+**做法**（`plugin-market/lib/hot-mount.js`，逻辑移植自官方 `dsh-market` 的 `src/hot.ts`，MIT）：
+
+1. 在 `<profile>/.dsh-market/` 写一个只含纯 `- id: 'mkt-<rowId>'` / `name: '<绝对 file:// URL>'` 的 `hot-N.yml`；
+2. 用 cordis 的 `Include` 插件把它挂成**市场自己的子树**（`ctx.plugin(HotTree, { path })`）；
+3. `Include` 子类屏蔽 `write()`（基类会把树写回它读的那个文件，对一次性输入是纯副作用）；
+4. 每次市场启动擦掉这些输入（`cleanHotDir`）——**持久化归 `dsh.profile.bundles`**，这棵子树只活当前进程。
+
+**边界（全部有回归或真机实测）**：
+
+| 情形 | 行为 | 理由 |
+|---|---|---|
+| patch 是纯 `id`/`name` insert | 挂 | 唯一能安全重放的形状 |
+| patch 含 `config:`（块式 / 行内）/ `!!js` / 任何非 `id`/`name` 的键 | **整体作废**，回「重启后生效」 | 那种组合得由宿主按原样组装，挂一半比不挂更坏 |
+| 升级（包在装前的列表里就有） | **不挂** | 替换活着的包时 Node 的 ESM 缓存给旧模块，挂上去只是围着旧模块重建 fiber（参考实现 #685 实测） |
+| 已经 `applied` 且 `activation.state === 'live'` | 不挂 | 已经在跑，再挂会插第二个条目、前缀路由注册两遍 |
+| `client-only`（有 `dsh.client`、无 `dsh.bundle`） | 挂一行 no-op shim | 否则 client-modules 永远不提供它的 bundle |
+| 认不出这次装的是哪个包 | 不挂 | 不猜一个名字去挂别人的目录 |
+| 目录不在 `node_modules` 下 | 不挂，并**如实说找不到目录** | 不能报一个假的「没有 bundle patch」 |
+| 挂载超时（默认 10s，`DSHM_HOT_MOUNT_TIMEOUT_MS`） | 销毁半挂子树 + 删输入文件，回「重启后生效」 | 卡住的插件不能把请求永远挂住；残渣会让下次组装再炸 |
+| 卸载（`/remove` 一个热挂载过的包） | `hotUnmount`，有界等待 | teardown 没 settle ⇒ **报 `false`**，不谎报已卸掉 |
+
+**解析锚点（易错点，实测过）**：`Include` 的 `import()` 收到**裸名**时，会对着 **loader 自己的位置**
+（宿主闭包里的 `cordis-plugin-loader`）解析，那条父目录链永远走不到 `<profile>/node_modules`。所以行里的
+`name` 一律先解析成**绝对 `file://` URL**（对着包实际装进去的那个 profile）。三条解析路径按序尝试，
+且**每条失败的原始错误都保留**（只回一句「宿主不支持」无法指向任何可修的东西）：
+
+1. `import(spec)` —— 实测可行（内核注册了解析钩子）；
+2. `ctx.loader.internal.import(spec, ctx.baseUrl, {})` —— 实测可行。**锚点必须是 `ctx.baseUrl`**
+   （= profile 目录）：传 `undefined` 会让宿主从仓库根解析并得到 `ERR_MODULE_NOT_FOUND`；
+3. `createRequire(<profile>/package.json).resolve(spec)` —— 兜底。
+
+对应的 `/status` 字段 `hotMounts`（字符串数组，本进程热挂载着的包名）供客户端把「已装好、正在跑」
+与「等重启」分开显示；水合待重启横幅时也会按它滤一道，免得两半版本不一致时横幅说假话。
+
+回归：`verify/hot-mount.test.mjs`（34）、`verify/hot-mount-attempt.test.mjs`（22，判定胶水）、
+`verify/hot-mount-client.test.mjs`（14，文案与横幅）；变异测试 24/24 被杀（`_verify/hot-mount-mutation.mjs`）；
+真机实验 13/13（`_verify/probe-hot-mount.ps1`，在真宿主里挂上一个夹具插件并卸载）。
 
 ### 2.5 `POST /plugin-market/remove`
 
@@ -320,7 +376,10 @@ dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
 - 上限 32 条；
 - 水合**不弹窗**（刷新不该突然跳出「立即重启/稍后重启」，横幅常驻已足够），
   且不许把进行中的 `restarting` 退回 `idle`；宿主说没有待重启项时**什么都不做**，
-  而不是把已有的清掉（避免假阴性）。
+  而不是把已有的清掉（避免假阴性）；
+- **v1.3.0 起再加一条**：`hotMounted: true`（热挂载成功，§2.4.1）的结果**不进** `pendingRestart`，
+  水合时也按 `/status` 的 `hotMounts` 再滤一道——一个已经在跑的插件不该让横幅亮起「还有 1 项变更需重启」。
+  两半版本不一致（旧宿主半 + 新客户端）时这道过滤仍然成立。
 
 ### 2.7 `POST /plugin-market/refresh`
 
@@ -380,6 +439,75 @@ dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
   孤立代理项，但它在 `encodeURIComponent` 里会抛 `URIError`，从单源坏数据变成 500 internal。
 - `tarball` 也一并返回：下载时会用它构造另外两条路的地址（见 §2.9）。
 
+#### 2.8.1 GitHub 多线路容错（v1.3.0）
+
+上面每一个源、以及 §2.9 的产物下载，都**不再直连单一地址**：GitHub 的几条通道各自独立地会挂，
+而且挂法不同。本机实测（2026-10-14，同一分钟内，`_verify/routes-live2.mjs` / `asset-routes.mjs`）：
+
+| 现象 | 实测 |
+| --- | --- |
+| `raw.githubusercontent.com` | 同一批 4 个文件连续 `UND_ERR_CONNECT_TIMEOUT`；第 5 个文件 256ms 200（**时通时断**） |
+| `api.github.com` | 先 403（匿名限流 60 次/小时/IP），二十分钟后再测 200 |
+| `cdn.jsdelivr.net` | `ECONNRESET`；同一刻 `fastly.` / `testingcf.` 两个镜像 200 |
+| `ghproxy.net` → `api.github.com` | **403**（它拒这个服务）；→ Release 附件却 200 |
+| `gh-proxy.com` / `gh-proxy.org` → `api.github.com` | 200，`tag_name` 与 `digest` 都正确 |
+| 直连 `github.com` 附件 | 10.5s 超时 |
+| 四个加速前缀取同一个附件 | 全部 200，sha256 与 GitHub 报的 `digest` **逐字节一致** |
+
+改装前跑一次真实 `check()`：**12.4s → `self-update-unavailable`，四个源一个都没成**。
+（`_verify/baseline-selfupdate.mjs`；改装后同一个探针 → `ok:true, channel=github-release`。）
+
+`plugin-market/lib/github-routes.js` 做四件事，每件对应上表里一种挂法：
+
+1. **每类服务一组候选线路**，逐个试到成功。`null` 表示直连且永远排在候选里——
+   任何前缀整体下线时，最多是一次慢请求，而不是一次故障。
+2. **记住本轮验证通过的线路**（按服务记），下次把它提到最前。
+   收益是省掉重复的超时等待，**具体省多少取决于当时哪条线路活着**：实测连跑三轮
+   `check()` 5.8s / 7.1s / 8.4s，同进程内第二次 2.5s / 9.7s / 3.1s。
+   所以不要把某个最快值当承诺——可以承诺的是「每次都成功」与「最坏耗时不比改装前差」
+   （预算默认等于单次超时，见下）。
+3. **负缓存**：刚失败过的线路在本轮里排到最后（不是删掉）。
+   只记「线路级」故障——**404 不算**，因为那说明线路是通的、只是这个路径没有内容，
+   同一线路上的别的地址完全可能存在；把 404 当线路故障会封掉一条好线路。
+   例外：`cdn` 档的候选是 jsDelivr **同一份内容**的不同边缘域名，对不可变的标签内容
+   一个说 404 别的也不会有，所以遇到 404 就停、不再问其余镜像（这条同时把既有回归
+   「标签探测有界」的请求数从 12 次压回 3 次）。
+4. **载荷校验**：公共加速服务在上游失败时常回一个**自己的 HTML 错误页 + 200**。
+   只看 `response.ok` 会把这条线路记成"可用"并写进赢家，之后每次请求都先撞它——
+   故障被固化成默认路径。所以 `json` 载荷必须是合法 JSON 且不是 HTML，
+   `download` 载荷由 §2.9 的 sha256 负责。
+
+另外两条：
+
+- **线路有两种形状，不能混为一谈**：公共加速服务是**前缀**（`{prefix}/{完整URL}`）；
+  jsDelivr 的三个域名是**互替主机**（换 host、保留 path）。拼错那种会得到 404，
+  看起来像"内容不存在"而不是"线路不对"。`routeUrl()` 是唯一的落点，
+  `serviceForUrl()` 按目标主机决定用哪张表（下载循环里混着 jsDelivr 与 GitHub 地址）。
+- **总预算是硬上界**：`totalBudgetMs` 缺省等于单条线路超时（所以多线路**不让失败变慢**），
+  并按剩余候选**平摊**——不平摊的话第一条坏线路会把预算吃光，后两条连试的机会都没有，
+  那等于没做多线路。平摊后仍会再夹一次 `Math.min(…, remaining)`：下限
+  （`MIN_ROUTE_MS`）只保证 TCP 握手够用，**不许**突破总预算。
+  （早先把下限写成 `Math.max(1_000, …)`，实测 1200ms 的预算跑了 2032ms——
+  总预算就不再是上界，只是句建议。）
+
+**逃生通道**：环境变量 `DSHM_GITHUB_PROXY` 给一个持久的 HTTPS 前缀（与 `DSHM_REGISTRY_URL` 同风格）。
+它**插到候选最前**而不是替换整张表——替换会「每遇到一次镜像故障就只买一次尝试」，
+用户填的前缀一旦挂了，剩下本来实测可用的链也一起没了。直连永远不删。
+前缀必须过 `normalizeGithubProxy`：只收 https、不带上游凭据、不带 query/fragment
+（公共前缀会把完整目标 URL 拼在路径上，query 会破坏那个边界）。
+
+**安全边界（不许放宽）**：多线路只服务**匿名读**（版本清单、原始文件、Release 附件）。
+市场没有任何一处把 token 交给它；认证请求永远走规范地址，参考实现对此的表述同样明确
+（「bearer tokens are never sent to a public GitHub acceleration service」）。
+GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略继续生效。
+
+**关于 npm 源的一个否定结论（实测）**：本包在 npm 上是有的（`registry.npmjs.org` 1.2.0，
+`npmmirror` 1.1.6），元数据 87–1427ms 且**不限流**，看起来是个理想的免限流元数据源。
+但实测**npm 上的 tarball 与 GitHub Release 附件不是同一份字节**
+（189369B vs 190314B，sha256 不同）——所以它**不能**用来喂 §2.9 的信任链
+（那会要求把两个不同的产物当成同一份来校验）。这条记在这里，是为了下次有人
+看到「npm 又快又不限流」时不必再试一遍。
+
 ### 2.9 `POST /plugin-market/self-update`
 
 应用自更新：下载产物 → 三道校验 → 交给宿主 `pluginManager.installBundle(<本地绝对路径>)`。
@@ -409,9 +537,52 @@ dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
 
 一键重启：把「重启 DSH」从一句提示变成真动作（detached wait-and-relaunch，v1.1.6 起）。
 
-**能力探测**：`GET /status` 带 `restart: { available: boolean }`。`available:false` 表示**当前环境
-里一键重启不可能成功**，客户端必须**不显示重启按钮、不弹重启询问窗**，改为告诉用户在监管它的
-那个入口里重启。判定与 `POST /restart` 用的是同一个函数，两处不会漂移。
+**能力探测**：`GET /status` 带 `restart: { available: boolean, reachable: boolean, reason: string|null }`。
+`available:false` 表示**当前环境里一键重启不可能成功**，客户端必须**不显示重启按钮、不弹重启询问窗**，
+改为告诉用户在监管它的那个入口里重启。判定与 `POST /restart` 用的是同一个函数，两处不会漂移。
+
+- `reason`：`"desktop"` / `"systemd"` / `"inspector"` / `"disabled"` / `null`。**原因不同则下一步不同**
+  （关窗重开 / `systemctl restart` / 断开调试器 / 改 `allowRestart`），所以客户端的说明文案按它分四条
+  （`restart.manualBody.<reason>`）。合成一句会让用户去试一个不可能成功的办法——systemd 下让人
+  「关掉窗口再打开」是毫无意义的（没有窗口）。
+- `reachable`：**同一页面发出的重启请求能不能过围墙**的预测，由 `/status` 这个请求本身算出来
+  （回环对端、无转发痕、Host 是回环权威）。`available:true` 但 `reachable:false`（例如经过反向代理）时
+  客户端也**不该给按钮**——点了必然 403。它只是预测、不是授权：POST 那条路仍然跑完整判定。
+  预测**刻意不含 Origin**：同源 GET 本就不带 Origin，把它写进预测会让所有正常请求都显示"不可重启"。
+
+**按需重启的判定（v1.3.0，实现见 `lib/restart-policy.js`）**——三种监管者 + 一个显式开关：
+| 情况 | 判定 | 为什么 |
+| --- | --- | --- |
+| 调试器附着（`--inspect`） | **拒绝**，且 `allowRestart: true` **也不能覆盖** | 运行时闸门：调试结束就该自动恢复，写进配置会让开关在调试器断开后仍停在关闭态。与 systemd 不同，不存在"从市场界面杀掉一个被调试的宿主"的合理部署形态 |
+| `config.allowRestart` 显式给了 | **直接用它的值** | 用户对自己部署有陈述权（已配 `KillMode=process`、或外面套了能活下来的 wrapper） |
+| 桌面壳（Electron） | 拒绝 | 壳持单实例锁，替代进程被挡下后静默退出（见下） |
+| systemd | 拒绝 | 默认 `KillMode=control-group` 会连助手一起清掉，服务被杀后不会自己回来 |
+| 其余 | 允许 | 终端 `dsh web` 等 |
+
+- **systemd 的判定要两个信号，缺一不可**：`INVOCATION_ID` / `JOURNAL_STREAM` **是继承的**——
+  一个 unit 的所有后代都带着它，Linux 上普通桌面终端（shell 源自某个 user session unit）
+  与 CI runner 都有。只看它会关掉大量"重启其实没问题"的宿主，那是比要修的 bug 更坏的 bug。
+  第二个信号是**父进程**：`ppid === 1`（system unit）**或**父进程 `comm` 是 `systemd`
+  （user unit 的主进程父进程是普通 PID，只判 `ppid===1` 会把 user unit 判成"没人管"，
+  然后一键重启真的把服务永久杀掉）。`/proc` 只在 Linux 有，而 systemd 也只在 Linux，范围正好对齐；
+  读不到就如实返回"不是"。
+- **pm2 与 launchd 故意不识别**：pm2 的 `pm_id` 同样被继承而它的 God daemon 不是 PID 1，
+  没有第二个信号能区分"是 pm2 的服务"与"只是 pm2 的后代"；launchd 连标记都没有。
+  猜一个就会把上面那个假阳性重新引入。这两种部署要用显式的 `allowRestart: false`——
+  自动识别是**安全网**，不是那个选项的替代品。
+- `allowRestart` 必须写在 profile 的 **`config:` 里面**：loader 只把那一个子对象传给插件
+  （cordis 的 `runtime.callback(ctx, this.config)`），写在 `name:` 旁边的顶层会被**静默忽略**。
+  本插件没有声明 Config schema，`resolveConfig` 在没有 `Config` 时原样返回，所以 `config`
+  可能是 `undefined`/字符串/数组——判定一律用可选访问，绝不假设它是对象
+  （这条路径在 `/status` 第一跳上跑，抛出去等于市场打不开）。
+- **一键重启的围墙比普通写操作更严**：`trustedRestartRequest` 要求**直连回环**
+  （`127.0.0.1` / `::1` / `::ffff:127.0.0.1`）+ **无任何转发痕**（`Forwarded` /
+  `X-Forwarded-For` / `X-Real-IP`）+ **Host 是回环权威** + Origin 与 Host 同权威。
+  只有"对端是回环"不够：DNS rebinding 页面能让浏览器经由攻击者控制的域名打到 127.0.0.1，
+  此时地址证明不了什么，而 `Host`/`Origin` 都写着攻击者的域名——`Host` 才是伪造不了的那一项。
+  比较 Origin 与 Host 时按「主机名 + 有效端口」比、两边都去 IPv6 方括号，**不能**直接比
+  `new URL(origin).host === host`：URL 会去掉默认端口（`http://127.0.0.1:80` 的 `.host` 是
+  `127.0.0.1`），于是本机 80 端口上的用户会被自己的围墙拒掉（实测）。
 
 请求体：`{}`（无字段）。要求来源判定通过（§1）。
 
@@ -427,6 +598,11 @@ dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
      **注意这条删除的作用范围（v1.2.0 更正）**：它只对「以 node 身份重跑同一个入口」的场景正确。
      早先这里的注释写「否则桌面端会以 node 模式黑窗启动」，那个理由**是错的**——桌面端根本
      走不到这一步（见下一条）。
+  5. **v1.3.0：助手复刻宿主的 `env` 与 `cwd`**（载荷里显式带上）。早先助手继承的是自己的环境，
+     恰好等于宿主的环境（同一个父进程的孩子），所以一直没暴露；但 `cwd` 一直被换成**插件目录**——
+     而 DSH 的 profile 解析与相对路径配置都依赖它，那是启动形状的一部分。
+     顺序不能反：先按 `payload.env` 恢复、**再**删 `ELECTRON_RUN_AS_NODE`，
+     否则载荷里本来就带着它时等于没删。
 - **桌面壳管理的宿主必须拒绝（v1.2.0，HIGH）**。真实拓扑（活动进程表 + `app.asar/lib/main.js`）：
   `DeepSeek Harness.exe`（GUI 主进程，持 Electron 单实例锁）← 宿主是它的子进程，由
   `spawn(node, ['--expose-internals', entry, …], { stdio: […, 'ipc'], env: desktopNodeEnvironment(...) })`
@@ -435,12 +611,10 @@ dsh-mobile 0.6.1→0.6.2 后问「是默认生效的吗」）。
   `claimDesktopSingleInstance()` → `requestSingleInstanceLock()` 失败（GUI 主进程还持锁）→
   立刻 `application.quit()`（实测 exit=0、无输出、231–391ms）。结果是**宿主已退出、替代品也死了，
   整个应用什么都不剩**（壳随后弹致命对话框）。
-  **这不是某个变量写错**：`restartAllowed` 式的结论是「有监管者的部署里，重启不属于这个插件」
-  （systemd 下助手会连坐被杀，桌面壳下会被单实例锁挡在门外）。所以本插件**如实拒绝**，
-  不尝试半修：`isDesktopManagedHost()` 以「`ELECTRON_RUN_AS_NODE=1` **且** 有 IPC 通道
-  （`process.connected` + `process.send`）」两个信号判定（终端 `dsh web` 的宿主没有 IPC 通道，
-  不能被误伤），命中则 `/status` 报 `available:false`、`POST /restart` 回
-  `409 restart-unsupported` 且**不 spawn、不置 `requested`**。
+  判定用「`ELECTRON_RUN_AS_NODE=1` **且** 有 IPC 通道（`process.connected` + `process.send`）」
+  两个信号（终端 `dsh web` 的宿主没有 IPC 通道，不能被误伤），命中则 `/status` 报 `available:false`、
+  `POST /restart` 回 `409 restart-unsupported` 且**不 spawn、不置 `requested`**。
+  这是 v1.3.0 那张表里的 `reason: "desktop"` 一行。
 - 客户端契约：探活必须先观察到 `/status` **失败一次**（证明旧进程死了），之后恢复成功才 `location.reload()`——没有这道闸，旧进程还没退出时的 200 会被误判成新进程。60s 等不到就如实提示手动刷新，不假装成功。
 - 失败：`500 restart-failed`（助手没起来，宿主**没有**退出，可以原地重试）；
   `409 restart-unsupported`（环境不支持，**不是**失败，别重试——重试也只会失败）。
@@ -568,7 +742,47 @@ window.__ModuleLoader__.load({
     可更新页作为整页时用 `.dshpm-updatesPage` 去掉卡片的内边距与边框（那 12px 内边距正是三页错位的根因），
     `.dshpm-updatesPanel` 基类保留以便别处复用这张卡片。
   - 发现页：搜索框（回车或 300ms 防抖）、分类 chips、排序下拉、卡片网格、分页（上一页/下一页 + 第 x/y 页）。
+    **翻页会把列表滚回顶部（v1.3.0，用户要求）**：分页器长在列表**最底部**，点完「下一页」时用户
+    正看着新页的**末尾**，最想看的第一条在屏幕外上方。所以翻页统一走一个 `goToPage`：改页码 +
+    立刻把 `.dshpm-root` 的 `scrollTop` 归零（**瞬时**，不用平滑：内容马上整体换掉，这种时候放
+    长距离动画容易显得打架；而右下角「回到顶部」按钮那条路保持平滑）。
+    **只给翻页做，不给搜索/排序/分类做**——那些控件在**顶部**，能点到它们就说明人已经在顶部了，
+    再滚一次是白做，还会把用户正在看的位置顶掉。
+    这条有真浏览器断言（e2e `[16]`：滚到底点下一页 ⇒ `scrollTop` 526 → 0、页码第 1/195 → 第 2/195、
+    列表头部回到视口内），并用变异测试证明断言**会红**（`_verify/pager-mutation.mjs`：3 被杀 / 0 存活 /
+    1 无效——「顺序调换」那个实测无行为差异，是无效变异体而不是覆盖缺口）。
   - 卡片：名称 + 作者 + 描述（按界面语言）+ star/下载 + 版本 + 分类 + 「安装」/「已安装」/「更新」按钮 + 「详情」。
+  - 「已安装」页：**结构上做不到的动作直接不渲染**（v1.3.0，用户要求「隐藏已安装下的开关或卸载不可以的项目」）。
+    这里的关键是把两种"不能点"**严格分开**，因为正确处置是相反的：
+    - **结构上做不到** ⇒ **不渲染**。四种情形：宿主给了 `readOnlyReason`
+      （`management-required` / `unaddressable` / `not-removable`）、`reason` 查不到文案而 `readOnly:true`、
+      `removable:false`、`market:true`（市场不能卸载自己）。渲染成永远点不动的灰按钮不是"保守"，
+      而是在承诺一个永远不会发生的动作——用户会反复点、去猜为什么点不动。
+    - **临时不可用**（写操作进行中、批量更新在跑、这一条正在处理）⇒ **保留控件、只禁用**。
+      否则操作期间按钮时隐时现，用户会以为功能丢了，那比灰着更吓人。
+    两条判据不同，**不能一起砍**：`removable:false` 只是不能**卸载**，开关仍然是可用的。
+    - **隐藏了动作就必须在同一行说明原因**：控件没了 tooltip 也没了，只留"东西不见了"是最难排查的状态。
+    - 同理，详情里 `entryId` 缺失的条目开关也不渲染（`toggleEntry` 用 `entryId` 发请求，缺它就是**假开关**：
+      能点、点了静默返回），改为用已有的 `installed.noEntryId` / `badge.disabled` / `badge.enabled` 报状态。
+    - **整卡不渲染（v1.3.0 续）**：`shouldHideInstalledCard` —— **开关和卸载都做不到**时整张卡片也不画。
+      只要还有一个动作能用（`removable:false` 但可开关、`market:true` 但可停用），卡片就必须留着，
+      否则会把一个**本来可用**的功能一起藏掉。三个配套约束：
+      ① `readOnly === true`（宿主没有 pluginManager）时**绝不隐藏任何卡片**——那种情况下每个包
+      都"不可操作"，字面执行会把整页藏空。这条豁免**是可测的**：`readOnly` 来自 `/status`
+      （挂载时读一次），而 `/installed` 是**另一个请求**，所以"status 说没有管理器、列表仍回得来"
+      是真实可构造的形状（本仓库 index.js 自己就写着「宿主服务可能比本插件晚注册」）。
+      e2e `[18]` 用探针造出这个形状并量到：只读态渲染 **6 行**（正常态 5 行——托管那个被藏）、
+      开关 **0 个**（豁免只是"显示"，不是"解锁"）。
+      > 我一度把这条豁免判成"防御性、不可达、变异体无效"——**那是因为我当时没给它场景**。
+      > 补上 `[18]` 之后它立刻变成真缺口并被杀掉（5/5）。教训：**"测不到"必须区分
+      > 「不存在」与「我没造出场景」**，否则会把一个真缺口写成"无效"而放过去。
+      ② 摘要的数字**必须等于实际渲染的行数**——藏了卡片还写总数就是"数字在说谎"，
+      差额用 `installed.hiddenCount` 写在明面上；
+      ③ 全都被藏光时**不能回落到"没装插件"那个空状态**——那与"这页没有可操作的项"是两回事，
+      用 `installed.allHidden.*` 分开说，并指向 `dsh plugin list`。
+    真浏览器断言在 e2e `[17]`（含**反向对照**：普通包必须仍然有开关和卸载、`removable:false` 的卡片
+    必须还在——只测"隐藏"的话，把按钮或整卡全删了也能全绿）与 `[18]`（全局只读豁免）；
+    变异测试 `_verify/installed-hide-mutation.mjs` **5/5 被杀**（含"摘要报总数"与"全局只读"两条）。
   - 详情：可展开区域，显示完整描述、能力标签、仓库/目录页外链（`target="_blank" rel="noreferrer"`）。
   - 已安装页：bundle 行（名称、版本、启用开关、卸载按钮、有更新时「更新到 x.y.z」）。
   - 可更新页：与已安装页同一份 `/installed` 数据，只显示 `updateAvailable === true` 的条目；空态区分「全部都是最新」与「目录还没就绪」；页脚不再有独立按钮（「重新检查」已并入页头的状态机按钮）。三个页签互相切换时另一侧的内容卸载（同一时间只有一份在 DOM 里）。

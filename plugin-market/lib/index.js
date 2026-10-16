@@ -11,6 +11,8 @@
  */
 
 import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   createRouteTable,
   pickQueryEnum,
@@ -31,7 +33,9 @@ import {
   sortPlugins
 } from './catalog.js'
 import { createSelfUpdater } from './self-update.js'
-import { RESTART_EXIT_DELAY_MS, isDesktopManagedHost, spawnRestartHelper } from './restart.js'
+import { RESTART_EXIT_DELAY_MS, spawnRestartHelper } from './restart.js'
+import { restartDecision, restartReachableFrom, trustedRestartRequest } from './restart-policy.js'
+import { cleanHotDir, hotMount, hotUnmount, isHotMounted, listHotMounts } from './hot-mount.js'
 
 const PLUGIN_NAME = 'deepseek-harness-market'
 /**
@@ -151,6 +155,30 @@ function hostInfo(ctx) {
 
 function profileName(ctx) {
   return hostInfo(ctx).profile ?? 'default'
+}
+
+/**
+ * 这个 profile 的**目录**——热挂载必须知道包被装到了哪里。
+ *
+ * 取值顺序（前两个来自宿主，是权威的；后两个是本机的推断）：
+ *   1. `profileContext.dir`：启动器/宿主直接给的 profile 目录（桌面壳会自己拥有 profile 目录
+ *      的位置，这时 `<DSH_HOME>/profiles/<name>` 是错的）；
+ *   2. `DSH_HOME/profiles/<name>`：普通 `dsh` 的约定；
+ *   3. `~/.dsh/profiles/<name>`：DSH_HOME 没设时的默认 home。
+ *
+ * 三个都拿不到时返回 `null`，调用方**不猜**——热挂载会挂到错的目录上去，
+ * 那比不挂更坏。
+ */
+function profileDirOf(ctx) {
+  const profileContext = safeGet(ctx, 'profileContext')
+  const explicit = optionalText(profileContext?.dir)
+  if (explicit !== null) return explicit
+  const name = optionalText(profileContext?.name) ?? argvProfile() ?? optionalText(process.env.DSH_PROFILE)
+  if (name === null || name === '') return null
+  const userHome = optionalText(process.env.USERPROFILE) ?? optionalText(process.env.HOME)
+  const home = optionalText(process.env.DSH_HOME) ?? (userHome === null ? null : join(userHome, '.dsh'))
+  if (home === null) return null
+  return join(home, 'profiles', name)
 }
 
 function managerOf(ctx) {
@@ -429,9 +457,134 @@ async function captureBundles(manager) {
   }
 }
 
+/**
+ * 认出这次操作落地的**包名**（不是 bundle 名——热挂载要拿它去 `node_modules` 里找目录）。
+ *
+ * 顺序与 verifyActivation 的归因同源：先看 before→after 的差集（不假设包名 == bundle 名），
+ * 差集不唯一或没有基线时，退回候选里那个**在 after 里出现过**的名字。
+ *
+ * 大小写必须归一：`bundleSnapshot` 用小写作键（避免大小写差异被当成两个包），
+ * 而候选来自目录/用户输入，大小写不保证一致——不归一就会出现「同一个包认不出来」
+ * 的静默失败。
+ *
+ * 返回的是 **after 里记录的真实名字**（不是小写键），因为下一步要拿它拼
+ * `node_modules/<name>` 的路径，Windows 之外区分大小写。
+ *
+ * 认不出来就返回 `null`——不猜一个名字去挂别人的目录。
+ *
+ * 导出只为让回归测试能真调它（源码形状断言测不出「差集里两个新名字时返回什么」）。
+ */
+export function resolveInstalledName(before, after, candidates) {
+  // 回读不到列表就**什么都认不出**：不是「没有包」，而是「不知道」。
+  if (after === null) return null
+  const wanted = [...new Set((Array.isArray(candidates) ? candidates : [])
+    .map((entry) => optionalText(entry))
+    .filter((entry) => entry !== null)
+    .map((entry) => entry.toLowerCase()))]
+  const pick = (key) => after.get(key)?.name ?? null
+  if (before !== null) {
+    const appeared = [...after.keys()].filter((key) => !before.has(key))
+    if (appeared.length === 1) return pick(appeared[0])
+    const matched = appeared.filter((key) => wanted.includes(key))
+    if (matched.length === 1) return pick(matched[0])
+    if (matched.length > 1) return null
+  }
+  const present = wanted.filter((key) => after.has(key))
+  if (present.length === 1) return pick(present[0])
+  return null
+}
+
+/** 包目录是否真的存在——`node_modules/<name>`；scoped 包要按 `/` 拆。 */
+function packageDirExists(profileDir, name) {
+  return existsSync(join(profileDir, 'node_modules', ...name.split('/')))
+}
+
+/**
+ * 把热挂载的结果并进激活回读：挂上了就是真的在跑，回读状态跟着改成 live。
+ *
+ * 抽成函数只为一件事——**让它可被测**。这段逻辑此前长在 install 路由内部，
+ * 于是「热挂载成功却没把状态改成 live」这类改坏能一路绿到发布（变异测试 M18 实测存活）。
+ *
+ * 只在**确实有 activation 对象**时改：没有回读结果时凭空造一个 `live` 是无凭据的保证，
+ * 比不说更坏（见 verifyActivation 的推理）。
+ */
+export function mergeHotIntoActivation(activation, hot) {
+  const didMount = hot !== null && hot !== undefined && hot.attempted === true && hot.ok === true
+  if (!didMount) return activation
+  if (activation === null || activation === undefined) return activation
+  activation.state = 'live'
+  activation.hot = true
+  if (!Array.isArray(activation.reasons)) activation.reasons = []
+  if (!activation.reasons.includes('hot-mounted')) activation.reasons.push('hot-mounted')
+  return activation
+}
+
+/**
+ * 宿主说「重启后才生效」时，替它把这一步做掉。
+ *
+ * 只在**真的有必要**时出手，两条前置条件缺一不可：
+ *   1. 宿主没装上（`restart-required`）或落地了却没跑起来（activation 不是 live）；
+ *   2. 能唯一认出这次装的是哪个包，且它的目录真的在盘上。
+ * 其它情况一律不动——装成功了还去挂，会插出第二个 loader 条目，前缀路由重复注册。
+ *
+ * 挂**不**用于升级：替换一个已经活着的包时，Node 的 ESM 缓存里还是旧模块，
+ * 挂上去只是围着旧模块重建 fiber（参考实现 #685 实测过）。升级一律保持「重启后生效」。
+ * 判定方式：这个包在装之前**本来就在** bundle 列表里 → 是升级，不热挂。
+ *
+ * 导出只为让回归测试能真调它——**这是全流程里最该被测的一段**：它在「该不该挂」上判错，
+ * 要么白挂一次（插出第二个 loader 条目、前缀路由重复注册），要么永远不挂。
+ * `deps.mount` / `deps.profileDir` 是可注入的缝，测试用它们观察「到底调没调」。
+ */
+export async function attemptHotMount(ctx, facts, deps = {}) {
+  const { application, pending, before, after, candidates } = facts
+  if (pending === true) return { attempted: false }
+  const profileDir = deps.profileDir !== undefined ? deps.profileDir : profileDirOf(ctx)
+  const name = resolveInstalledName(before, after, candidates)
+  if (name === null) return { attempted: false }
+  // 升级（装之前就在列表里）不热挂，理由见上。
+  if (before !== null && before.has(name.toLowerCase())) return { attempted: false }
+  const confirmedLive = application === 'applied' && verifyActivation(facts)?.state === 'live'
+  if (confirmedLive) return { attempted: false }
+  if (profileDir === null) {
+    return { attempted: true, ok: false, name, reason: '定位不到这个 profile 的目录，热挂载不做（重启后生效） / the profile directory could not be resolved; nothing was hot-mounted' }
+  }
+  // bundle 名未必等于包名（本仓库别的判定也踩过这条）。目录找不到时先按候选逐个试，
+  // 都找不到就如实说「目录不在盘上」，而不是让下游报一个「没有 bundle patch」的假原因。
+  let target = name
+  if (!packageDirExists(profileDir, target)) {
+    const alternate = [...new Set((Array.isArray(candidates) ? candidates : []).filter((entry) => typeof entry === 'string'))]
+      .find((entry) => packageDirExists(profileDir, entry))
+    if (alternate === undefined) {
+      return {
+        attempted: true,
+        ok: false,
+        name,
+        reason: `装完之后在 profile 的 node_modules 里找不到 ${name} 的目录，热挂载不做（重启后生效） / ${name} is not in the profile's node_modules after the install; nothing was hot-mounted`
+      }
+    }
+    target = alternate
+  }
+  // 已经热挂载过的**不重复挂**：第二次会在 YAML 里再插一行，同一条前缀路由注册两遍。
+  if (deps.isMounted !== undefined && deps.isMounted(target) === true) {
+    return { attempted: true, ok: true, name: target, reason: null, via: null, reused: true }
+  }
+  const mount = deps.mount ?? hotMount
+  const outcome = await mount(ctx, profileDir, target)
+  return { attempted: true, name: target, ok: outcome.ok === true, reason: outcome.reason ?? null, via: outcome.via ?? null }
+}
+
+/** 热挂载结果进宿主日志：挂上了与没挂上都要留痕，否则用户看到的只有一句横幅。 */
+function logHot(hot) {
+  if (hot.ok === true) {
+    console.log(`[${PLUGIN_NAME}] 热挂载成功：${hot.name}${hot.via === null ? '' : `（经 ${hot.via} 解析 include）`}`)
+    return
+  }
+  console.warn(`[${PLUGIN_NAME}] 热挂载未成功，退回重启路径：${hot.name}——${hot.reason}`)
+}
+
 /** 契约 §2.4 / §2.5 的响应；宿主错误码原样透传（契约要求「透传 error.code」）。
  *  导出只为让回归测试能真调它读响应体（源码形状断言测不出 `ok` 的推导行为）。 */
-export function sendChangeResult(res, result, stage, activation) {
+export function sendChangeResult(res, result, stage, activation, hot) {
   const value = result !== null && typeof result === 'object' ? result : {}
   const error = projectChangeError(value.error)
   const application = optionalText(value.application) ?? 'failed'
@@ -439,7 +592,8 @@ export function sendChangeResult(res, result, stage, activation) {
     ? value.pendingBuilds.filter((entry) => typeof entry === 'string')
     : []
   // 记账「改动已落盘、但当前进程还在跑旧代码」——客户端刷新页面后靠它恢复横幅。
-  noteRestartFromResult(value, value.target)
+  // 热挂载成功时**不记账**：这一条已经生效了，记进去会弹一条假的「待重启」。
+  if (hot?.ok !== true) noteRestartFromResult(value, value.target)
   const payload = {
     // ok 不能只看 error：宿主的 ChangeResult 里 error 是可选的，`application:'failed'`
     // 完全可能不带 error。只看 error 就会把一次失败的操作报成 ok:true，客户端据此渲染
@@ -467,6 +621,13 @@ export function sendChangeResult(res, result, stage, activation) {
   // 激活状态是可选的：读不回列表时给 `unknown`（带 reasons），**不给 null 也不给 live**——
   // null 会让客户端以为「这条不用谈激活」，live 就成了无凭据的保证。
   if (activation !== undefined && activation !== null) payload.activation = activation
+  // 热挂载的结果是**这一条操作自己的事实**，必须和 activation 一起回去：客户端要能区分
+  // 「宿主说重启后生效，市场替它挂上了」和「市场也挂不上，老老实实等重启」。
+  // 没尝试时（attempted:false）不带这个字段，免得客户端把「不需要」读成「失败」。
+  if (hot !== undefined && hot !== null && hot.attempted === true) {
+    payload.hotMounted = hot.ok === true
+    if (hot.reason !== null && hot.reason !== undefined) payload.hotMountReason = hot.reason
+  }
   const output = value.packageResult?.output
   if (typeof output === 'string' && output !== '') payload.output = tail(output, 2000)
   sendJson(res, 200, payload)
@@ -563,7 +724,26 @@ export function restartPendingSnapshot() {
   }
 }
 
-function createHandlers(ctx, catalog, selfUpdate) {
+function createHandlers(ctx, catalog, selfUpdate, config = {}) {
+  /**
+   * 「一键重启能不能用」的判定，**每次读时重算**（与 POST /restart 用同一个函数，
+   * 两处不会漂移）。不用模块级常量：调试器是运行期状态（附着/断开），
+   * 缓存一次会让按钮在调试结束后仍然不出现。
+   *
+   * `req` 用来做 `reachable` 的**预测**：这个端点的请求本身就能告诉我们
+   * 「同一个页面发出的 POST 能不能过围墙」（反代后面、带转发头、Host 不是回环
+   * ——这些失败原因与 POST 完全一致），于是横幅能说出为什么没有按钮，
+   * 而不是渲染一个必然 403 的按钮。
+   */
+  function restartStatus(req) {
+    const decision = restartDecision(config)
+    return {
+      available: decision.allowed === true,
+      reachable: restartReachableFrom(req),
+      reason: decision.reason
+    }
+  }
+
   /** 目录不可用时如实报错，绝不用空列表冒充「没有结果」。 */
   async function requireCatalog(res) {
     const loaded = await catalog.ensure()
@@ -612,13 +792,17 @@ function createHandlers(ctx, catalog, selfUpdate) {
         plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION },
         host: hostInfo(ctx),
         manager: { available, registries },
-        // 一键重启能不能用，必须**提前**告诉客户端：桌面壳管理的宿主里它是必然失败的，
-        // 让用户先看到「重启 DSH」按钮、点完才报错，等于把一个不可能的动作摆在他面前
-        // （而且这一步的代价是整个应用关掉且不会自己回来，见 restart.js 的 isDesktopManagedHost）。
-        // 与 POST /restart 用同一个判定，两处不会漂移。
-        restart: { available: isDesktopManagedHost() !== true },
+        // 一键重启能不能用，必须**提前**告诉客户端：这个判定取决于部署环境
+        // （systemd / 桌面壳 / 调试器，见 restart-policy.js），不可用时让用户先看到
+        // 「重启 DSH」按钮、点完才报错，代价不只是白点一次——那类环境里真的执行
+        // 重启会把服务/应用杀掉且不会自己回来。
+        // 与 POST /restart 用同一个 restartDecision，两处不会漂移。
+        restart: restartStatus(req),
         // 待重启项：宿主半的模块级记账（刷新页面不丢）。见 noteRestartFromResult 的推理。
         pendingRestart: restartPendingSnapshot(),
+        // 本进程热挂载着的包。客户端据此把「已装好、正在跑」和「等重启」分开显示，
+        // 也让页面刷新后仍能看到这次会话里热挂载过什么。
+        hotMounts: listHotMounts(),
         catalog:
           cache === null
             ? null
@@ -833,7 +1017,27 @@ function createHandlers(ctx, catalog, selfUpdate) {
         // 版本回读的期望值取自**目录**（用户点的就是那个版本），不是宿主回显。
         expectedVersion: hit?.version
       })
-      sendChangeResult(res, result, 'install', activation)
+      // 宿主说「重启后生效」时，替它把这一步做掉（见 hot-mount.js 的推理）。
+      const hot = await attemptHotMount(
+        ctx,
+        {
+          application: optionalText(shape.application) ?? 'failed',
+          pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
+          before,
+          after,
+          candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]
+        },
+        // 本该会话已经热挂载过的包不重复挂：第二次会在 YAML 里再插一行，
+        // 同一条前缀路由注册两遍（宿主对重复注册会 throw）。
+        { isMounted: isHotMounted }
+      )
+      if (hot.attempted === true) {
+        logHot(hot)
+        // 挂上了就是真的在跑：把回读状态改成 live（并且不再记待重启）。
+        // 只在真挂上时改；attempted 但失败的不动——回读说什么就是什么。
+        mergeHotIntoActivation(activation, hot)
+      }
+      sendChangeResult(res, result, 'install', activation, hot)
     },
 
     /** 契约 §2.5 */
@@ -876,7 +1080,13 @@ function createHandlers(ctx, catalog, selfUpdate) {
         })
         return
       }
-      sendChangeResult(res, result, 'remove')
+      // 热挂载过的包：先从运行中的组合里摘掉，再去报告宿主的结果。
+      // 顺序是有意的——卸载已经成功、但热卸载没落地的组合不该被说成「卸载失败」，
+      // 热卸载没成功只是意味着「它从下一次启动起不再加载」（见 hot-mount.js）。
+      // 判定必须大小写不敏感：`installed` 里记录的名字与热挂载时的键不保证一致。
+      let unmounted = null
+      if (isHotMounted(name)) unmounted = (await hotUnmount(name)) === true
+      sendChangeResult(res, result, 'remove', undefined, unmounted === null ? undefined : { attempted: true, ok: unmounted, reason: null })
     },
 
     /** 契约 §2.6 */
@@ -989,11 +1199,26 @@ function createHandlers(ctx, catalog, selfUpdate) {
      */
     async restart(req, res) {
       if (!requireSameOrigin(req, res)) return
-      const outcome = spawnRestartHelper()
+      // 进程控制比一般写操作更严：除同源之外还要**直连回环**（转发来的不算用户本人），
+      // 且 Host 必须是回环权威（DNS rebinding 页面能经由自己的域名打到 127.0.0.1，
+      // 此时地址证明不了什么，Host 才是伪造不了的那一项）。见 restart-policy.js。
+      // 这条围墙与 /status 的 restart.reachable 预测共用 directLoopbackRequest，
+      // 所以「横幅说能点、点了却 403」这种两处漂移不会发生。
+      if (!trustedRestartRequest(req)) {
+        sendError(res, 403, 'cross-origin', {
+          hint: '一键重启只接受本机页面直接发起的请求（不经反向代理）。'
+            + '若你在反代后面用 DSH，请用部署工具自己的重启方式。'
+        })
+        return
+      }
+      const outcome = spawnRestartHelper({ config })
       if (outcome.ok !== true) {
-        // 桌面壳管理的宿主走 `restart-unsupported`：这不是「重启失败了」，而是
-        // 「这个环境里一键重启不可能成功」——用不同的码，客户端才能给出正确的下一步。
-        const code = outcome.code === 'desktop-managed' ? 'restart-unsupported' : 'restart-failed'
+        // 两种原因分开报，因为**下一步动作不同**：`restart-unsupported` 是
+        // 「这个环境里一键重启不可能成功」（桌面壳 → 关窗重开；systemd → systemctl
+        // restart；调试器 → 先断开调试器），`restart-failed` 才是「这次没起起来，可以再试」。
+        const code = outcome.code === 'desktop-managed' || outcome.code === 'restart-not-allowed'
+          ? 'restart-unsupported'
+          : 'restart-failed'
         sendError(res, 409, code, { message: outcome.message, hint: outcome.hint })
         return
       }
@@ -1092,8 +1317,8 @@ function summarizeAttempts(attempts) {
     .join('；')
 }
 
-function buildRoutes(ctx, catalog, selfUpdate) {
-  const handlers = createHandlers(ctx, catalog, selfUpdate)
+function buildRoutes(ctx, catalog, selfUpdate, config) {
+  const handlers = createHandlers(ctx, catalog, selfUpdate, config)
   return createRouteTable()
     .on(`${ROUTE_PREFIX}/status`, ['GET'], handlers.status)
     .on(`${ROUTE_PREFIX}/catalog`, ['GET'], handlers.catalog)
@@ -1109,12 +1334,34 @@ function buildRoutes(ctx, catalog, selfUpdate) {
 export const name = PLUGIN_NAME
 export const inject = ['webServer']
 
-export function apply(ctx) {
+export function apply(ctx, config) {
   const webServer = resolveWebServer(ctx)
   const catalog = createCatalogCache()
   // managerOf 每次调用时再读：宿主服务可能比本插件晚注册（apply 时可能还拿不到）。
   const selfUpdate = createSelfUpdater({ managerOf: () => managerOf(ctx), current: PLUGIN_VERSION })
-  const routes = buildRoutes(ctx, catalog, selfUpdate)
+  // config 是 loader 传给本插件的**那一个子对象**（cordis：`runtime.callback(ctx, this.config)`），
+  // 也就是 profile 里 `- id: plugin-market` 下 `config:` 里的内容。所以 `allowRestart`
+  // 必须写在 `config:` 里面——写在它旁边的顶层会被**静默忽略**（参考实现 #227 踩过这一条）。
+  // 另外，本插件没有声明 Config schema，cordis 的 `resolveConfig` 在没有 Config 时
+  // 原样返回（`if (!runtime.Config) return config`），所以 `config` 可能就是 undefined
+  // 或任意值——下面一律用可选访问，不假设它是对象。
+  const routes = buildRoutes(ctx, catalog, selfUpdate, config)
+
+  // 擦掉上一次进程留下的热挂载输入。**必须在这里做**：那棵子树是运行期专用的，
+  // 而它的输入文件是会在启动时被 loader 组装的——留一个下来，下一次启动就会把
+  // 一个「装过但早已卸载」的行重新挂上去，或者更糟：与 bundle 层插同一个 id
+  // （这是**硬启动失败**，DSH 的启动是全有全无的）。
+  // 目录拿不到就跳过：没有 profile 目录 = 本次进程根本不会写热挂载文件。
+  try {
+    const profileDir = profileDirOf(ctx)
+    if (profileDir !== null) {
+      const removed = cleanHotDir(profileDir)
+      if (removed > 0) console.log(`[${PLUGIN_NAME}] 清掉上次进程留下的 ${removed} 个热挂载输入`)
+    }
+  } catch (error) {
+    // 清理失败绝不能拦住市场启动：它只是删几个我们自己的临时文件。
+    console.warn(`[${PLUGIN_NAME}] 清理热挂载输入失败（不影响浏览与安装）：${describe(error)}`)
+  }
 
   const disposeRoute = webServer.register({
     kind: 'prefix',

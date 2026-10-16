@@ -63,10 +63,23 @@
    - `cordis.patch.yml` 存在且行 `name` 与包名一致；
    - 客户端 bundle 含 `__ModuleLoader__.load` 且 `id` 等于包名，且不含 `eval` / `new Function`；
    - `lib/` 里不存在**写死的旧版本号**（版本必须从包清单读；这条拦过一次真实的漂移）；
-   - `verify/*.test.mjs` **全部**通过——**不是写死清单，是自动发现的**（当前 **20** 套：
+   - `verify/**/*.test.mjs` **全部**通过——**不是写死清单，是自动发现的**（当前 **28** 套：
      来源判定矩阵、样式生命周期、版本一致性、PS 脚本 BOM 与读取编码、自更新通道、文案与动效不变量、
-     不说谎两条路径、桌面端重启拒绝路径，以及**发布工作流回归** `release-workflow.test.mjs`——
-     后者钉住「npm 发布只能由 `publish-npm.yml` 亲自执行」，见 §4.2.1）；
+     不说谎两条路径、桌面端重启拒绝路径、崩溃恢复卡、**门禁执行器自身** `run-tests.test.mjs`、
+     **热挂载三件套**（`hot-mount` 挂载/回滚/超时、`hot-mount-attempt` 该不该挂的判定、
+     `hot-mount-client` 文案与重启横幅）、
+     **GitHub 多线路** `github-routes.test.mjs`（候选顺序、赢家记忆、负缓存与「404 不算线路故障」、
+     200+HTML 载荷校验、总预算平摊是硬上界、前缀校验）、
+     **按需重启判定** `restart-policy.test.mjs`（systemd 的两个信号与假阳性防护、调试器闸门不可覆盖、
+     四种原因各自的下一步、DNS rebinding 与默认端口等价）、
+     以及**发布工作流回归** `release-workflow.test.mjs`——
+     后者钉住「npm 发布只能由 `publish-npm.yml` 亲自执行」，见 §4.2.1）。
+     执行由 `scripts/run-tests.mjs` 负责，它是**有界并发**（默认 `min(4, CPU)`，可用
+     `DSHM_GATE_JOBS` 覆盖）并给每个测试加硬超时；两件事都必须成立，否则这条门禁会以
+     **静默**方式失效：不递归时子目录里的测试一次都不跑（旧写法就是 `Get-ChildItem` 不带
+     `-Recurse`），而没有超时时一个挂住的测试会把发布流程永远卡住。执行器自己由
+     `verify/run-tests.test.mjs` 用**伪造的测试目录**验证（失败/超时/子目录/数量下限四条都真的驱动它）；
+     发现数低于 20 或目录不存在一律**报错**——「0 个测试全绿」看起来和成功一模一样，比红灯更危险。
    - **发布面干净**：`plugin-market/`、`docs/`、`scripts/` 与根文件不能有未提交改动。
      其它路径（例如并行进行的 `verify/**` 验收脚本）有改动只警告、不阻塞——它们既不进发布物，
      也不进发布提交，把一场正在跑的验收当成发布阻塞没有意义。
@@ -398,6 +411,8 @@ GitHub Release 附件下载）。这条决定连带改了检查与下载的分�
 
 ```powershell
 node verify/self-update.test.mjs         # 自更新通道的离线回归（含"拒绝路径不安装"）
+node verify/github-routes.test.mjs        # 多线路：候选/赢家/负缓存/载荷校验/预算硬上界
+node verify/restart-policy.test.mjs       # 按需重启：三种监管者 + 围墙
 node verify/client-copy.test.mjs         # 文案键集与动效写法的不变量
 pwsh -File verify/ui-check.ps1           # 真实浏览器：起 scratch 宿主 + headless Edge，出截图
 pwsh -File verify/self-update-live.ps1   # 自更新端到端：真的下载 + 校验 + pnpm 安装（需真实网络）
@@ -407,6 +422,80 @@ pwsh -File verify/self-update-live.ps1   # 自更新端到端：真的下载 + �
 一个要真实网络并临时改 `package.json`（它自己会按字节还原）；两者都慢且依赖本机环境。
 但它们给出的是**离线测试给不了**的证据（真渲染、真计算样式、真的把包装上）。
 改动客户端半或自更新通道之后必须手动各跑一次；截图落在 `verify/logs/ui/`。
+
+**v1.3.0 另加一组 git-ignored 的现场探针**（`_verify/`，不进门禁——它们量的是"此刻这台机器
+的真实网络"，跑在网络不同的时候就该得出不同结论，所以不能变成断言）：
+
+| 探针 | 回答什么 |
+| --- | --- |
+| `_verify/baseline-selfupdate.mjs` | 改装**前**跑一次真 `check()`：12.4s → 全源失败（这是"必须修"的证据） |
+| `_verify/after-routes.mjs` | 改装**后**同一个探针：成功，并打印学到的赢家与负缓存条数 |
+| `_verify/routes-live.mjs` / `routes-live2.mjs` | 16 条候选线路各自的真实可达性与耗时。**第二版是必需的**：第一版用了仓库根不存在的路径，于是把一堆 404 读成"线路挂了" |
+| `_verify/asset-routes.mjs` | Release 附件经各前缀下来后 sha256 是否等于 GitHub 报的 `digest` |
+| `_verify/npm-identity.mjs` | npm 上的 tarball 与 GitHub 附件是不是同一份字节（结论：**不是**） |
+| `_verify/pager-mutation.mjs` | 翻页回顶的 e2e 断言会不会红（3 被杀 / 0 存活 / 1 无效） |
+| `_verify/installed-hide-mutation.mjs` | 「已安装」页隐藏不可做动作的断言会不会红（3/3 被杀） |
+| `_verify/verify-mutation-crashrestore.mjs` | 变异脚本被硬杀后**能否自愈**（sidecar 机制的三条验证） |
+
+> **变异脚本必须「先落盘 sidecar、后变异」**（`client.js.mutbak`）。这条是被真事故逼出来的：
+> 有一次跑到一半被中断，`finally` 没走完，`client.js` 里**留着变异体**（看起来像产品代码）。
+> 第一版修法是在进程里挂 SIGINT/SIGTERM 钩子——**验证失败**：Windows 上 `child.kill()`
+> 是强制终止，信号处理器根本不跑。现在改成「任何一次后续运行看到 sidecar 就先还原并告警」，
+> 由 `_verify/verify-mutation-crashrestore.mjs` 三条验证钉住（硬杀后 sidecar 一定在 /
+> 下次运行自愈 / 自愈后逐字节一致）。
+
+### 4.6 门禁与产品热路径的实测基线（2026-10，改性能前先看这里）
+
+一组数字与一条**负结果**，避免以后有人把已经量过的事再"优化"一遍。
+
+**门禁**（`pwsh -File scripts\release.ps1 -LocalOnly`，本机 16 逻辑核）：
+
+| 项 | 值 |
+|---|---|
+| 门禁总墙钟 | **约 2.7–3.5 s**（引入执行器与并发前是 7.0 s） |
+| 28 个测试的墙钟 | 约 2.5 s（并发 4；此前 22 个串行 5.9 s） |
+
+> **v1.3.0 的 `github-routes` 是门禁最慢的一环（约 3.1 s）**，因为「总预算平摊」与
+> 「预算耗尽」两条要**真的**等超时（各 1200 ms / 200 ms）。这两条不能靠假时钟省掉：
+> 它们守的正是「总预算是硬上界」——早先把下限写成 `Math.max(1_000, …)`，实测 1200 ms
+> 的预算跑了 2032 ms，而当时测试的断言是 `< 2400`（2× 预算）所以照样绿。
+> 收紧断言之后它才真的能抓住那类回归；等待是这条断言的成本，不是浪费。
+
+时间花在哪，以及**不能**再压缩的部分：门禁里绝大部分"慢"来自测试自己造的等待，
+不是被测代码。已按证据逐个处理：
+
+- `restart-helper`：原来 `await delay(1600)` 白等 → 改成等助手**自己退出**的事件（实测 ~830 ms），
+  期限从 700 ms 降到 250 ms（该性质与期限长短无关）。1905 → ~1130 ms。
+- `robustness`：原来 `gzipSync(Buffer.alloc(256MB), level 9)` 构造炸弹自己就要 **~830 ms**，
+  而唯一判据只是"解压后超过 `maxOutputLength`" → 换成 32 MiB + `level 1`（**~37 ms**，仍是上限
+  8 MiB 的 4 倍，同一判据）；固定 `sleep(900)` → 有界等待 + **耗时上下界断言**（比原来的固定睡眠更强：
+  它分得出"300 ms 超时生效"和"超时被改成 880 ms 但恰好没超过 900"）。1629 → ~450 ms。
+- `catalog-identity`：两次 O(n) 的"每个条目各 join 一次"（1431 + 2124 次）→ 各换成**一次批量 join**
+  并抽取跨全表样本**当场验证两者逐项等价**（不是只在注释里声称）。977 → ~230 ms。
+  注意：这一段的真实规模断言依赖 `_ref/data/plugins.json`，而 `_ref/` 被 gitignore，
+  所以**在 CI 上整段跳过**，只在本地跑。
+
+**产品热路径**（`/catalog` 每次请求 = `joinInstalled → filterPlugins → sortPlugins → paginate`，
+4412 条真实快照）：**p50 约 2.2 ms**（空查询）+ 搜索约 5.4 ms。分项：`joinInstalled` 0.16 ms、
+`sortPlugins` 1.77 ms、`filterPlugins` 0.04 ms、`paginate` 0.00 ms。
+
+> **负结果：这条热路径没有值得做的优化。** `joinInstalled` 早已带按数组身份的匹配索引记忆化，
+> 2.2 ms 里主要是排序，而且这是**宿主每个请求**一次的成本。曾经怀疑的"O(n²)"不存在；
+> 给 `useMemo`/`useCallback` 之类加记忆化在客户端也**没有证据支持**（上游 `dshmarket` 同样是
+> `memo = 0`）。按"没有测量就没有优化"处理：**不改**。
+
+> **动手改 `scripts/*.ps1` 或 `verify/*.ps1` 之后，先补 UTF-8 BOM 再跑门禁。**
+> 很多编辑器/工具写回文件时会**丢掉 BOM**，而无 BOM 的 UTF-8 脚本会被 Windows PowerShell 5.1
+> 按 ANSI 解码，中文注释直接让脚本解析失败（"意外的标记"），版本发不出去。补 BOM 并顺带验证
+> 能正常解析：
+>
+> ```powershell
+> pwsh -NoProfile -File verify\lib\add-bom.ps1 -Paths scripts\release.ps1
+> ```
+>
+> `verify/ps-bom.test.mjs` 会在门禁里拦住漏改的那次，但**它只在门禁跑到时才拦**
+> ——也就是说，一次"改了脚本就跑门禁"的循环里，你会先看到 `ps-bom` 变红而不是发布失败。
+> 这次修门禁时就踩到了：`scripts/release.ps1` 被写回后丢了 BOM，`ps-bom.test.mjs` 立刻变红。
 
 ## 5. 发布之后：改动什么时候生效
 
@@ -441,3 +530,13 @@ pwsh -File verify/self-update-live.ps1   # 自更新端到端：真的下载 + �
 有一颗 `disableAllPlugins()`）记在 [API-CONTRACT §2.6](API-CONTRACT.md)，
 不在 `docs/ROADMAP.md` 重新立项。**在桌面端里给按钮 = 让用户撞「启动失败」并可能一键停掉全部插件。**
 **但「待重启」这件事仍然如实显示**：宿主半记账 + `/status.pendingRestart` 水合，刷新页面不会丢。
+
+**v1.3.0：不可用的原因从「桌面端一种」扩到四种，判定与文案都分开**（契约见
+[API-CONTRACT §2.10](API-CONTRACT.md)）。新增 systemd（默认 `KillMode=control-group` 会把助手
+连坐清掉，服务被杀后不会自己回来）与调试器（`--inspect`，运行期闸门、`allowRestart` 也覆盖不了），
+外加显式的 `allowRestart: false`；`/status` 多了 `reason` 与 `reachable`，客户端按 reason 给**四条
+不同**的说明。**发版时值得记住的一点**：识别 systemd 必须**两个信号**（环境标记是继承的，
+只看它会把普通终端与 CI runner 也关掉——那是比原 bug 更坏的 bug），所以
+`INVOCATION_ID` 存在**不等于**"这是 systemd 服务"，排查时别只看这一个变量。
+另外助手现在复刻宿主的 `env` 与 `cwd`：`cwd` 以前被换成**插件目录**，
+而 DSH 的 profile 解析依赖它——如果你看到重启后的进程读错 profile，先查这里。

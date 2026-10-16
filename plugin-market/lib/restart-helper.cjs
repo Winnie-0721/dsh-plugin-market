@@ -29,7 +29,17 @@ function readPayload() {
     if (!Array.isArray(payload.args) || payload.args.some((value) => typeof value !== 'string')) return null
     const waitMs = Number.isFinite(payload.waitMs) && payload.waitMs >= 100 ? payload.waitMs : 60000
     const pollMs = Number.isFinite(payload.pollMs) && payload.pollMs >= 10 ? payload.pollMs : 300
-    return { pid: payload.pid, execPath: payload.execPath, args: payload.args, waitMs, pollMs }
+    // cwd/env 可选：缺省时回落到助手自己的继承环境（与早先行为一致）。
+    // env 只收字符串值——spawn 遇到非字符串会抛错，而那时宿主已经退出了，没人能报这个错。
+    const cwd = typeof payload.cwd === 'string' && payload.cwd !== '' ? payload.cwd : null
+    let env = null
+    if (payload.env !== null && payload.env !== undefined && typeof payload.env === 'object') {
+      env = {}
+      for (const [key, value] of Object.entries(payload.env)) {
+        if (typeof value === 'string') env[key] = value
+      }
+    }
+    return { pid: payload.pid, execPath: payload.execPath, args: payload.args, waitMs, pollMs, cwd, env }
   } catch {
     return null
   }
@@ -62,8 +72,10 @@ const timer = setInterval(() => {
     return
   }
   clearInterval(timer)
-  const env = { ...process.env }
+  const env = payload.env === null ? { ...process.env } : { ...payload.env }
   // 关键：助手靠 ELECTRON_RUN_AS_NODE 以 node 身份运行；新宿主必须以正常身份启动。
+  // 先按宿主的原始环境恢复，再删掉这一个变量——顺序不能反（payload.env 里若本来就带着
+  // 它，先删后覆盖等于没删，桌面端会被当成 node 模式拉起：黑窗、没界面）。
   delete env.ELECTRON_RUN_AS_NODE
   try {
     // detached 是**实测必需**（Windows 上非 detached 的子进程会随创建者退出一起被带走，
@@ -71,7 +83,12 @@ const timer = setInterval(() => {
     // 刚拉起的宿主就没了，重启表现为「黑一下然后什么都没发生」。
     // 代价（如实记录）：重启后的进程不在终端的默认 Ctrl+C 目标里，结束它要用
     // DSH 自己的退出方式或 taskkill；见 docs/RELEASING.md §5。
-    const child = spawn(payload.execPath, payload.args, { stdio: 'inherit', env, detached: true, windowsHide: true })
+    //
+    // cwd 复刻宿主的：DSH 的 profile 解析与相对路径配置都依赖它，用助手自己的位置
+    // 会把新宿主的工作目录换掉（那是启动形状的一部分）。
+    const options = { stdio: 'inherit', env, detached: true, windowsHide: true }
+    if (payload.cwd !== null) options.cwd = payload.cwd
+    const child = spawn(payload.execPath, payload.args, options)
     if (child && typeof child.on === 'function') {
       // 实测：spawn 失败（ENOENT）的 'error' 事件约 1ms 后才到，而本函数紧接着就同步
       // process.exit(0)，所以**这个 handler 当前不可达**（独立审计发现，我用探针复现：

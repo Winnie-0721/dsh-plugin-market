@@ -16,6 +16,46 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * 从 `from` 处的函数签名开始，取**平衡大括号**内的整段函数体。
+ *
+ * 为什么不用固定长度窗口：源码形状断言靠字符数猜边界，一加代码就假警报
+ * （host-contract 里真的发生过：加了一段前置判定就把 sendJson 挤出窗口）。
+ * 这个方法只看括号配对，与方法体长短无关。
+ *
+ * 扫描时跳过字符串与注释里的括号——`'{'` 或注释中的 `}` 会让配对提前结束。
+ */
+function balancedBody(source, from) {
+  const start = source.indexOf('{', from)
+  if (start < 0) return ''
+  let depth = 0
+  let index = start
+  let mode = null // null | "'" | '"' | '`' | '//' | '/*'
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+    if (mode === null) {
+      if (char === "'" || char === '"' || char === '`') mode = char
+      else if (char === '/' && next === '/') { mode = '//'; index += 1 }
+      else if (char === '/' && next === '*') { mode = '/*'; index += 1 }
+      else if (char === '{') depth += 1
+      else if (char === '}') {
+        depth -= 1
+        if (depth === 0) return source.slice(start, index + 1)
+      }
+    } else if (mode === '//') {
+      if (char === '\n') mode = null
+    } else if (mode === '/*') {
+      if (char === '*' && next === '/') { mode = null; index += 1 }
+    } else {
+      if (char === '\\') index += 1
+      else if (char === mode) mode = null
+    }
+    index += 1
+  }
+  return source.slice(start)
+}
+
 import { sendError, sendJson, createRouteTable } from '../plugin-market/lib/http.js'
 import { sendChangeResult, findCatalogItem, verifyActivation, noteRestartFromResult, restartPendingSnapshot } from '../plugin-market/lib/index.js'
 import { buildHelperCommand, buildRestartPayload, spawnRestartHelper } from '../plugin-market/lib/restart.js'
@@ -154,7 +194,11 @@ check('setTimeout(process.exit) 出现在 sendJson 之前（源码顺序）', ()
   // 之后每次点击都回 already:true 并跳过安排 → 重启功能永久失效。
   const at = indexSource.indexOf('async restart(req, res) {')
   assert.ok(at > 0, '找得到 restart handler')
-  const body = indexSource.slice(at, at + 1400)
+  // **取平衡括号内的整段函数体**，不用固定长度窗口。
+  // 早先这里写的是 `slice(at, at + 1400)`：handler 里加一段前置判定（例如重启围墙）
+  // 就会把 `sendJson` 挤出窗口，于是断言失败而**代码其实是对的**——
+  // 这种「靠字符数猜边界」的测试会在每次无关改动时制造假警报。
+  const body = balancedBody(indexSource, at)
   const exitAt = body.indexOf('process.exit(0)')
   const sendAt = body.indexOf('sendJson(res, 200')
   assert.ok(exitAt > 0 && sendAt > 0, '两处都要在')
@@ -400,7 +444,57 @@ check('激活状态进入了 install 的响应体（真调 sendChangeResult 读 
 check('install 路由真的做了前后快照并传给 sendChangeResult（源码形状）', () => {
   assert.match(indexSource, /const before = await captureBundles\(manager\)/, '装之前要有基线')
   assert.match(indexSource, /const after = await captureBundles\(manager\)/, '装之后要回读')
-  assert.match(indexSource, /sendChangeResult\(res, result, 'install', activation\)/, '要把 activation 传进去')
+  // activation 必须传进去；第 5 个参数（热挂载结果）是新增的，写成可选以满足同一意图。
+  assert.match(
+    indexSource,
+    /sendChangeResult\(res, result, 'install', activation(?:, hot)?\)/,
+    '要把 activation 传进去（热挂载结果作为可选的第五个参数）'
+  )
+})
+
+console.log('\n[9b] 热挂载结果：进了响应体，且不许谎报「待重启」')
+check('hotMounted:true ⇒ 响应体带 hotMounted，且**不**记账 pendingRestart（它已经生效了）', () => {
+  // 这是移植热挂载后最容易错的一处：宿主回 restart-required，我们替它挂上了，
+  // 但如果还照旧记一笔「待重启」，用户会看到一条假的横幅——东西明明已经在跑。
+  const res = capture()
+  sendChangeResult(
+    res,
+    { changed: true, application: 'restart-required', target: 'dsh-hot-one' },
+    'install',
+    undefined,
+    { attempted: true, ok: true, name: 'dsh-hot-one', reason: null }
+  )
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.hotMounted, true, '挂上了就要如实说')
+  assert.equal('hotMountReason' in payload, false, '成功时不该带失败原因')
+  const snapshot = restartPendingSnapshot()
+  const names = snapshot === null ? [] : snapshot.names
+  assert.equal(names.includes('dsh-hot-one'), false, '热挂载成功就不该进待重启名单')
+})
+check('hotMounted:false ⇒ 带 hotMounted + 原因，且**照旧**记账待重启（回退到重启路径）', () => {
+  const res = capture()
+  sendChangeResult(
+    res,
+    { changed: true, application: 'restart-required', target: 'dsh-hot-two' },
+    'install',
+    undefined,
+    { attempted: true, ok: false, name: 'dsh-hot-two', reason: 'patch 含配置行' }
+  )
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.hotMounted, false, '没挂上就要如实说')
+  assert.equal(payload.hotMountReason, 'patch 含配置行', '原因要透出去，否则用户只知道「要重启」')
+  const snapshot = restartPendingSnapshot()
+  assert.notEqual(snapshot, null)
+  assert.equal(snapshot.names.includes('dsh-hot-two'), true, '回退到重启路径就必须记账')
+})
+check('没尝试热挂载（attempted:false / 不传）⇒ 字段不出现，响应形状对老客户端不变', () => {
+  const res = capture()
+  sendChangeResult(res, { changed: true, application: 'applied' }, 'install', undefined, { attempted: false })
+  const payload = JSON.parse(res.body)
+  assert.equal('hotMounted' in payload, false, '没尝试就不该出现这个字段（否则客户端把「不需要」读成「失败」）')
+  const res2 = capture()
+  sendChangeResult(res2, { changed: true, application: 'applied' }, 'install', undefined)
+  assert.equal('hotMounted' in JSON.parse(res2.body), false, '第五个参数不传时同样不出现')
 })
 
 console.log('\n[P] 待重启记账：刷新页面不再丢（v1.2.0 第六轮）')

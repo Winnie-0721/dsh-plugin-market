@@ -20,6 +20,17 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import {
+  isDesktopManagedHost,
+  restartBlockedHint,
+  restartDecision
+} from './restart-policy.js'
+
+// 判定逻辑搬到了 restart-policy.js（那里有完整推理：systemd / 桌面壳 / 调试器三种监管者，
+// 以及「显式设置优先、但调试器闸门不可覆盖」的合成规则）。这里**原样再导出**，
+// 因为既有测试与调用方一直从本模块取它，改路径不该让它们一起改。
+export { isDesktopManagedHost, restartDecision }
+
 /** 响应落地到进程退出的延迟：短到用户不等，长到 TCP 缓冲一定写出去。 */
 export const RESTART_EXIT_DELAY_MS = 900
 
@@ -29,45 +40,6 @@ export const RESTART_HELPER_WAIT_MS = 60 * 1000
 /** 助手的轮询间隔。 */
 export const RESTART_HELPER_POLL_MS = 300
 
-/**
- * 本进程是否是**官方桌面壳（Electron）管理的宿主子进程**。
- *
- * 这个判定是「一键重启」在桌面端**必须被拒绝**的依据，也是本模块最重要的一个前提。
- * 桌面端的真实拓扑（从活动进程表 + `app.asar/lib/main.js` 核实）：
- *
- *   7872  `DeepSeek Harness.exe`                ← GUI 主进程，持有 Electron 单实例锁
- *   19496 `DeepSeek Harness.exe --expose-internals <entry> …`  ← 宿主，7872 的子进程
- *
- * 7872 用 `spawn(node, ['--expose-internals', entry, …], { stdio: ['ignore','pipe','pipe','ipc'],
- * env: desktopNodeEnvironment(...) })` 拉起 19496，也就是：
- *   - `ELECTRON_RUN_AS_NODE=1`（Electron 以 node 模式跑这个子进程）；
- *   - **带一个 IPC 通道**（`stdio` 最后一项 `'ipc'`）——所以宿主的 `process.connected` 为 true。
- *
- * 为什么重启在桌面端不可能成功（我实测 + 读壳内源码确认）：
- * 助手拿到的是**宿主**的 `execPath`/`argv`，它会先删掉 `ELECTRON_RUN_AS_NODE` 再拉起同一个 exe
- * ——那是**启动 GUI 应用**，而不是以 node 跑那个入口。新进程执行
- * `claimDesktopSingleInstance()` → `requestSingleInstanceLock()` **失败**（7872 还活着持锁）
- * → 直接 `application.quit()`，毫秒级静默退出（实测 exit=0、无输出、231–391ms）。
- * 结果就是：19496 被自己的 `process.exit(0)` 结束，替代品起不来，**GUI 什么都不剩**
- * （壳随后弹「DeepSeek Harness 无法使用」致命对话框）。而 `restart-helper.cjs` 注释里写的
- * 「新宿主必须以正常身份启动」在桌面端恰好是致命的那一步。
- *
- * 参考实现（`_ref/dsh-market/src/restart.ts` 的 `restartAllowed`/`detectedSupervisor`）
- * 对同类问题的结论是同一句话：**有监管者的部署里，「重启」不属于这个插件**——
- * systemd 下它会连助手一起杀掉，桌面壳下它会把自己锁在门外。所以这里也不猜、不半修，
- * 而是**如实拒绝**并告诉用户用壳自带的入口。
- *
- * 为什么用「IPC 通道 + node 模式」两个信号：单独看 `ELECTRON_RUN_AS_NODE` 不够——
- * 本模块自己的助手也会设它；而终端里 `dsh web` 启动的宿主没有 IPC 通道（`process.connected` 为 false），
- * 那条路径的重启是**正常可用**的，不能被这个判定误伤。
- */
-export function isDesktopManagedHost(options = {}) {
-  const env = options.env ?? process.env
-  const connected = options.connected ?? (typeof process.connected === 'boolean' ? process.connected : false)
-  const hasSend = options.hasSend ?? typeof process.send === 'function'
-  return env.ELECTRON_RUN_AS_NODE === '1' && connected === true && hasSend === true
-}
-
 /** 助手脚本：与本模块同目录，随包发布（package.json files 含 lib/）。 */
 export function helperPath() {
   return fileURLToPath(new URL('./restart-helper.cjs', import.meta.url))
@@ -76,6 +48,14 @@ export function helperPath() {
 /**
  * 组装传给助手的载荷（base64(JSON) 单参数，避免命令行转义问题）。
  * 参数不合法返回 null，调用方按「启动失败」报错，不 spawn。
+ *
+ * 除 pid/execPath/args 之外还带 `cwd` 与 `env`（v1.3.0 新增）：
+ *   - `cwd`：DSH 的 profile 解析、相对路径配置都依赖它。助手默认的 cwd 是**自己**的位置
+ *     （插件目录），照搬会把新宿主的工作目录换掉，而那是**启动形状的一部分**。
+ *   - `env`：宿主是从某个特定环境起来的（可能带 HTTPS_PROXY、DSHM_* 等）。早先助手
+ *     继承的是自己的环境，恰好等于宿主的环境（都是同一个父进程的孩子），所以一直没暴露；
+ *     但那条链在「宿主由 systemd 起、助手由宿主起」之外还有别的形状，显式传更诚实。
+ *   - **不传的值**（`undefined`）由助手回落到自己的继承环境，与早先行为一致。
  */
 export function buildRestartPayload(options = {}) {
   const pid = Number(options.pid)
@@ -88,6 +68,16 @@ export function buildRestartPayload(options = {}) {
   if (args === null || args.some((value) => typeof value !== 'string')) return null
   if (waitMs < 100 || pollMs < 10) return null
   const payload = { pid, execPath, args, waitMs, pollMs }
+  const cwd = typeof options.cwd === 'string' && options.cwd !== '' ? options.cwd : null
+  if (cwd !== null) payload.cwd = cwd
+  // env 必须是「稳定的字符串字典」：助手会把它原样交给新宿主，混进非字符串值会让 spawn 抛错。
+  if (options.env !== null && options.env !== undefined && typeof options.env === 'object') {
+    const env = {}
+    for (const [key, value] of Object.entries(options.env)) {
+      if (typeof value === 'string') env[key] = value
+    }
+    payload.env = env
+  }
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64')
 }
 
@@ -134,6 +124,34 @@ export function buildHelperCommand(options = {}) {
 }
 
 /**
+ * 把调用方的显式注入折成 restartDecision 的入参。
+ *
+ * 两种注入方式并存：
+ *   - `options.decision`：直接给判定结果（新；测试与脚本用）；
+ *   - `options.desktopManaged`：**早先就有的**布尔覆盖，表达「就当我是桌面壳管理的宿主」。
+ *     既有测试与脚本一直用它，所以必须继续认——把一个既有覆盖静默换成另一种形状，
+ *     会让那些调用看起来没报错却不再起效。
+ */
+function decisionInput(options) {
+  if (options.desktopManaged === undefined) return options
+  const forced = options.desktopManaged === true
+  return {
+    ...options,
+    env: forced ? { ...(options.env ?? process.env), ELECTRON_RUN_AS_NODE: '1' } : { ...(options.env ?? process.env) },
+    // 桌面壳的两个必要条件同时给上（或同时撤掉），才真的命中/绕开那条分支。
+    connected: forced,
+    hasSend: forced,
+    // 强制判定时把其余闸门压平：否则真实环境里的调试器或 ppid 会抢先给出别的理由，
+    // 测试就测不到它想测的那一条。
+    inspectorUrl: '',
+    execArgv: [],
+    nodeOptions: '',
+    ppid: 0,
+    parentComm: () => null
+  }
+}
+
+/**
  * 启动助手。返回 { ok:true, pid, already? } | { ok:false, message, hint }。
  * state 可注入（测试用），默认是模块级的这一次重启的记账。
  */
@@ -143,20 +161,19 @@ export function spawnRestartHelper(options = {}) {
     // 幂等：上一次请求已经把助手安排好了，回 already 而不是再拉一个（双助手 = 双宿主）。
     return { ok: true, pid: state.pid, already: true }
   }
-  // 桌面壳管理的宿主**拒绝一键重启**（见 isDesktopManagedHost 的完整推理）：
-  // 这条路上「重启」不可能成功，只会让宿主退出、替代品被单实例锁挡在门外，
-  // 把用户留在一个没有任何界面、还弹致命对话框的状态里——比不做更糟。
-  // 所以这里如实报错并给出正确入口，而不是先退出再赌运气。
-  // 单测/脚本可用 options.desktopManaged 显式覆盖（默认读真实进程状态）。
-  const desktopManaged = options.desktopManaged ?? isDesktopManagedHost()
-  if (desktopManaged === true) {
+  // **按部署环境判**能不能一键重启（见 restart-policy.js：systemd / 桌面壳 / 调试器，
+  // 以及「显式 allowRestart 优先、调试器闸门不可覆盖」的合成规则）。
+  // 这条路上不可能成功的重启，代价不是「没生效」而是「服务/应用被杀掉且不会自己回来」，
+  // 所以这里如实拒绝并给出该用哪个入口，而不是先退出再赌。
+  // 单测/脚本可用 options.decision 或 options.desktopManaged 注入判定；默认读真实进程状态。
+  const decision = options.decision ?? restartDecision(options.config ?? {}, decisionInput(options))
+  if (decision.allowed !== true) {
     return {
       ok: false,
-      code: 'desktop-managed',
-      message: '桌面版不能在市场里一键重启。',
-      hint: '当前宿主由 DeepSeek Harness 桌面壳启动，它自己持有单实例锁——从市场拉起的替代进程会被锁挡下、然后静默退出，'
-        + '结果是应用整个关掉且不会自己回来。请用桌面壳自己的入口重启（关掉窗口再打开应用），'
-        + '或在应用内安装完插件后按提示手动重启。'
+      code: decision.reason === 'desktop' ? 'desktop-managed' : 'restart-not-allowed',
+      reason: decision.reason,
+      message: '这个环境里不能用一键重启。',
+      hint: restartBlockedHint(decision.reason)
     }
   }
   // 默认参数就是**当前宿主进程自己**：端点调用就是 spawnRestartHelper()（不带参数）。
@@ -166,6 +183,9 @@ export function spawnRestartHelper(options = {}) {
     pid: process.pid,
     execPath: process.execPath,
     args: process.argv.slice(1),
+    // 复刻宿主自己的启动形状：工作目录与环境都要跟着走（见 buildRestartPayload 的注释）。
+    cwd: process.cwd(),
+    env: process.env,
     ...options
   })
   if (built.ok !== true) {

@@ -2,6 +2,47 @@
 
 ## 1.3.0
 
+- **fix：安装失败只说「宿主拒绝了这个操作」——12 个宿主错误码补齐三段式文案。**
+
+  **用户报的「还是安装失败」**。实测真宿主（POST /plugin-market/install，装一个已装过的包）：
+
+  ```json
+  {"ok":false,"application":"failed",
+   "error":{"code":"already-installed","message":"宿主拒绝了这个操作。"}}
+  ```
+
+  也就是：**这个包已经装过了**，根本不是什么失败。但客户端 `ERROR_PREFIXES` 里没有
+  `already-installed`，于是 errorCopy 走兜底分支，把宿主那句泛泛的 message 原样显示出来。
+
+  **这是系统性缺口，不是单个码**。从 `app.asar` 里枚举宿主管家真实会抛的 code，共 **12 个**：
+  `already-installed` / `ambiguous-install` / `bundle-in-use` / `incompatible-version` /
+  `invalid-spec` / `management-required` / `not-bundle` / `not-removable` /
+  `operation-error` / `stale-approval` / `stop-profile` / `unknown-plugin`。
+  市场文案表原本只覆盖 4 个，**其余全落到「出错了 / 操作失败」这种什么也没说的话**。
+  12 个全部补上 title / why / next 三段（中英各一套），每个都回答：发生了什么、为什么、下一步。
+
+  以 `already-installed` 为例，修前用户只看到「宿主拒绝了这个操作。」，修后是：
+
+  > **发生了什么：**这个插件已经装过了
+  > **为什么：**宿主检查到目标依赖已经在 profile 里，于是拒绝了这次重复安装（这不是失败，什么都没坏）。
+  > **现在怎么办：**去「已安装」页确认版本；要升级就点那一行的「更新到 x.y.z」。
+
+  **`operation-error` 是个特例，两样都要**（用户选定）：它以前刻意不进表，就是为了让宿主的
+  诊断原文（`EPERM: ...`、`ECONNRESET`、pnpm 报错尾巴）直接占据 why——那是用户唯一能拿去搜的
+  线索。但那样 title 只说「出错了」、next 空着。现在它进表（有了 title/next），同时**why 仍
+  优先用宿主诊断原文**：给方向 + 给真实原因，两样都不丢。
+
+  **顺带修掉「服务端说明」重复一遍的毛病**。原判据是 `copy.message !== copy.title`，太松：
+  宿主的「宿主拒绝了这个操作。」与 title 不同，于是又被当成「服务端说明」渲染一行——三段式
+  刚说完「这不是失败，什么都没坏」，下一行又写「宿主拒绝了这个操作。」，自相矛盾。
+  试过「与 title 和 why 都不相等」，仍不行（它跟两段都不相等，但零信息）。
+  正确判据是**有没有具体线索**：出现 `ERR_*` / 大写错误码 / 路径 / 冒号后细节 / 退出码这类
+  **能拿去搜**的东西才显示，宿主通用句一律不占地方。
+
+  新增 `verify/host-error-codes.test.mjs`（13 条），把 errorCopy 抠出来真调用，覆盖：
+  12 个码都进表、每个码三段中英齐全、五个高频码真的命中专属文案、未知码仍走兜底、
+  operation-error 的 why 仍用诊断原文、通用句不再被当线索、真线索仍要显示。
+
 - **feat(ui)：详情改成跨整行的独立卡片（用户反馈「展开太丑」）。**
 
   **错在哪**：详情原先渲染成卡片自己的子节点，于是被塞进 232px 的网格窄列——截图一排挤到换行、

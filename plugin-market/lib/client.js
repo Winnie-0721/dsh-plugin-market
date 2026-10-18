@@ -258,6 +258,47 @@ window.__ModuleLoader__.load({
         "err.aborted.title": "请求已取消",
         "err.aborted.why": "你切换了页签或开始了新的搜索，之前的请求不再需要。",
         "err.aborted.next": "无需处理，重新操作即可。",
+        // ── 宿主 plugin-manager 真实会抛的 code（v1.3.0 补齐）──────────────────
+        // 这些 code 从 app.asar 里枚举出来的（ManagementFailure 的 12 个取值），
+        // 会经 projectChangeError 原样透传到客户端。以前只有 4 个有文案，
+        // 其余全落到 err.unknown ⇒ 用户看到「宿主拒绝了这个操作」这种什么也没说的话。
+        // 每一个都要能回答：现在发生了什么、为什么、我能做什么。
+        "err.already-installed.title": "这个插件已经装过了",
+        "err.already-installed.why": "宿主检查到目标依赖已经在 profile 里，于是拒绝了这次重复安装（这不是失败，什么都没坏）。",
+        "err.already-installed.next": "去「已安装」页确认版本；要升级就点那一行的「更新到 x.y.z」。",
+        "err.incompatible-version.title": "这个插件与当前 DSH 版本不兼容",
+        "err.incompatible-version.why": "插件声明的宿主版本范围不包含你正在跑的 DSH。硬装上去会在运行时出错，宿主因此拒绝了。",
+        "err.incompatible-version.next": "先升级 DSH；或在该插件的设置里为它加版本豁免（如果你确信兼容）。",
+        "err.invalid-spec.title": "安装地址的写法不对",
+        "err.invalid-spec.why": "宿主无法把这个 spec 解析成一种可执行的安装方式。",
+        "err.invalid-spec.next": "用目录里给的「安装命令」原样复制执行；或在详情里复制那条命令。",
+        "err.not-bundle.title": "这个包不是 DSH 插件",
+        "err.not-bundle.why": "包装上了，但它的 package.json 里没有 dsh.bundle 入口，宿主不知道该把它挂到哪里。",
+        "err.not-bundle.next": "确认你装的是插件包而不是它的依赖或同名包。",
+        "err.stale-approval.title": "批准已过期，需要再点一次",
+        "err.stale-approval.why": "上一轮 pnpm 没有写出构建占位，宿主据此认为这条批准不再有效。",
+        "err.stale-approval.next": "再点一次「允许并安装」——第二次通常就能命中 pnpm 新写出的占位。",
+        "err.bundle-in-use.title": "这个插件正在被使用",
+        "err.bundle-in-use.why": "它被运行中的插件引用着，立刻停掉会让正在跑的东西断在半路。",
+        "err.bundle-in-use.next": "先停掉用到它的插件，或重启 DSH 后再操作。",
+        "err.ambiguous-install.title": "分不清要装哪一个",
+        "err.ambiguous-install.why": "这次安装同时带进来多个 bundle，宿主无法判断你要的是哪一个。",
+        "err.ambiguous-install.next": "用目录里那条明确的 npm 名或仓库地址重装；市场不猜。",
+        "err.unknown-plugin.title": "宿主不认识这个插件",
+        "err.unknown-plugin.why": "profile 里没有这个条目——可能已经被移除，或名字拼写不同。",
+        "err.unknown-plugin.next": "点「刷新目录」再看「已安装」页；确认它确实还在。",
+        "err.stop-profile.title": "需要先停止 profile",
+        "err.stop-profile.why": "这个操作要求 profile 当前没有在运行，而现在有进程占着它。",
+        "err.stop-profile.next": "关掉正在使用这个 profile 的 DSH 窗口，再重试。",
+        "err.management-required.title": "这条由宿主基础设施管理",
+        "err.management-required.why": "它是当前 profile 的组成部分，市场不能直接改。",
+        "err.management-required.next": "用 dsh plugin 命令行处理，或改 profile 的 bundle 配置。",
+        "err.not-removable.title": "宿主不允许移除这个包",
+        "err.not-removable.why": "宿主报告 removable=false：它不归 profile 管，卸载会破坏当前组合。",
+        "err.not-removable.next": "保持现状；确实要移除就用 dsh plugin 命令行。",
+        "err.operation-error.title": "宿主执行这个操作时报错",
+        "err.operation-error.why": "宿主在真正执行时才失败（常见是 pnpm 非 0 退出）。",
+        "err.operation-error.next": "看下面的诊断原文（里面有 pnpm 的报错），修好原因后重试。",
         "capability.fs-read": "读取文件",
         "capability.fs-write": "写入文件",
         "capability.network": "网络访问",
@@ -593,6 +634,42 @@ window.__ModuleLoader__.load({
         "err.aborted.title": "The request was cancelled",
         "err.aborted.why": "You switched tabs or started a new search, so the earlier request is no longer needed.",
         "err.aborted.next": "Nothing to do; just continue.",
+        "err.already-installed.title": "This plugin is already installed",
+        "err.already-installed.why": "The host found the dependency already in the profile and refused a duplicate install. Nothing is broken.",
+        "err.already-installed.next": "Check the Installed tab for its version; to upgrade, use \"Update to x.y.z\" on that row.",
+        "err.incompatible-version.title": "This plugin is incompatible with your DSH version",
+        "err.incompatible-version.why": "The plugin's declared host range does not include the DSH you are running, so installing it would fail at runtime.",
+        "err.incompatible-version.next": "Upgrade DSH first, or add a version exemption for this plugin if you know it works.",
+        "err.invalid-spec.title": "The install spec is malformed",
+        "err.invalid-spec.why": "The host cannot parse this spec into any executable install method.",
+        "err.invalid-spec.next": "Copy the exact command from the catalog's install command or the detail view.",
+        "err.not-bundle.title": "This package is not a DSH plugin",
+        "err.not-bundle.why": "The package installed, but its package.json has no dsh.bundle entry, so the host has nothing to mount.",
+        "err.not-bundle.next": "Make sure you are installing the plugin package, not one of its dependencies or a similarly named package.",
+        "err.stale-approval.title": "The approval expired — try again",
+        "err.stale-approval.why": "pnpm did not write the build placeholder last round, so the host no longer considers this approval valid.",
+        "err.stale-approval.next": "Click \"Allow and install\" once more; the second attempt usually hits the placeholder pnpm just wrote.",
+        "err.bundle-in-use.title": "This plugin is currently in use",
+        "err.bundle-in-use.why": "Running plugins reference it, so stopping it now would cut them off mid-operation.",
+        "err.bundle-in-use.next": "Stop the plugins that use it first, or restart DSH and retry.",
+        "err.ambiguous-install.title": "Cannot tell which package to install",
+        "err.ambiguous-install.why": "This install pulled in several bundles and the host cannot decide which one you meant.",
+        "err.ambiguous-install.next": "Retry with the explicit npm name or repository URL from the catalog; the market will not guess.",
+        "err.unknown-plugin.title": "The host does not know this plugin",
+        "err.unknown-plugin.why": "There is no such entry in the profile — it may have been removed, or the name differs.",
+        "err.unknown-plugin.next": "Refresh the catalog and check the Installed tab to confirm it is still there.",
+        "err.stop-profile.title": "The profile must be stopped first",
+        "err.stop-profile.why": "This operation requires the profile to be idle, but a process is currently holding it.",
+        "err.stop-profile.next": "Close the DSH window using this profile, then retry.",
+        "err.management-required.title": "Managed by host infrastructure",
+        "err.management-required.why": "It is part of the current profile, so the market cannot change it directly.",
+        "err.management-required.next": "Use the dsh plugin CLI, or edit the profile's bundle configuration.",
+        "err.not-removable.title": "The host does not allow removing this package",
+        "err.not-removable.why": "The host reports removable=false: it is not owned by the profile, and removing it would break the current composition.",
+        "err.not-removable.next": "Leave it as is; if you really must remove it, use the dsh plugin CLI.",
+        "err.operation-error.title": "The host failed while performing this operation",
+        "err.operation-error.why": "The host failed at execution time (commonly a non-zero pnpm exit).",
+        "err.operation-error.next": "Read the diagnostic below (it contains the pnpm error), fix the cause, then retry.",
         "capability.fs-read": "File read",
         "capability.fs-write": "File write",
         "capability.network": "Network access",
@@ -1076,7 +1153,23 @@ window.__ModuleLoader__.load({
       "method-not-allowed": true,
       "not-found": true,
       "internal": true,
-      "aborted": true
+      "aborted": true,
+      // ── 宿主 plugin-manager 的 12 个 code（v1.3.0 补齐）────────────────────
+      // 从 app.asar 里枚举 ManagementFailure 得到，会经 projectChangeError 原样透传。
+      // 不登记它们 ⇒ errorCopy 走 err.unknown 兜底 ⇒ 用户看到「宿主拒绝了这个操作」。
+      // 实测触发路径：装一个已装过的包，宿主回 already-installed，界面却只说「拒绝」。
+      "already-installed": true,
+      "ambiguous-install": true,
+      "bundle-in-use": true,
+      "incompatible-version": true,
+      "invalid-spec": true,
+      "management-required": true,
+      "not-bundle": true,
+      "not-removable": true,
+      "operation-error": true,
+      "stale-approval": true,
+      "stop-profile": true,
+      "unknown-plugin": true
     };
 
     /**
@@ -1245,6 +1338,17 @@ function errorCopy(error) {
       // 反向对照：未知码**仍要**塞宿主原话（`reason unknown` 会让人没法判断是网络、限流
       // 还是源站挂了），所以条件里保留 `!known`。
       if (!supply && !locked && unreachable === "" && !known && message) copy.why = message;
+      // v1.3.0：`operation-error` 是个特例，需要**两样都要**。
+      //
+      // 它以前刻意不进 ERROR_PREFIXES，就是为了让宿主的诊断原文（`EPERM: ...`、
+      // `ECONNRESET`、pnpm 的报错尾巴）直接占据 why——那是用户唯一能拿去搜的线索。
+      // 但这样一来 title 是「出错了」、next 是空的，用户不知道**下一步做什么**。
+      //
+      // 现在它进了表（有了 title/next），但 why 里若只有我写的那句通用话，
+      // 就把「真正的原因」又盖回去了——这正是 76110d9 当年要消灭的东西。
+      // 所以这里显式补一条：**operation-error 的 why 优先用宿主给的诊断原文**，
+      // 拿不到时才用我们那句通用的。两样都不丢。
+      if (code === "operation-error" && !supply && !locked && unreachable === "" && message) copy.why = message;
       return copy;
     }
 
@@ -2392,7 +2496,22 @@ function errorCopy(error) {
           el("span", { className: "dshpm-errorKey" }, t("error.label.next")),
           el("span", null, copy.next))
       ];
-      if (copy.message && copy.message !== copy.title) {
+      // 「服务端说明」只在它**真的带来线索**时才显示。
+      //
+      // 两轮判据都试过，记下来免得再绕（用户报的是「还是安装失败」，实际就卡在这句上）：
+      //   ① `copy.message !== copy.title` —— 太松。宿主对 already-installed 回的 message
+      //      是「宿主拒绝了这个操作。」，与 title 不同 ⇒ 又渲染一遍。于是三段式刚说完
+      //      「这不是失败，什么都没坏」，下一行又写「宿主拒绝了这个操作。」——自相矛盾。
+      //   ② 要求与 title **和** why 都不同 —— 还是不行。它跟三段都不相等，但它是**零信息**：
+      //      没有路径、没有错误码、没有英文报错。用户在正文里已经知道「被拒了」。
+      //
+      // 正确判据是「有没有**具体线索**」而不是「相不相等」：宿主的通用句
+      // （「宿主拒绝了这个操作。」「宿主执行这个操作时报错。」）没有诊断价值；
+      // 有价值的是 pnpm 的报错尾巴、EPERM 路径、ECONNRESET、退出码这类**能拿去搜**的东西。
+      // 所以要求 message 里出现至少一个技术特征（下划线大写码 / 路径 / 冒号后的细节 / 数字）。
+      var detail = String(copy.message || "").trim();
+      var hasTechnicalSignal = /[A-Z]{2,}_[A-Z_]{2,}|ERR_[A-Z_]+|:\s*\S|[\\/][\w.-]+|exit code|\d{2,}/i.test(detail);
+      if (detail && hasTechnicalSignal) {
         lines.push(el("div", { className: "dshpm-errorLine", key: "detail" },
           el("span", { className: "dshpm-errorKey" }, t("error.label.detail")),
           el("code", { className: "dshpm-errorCode" }, copy.message)));

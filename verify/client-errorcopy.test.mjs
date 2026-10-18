@@ -81,10 +81,22 @@ check('operation-error + 网络诊断 ⇒ why 仍是「连不上源」的专属�
   assert.equal(copy.next, 'err.registry-unreachable.next')
   assert.match(String(copy.message), /ECONNRESET/, '详情行要露出诊断原文')
 })
-check('对照：未命中任何专属规则时，未知码仍把宿主原话塞进 why（兜底不能砍掉）', () => {
-  const copy = api.errorCopy({ code: 'operation-error', message: '宿主原话：磁盘满了' })
+check('对照：真正未知的码仍把宿主原话塞进 why（兜底不能砍掉）', () => {
+  // v1.3.0 调整：这条原来用 `operation-error` 举例，但 `operation-error` 现在**进了**
+  // ERROR_PREFIXES —— 宿主 plugin-manager 真实会抛的 12 个 code 全补齐了文案
+  // （见 host-error-codes.test.mjs）。要测「兜底还在不在」，得用一个真不在表里的码。
+  const copy = api.errorCopy({ code: 'a-code-from-a-newer-host', message: '宿主原话：磁盘满了' })
   assert.equal(copy.why, '宿主原话：磁盘满了', '没有专属解释时仍应显示宿主原话')
   assert.equal(copy.title, 'err.unknown.title')
+})
+check('v1.3.0：operation-error 有专属 title/next，且 why 仍优先用宿主原话（两样都要）', () => {
+  // 用户报「还是安装失败」时看到的就是这个码。它以前刻意不进表，为的是让宿主诊断原文
+  // 占据 why（那是用户唯一能拿去搜的线索），代价是 title 只说「出错了」、next 空着。
+  // 现在两样都要：title/next 给方向，why 保留宿主原话。
+  const copy = api.errorCopy({ code: 'operation-error', message: '宿主原话：pnpm exited 1' })
+  assert.equal(copy.title, 'err.operation-error.title', '标题要指认「宿主执行时报错」')
+  assert.equal(copy.next, 'err.operation-error.next', '要给出下一步')
+  assert.equal(copy.why, '宿主原话：pnpm exited 1', 'why 仍要显示宿主原话，不能被通用话顶掉')
 })
 check('对照：占用类优先于网络，且 why 不被覆盖', () => {
   const copy = api.errorCopy({

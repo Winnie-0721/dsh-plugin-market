@@ -307,18 +307,32 @@ try {
     if (params.entry?.level === 'error') consoleErrors.push(params.entry.text ?? '')
   })
 
+  // ── 关掉 DSH 自己弹的浮层（scratch profile 首启会有两层）─────────────────────
+  // 这一对常量必须在**所有** Page.navigate 之后都能用：本文件有多处重载页面（[11][12] 等），
+  // 每次重载宿主都可能再弹一次。
+  //
+  //   · 「预览版说明」→ 按钮文案「继续」
+  //   · 「添加 API Key」→ 按钮文案「稍后配置」
+  //
+  // **不要**去点「开始使用（登录 / 添加 API Key）」那个弹窗的 ×：点完宿主会自己重载页面，
+  // 而 CDP 的 Runtime.evaluate 在导航期间会一直 pending，整个 e2e 就挂在那里（实测卡死过一次）。
+  // 那个弹窗是 profile 级的一次性状态，用 _verify/dismiss-onboarding.mjs 点掉一次即可，
+  // 之后所有运行都不再出现——它不该是每次验收都要处理的东西。
+  const dismissPreviewNotice = `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`
+  const dismissApiDialog = `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /稍后配置|Configure later/i.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`
+  /** 重载页面后统一清场：两层浮层依次点掉，再等一帧让遮罩真的卸掉。 */
+  async function clearHostOverlays() {
+    await evaluate(client, dismissPreviewNotice)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await evaluate(client, dismissApiDialog)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+
   console.log('\n[1] 打开页面与侧边栏入口')
   await client.send('Page.navigate', { url: authUrl })
   await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '侧边栏里的插件市场入口')
   // 全新的 scratch profile 首次进入时 DSH 会弹自己的「预览版说明」：点掉它，截图里只看市场本身。
-  await evaluate(
-    client,
-    `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`,
-  )
-  await new Promise((resolve) => setTimeout(resolve, 600))
-  // scratch profile 没配 API Key，DSH 随后会弹「添加一个 API Key 开始使用」；截图前点「稍后配置」关掉它。
-  const dismissApiDialog = `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /稍后配置|Configure later/i.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   const entryText = await evaluate(client, `document.querySelector('.dshpm-entry').textContent.trim()`)
   expect('侧边栏入口渲染出「插件市场」文案', /插件市场|Plugin Market/.test(String(entryText)), `实际：${entryText}`)
   const entryStyled = await evaluate(
@@ -913,7 +927,7 @@ try {
   expect('可更新页有实际高度（不是空壳）', Number(panelOpenHeight) > 120, `高度 ${panelOpenHeight}`)
 
   // 截图前再关一次 API Key 引导弹窗（它在会话列表加载后才出现，会盖住可更新页）。
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   await new Promise((resolve) => setTimeout(resolve, 300))
   await screenshot(client, join(shotDir, 'market-updates-open.png'))
   console.log(`  · 截图：${join(shotDir, 'market-updates-open.png')}`)
@@ -1104,7 +1118,7 @@ try {
   })
   await client.send('Page.navigate', { url: authUrl })
   await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '重载后侧边栏入口')
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   // **必须点开面板**：刷新后市场面板默认是关的，横幅不在 DOM 里。
   // 我第一版只等了 `.dshpm-entry` 就去查 `.dshpm-banner`，于是永远等不到——
   // 又是「断言站错地方」，跟功能是否生效无关。
@@ -1159,7 +1173,7 @@ try {
   statusProbe = null
   await client.send('Page.navigate', { url: authUrl })
   await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '再重载一次（宿主已无待重启项）')
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
   await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '再重载后面板打开')
   await new Promise((resolve) => setTimeout(resolve, 800))
@@ -1185,7 +1199,7 @@ try {
     `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`,
   )
   await new Promise((resolve) => setTimeout(resolve, 600))
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   await new Promise((resolve) => setTimeout(resolve, 400))
 
   // 官方主题 token 的真实取值：--dsw-radius-md 是 **12px**（旧代码把它的回退值写成 8px，
@@ -1373,7 +1387,7 @@ try {
     client,
     `(() => { const b = Array.from(document.querySelectorAll('button')).find(x => /^(继续|Continue)$/.test(x.textContent.trim())); if (b) { b.click(); return true; } return false; })()`,
   )
-  await evaluate(client, dismissApiDialog)
+  await clearHostOverlays()
   await new Promise((resolve) => setTimeout(resolve, 300))
   // 底栏在 24 张卡下面，默认在视口外——**先滚进视口再截图**，
   // 否则截图里根本看不到这次要验的东西（第一版就是这么拍出一张没有底栏的图的）。
@@ -1836,7 +1850,7 @@ try {
     // （第一版直接等它，于是永远等不到、超时假红）。顺序与本文件其它重载段落一致：
     // 等入口 → 关掉壳的配置对话框 → 点入口 → 再等面板。
     await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '[18] 重载后的侧边栏入口')
-    await evaluate(client, dismissApiDialog)
+    await clearHostOverlays()
     await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
     await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '[18] 面板挂载')
     // 全局只读时市场顶部会亮「只能浏览」的横幅——先确认探针真的生效了，
@@ -1876,7 +1890,7 @@ try {
     // 还原成正常态，别把只读探针留给后面的断言（同样要走"等入口 → 点入口"这套）。
     await client.send('Page.navigate', { url: authUrl })
     await waitFor(client, `!!document.querySelector('.dshpm-entry')`, 45000, '[18] 还原：侧边栏入口')
-    await evaluate(client, dismissApiDialog)
+    await clearHostOverlays()
     await evaluate(client, `document.querySelector('.dshpm-entry').click(); true`)
     await waitFor(client, `!!document.querySelector('.dshpm-root')`, 20000, '[18] 还原：面板挂载')
   } catch (error) {

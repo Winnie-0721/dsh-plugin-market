@@ -2,7 +2,71 @@
 
 ## 1.3.0
 
-- **feat：热挂载——装完的插件直接挂进正在运行的 DSH，不用重启。**
+- **fix：「更新」把 spec 发错包——2819 条插件点更新必然 400，66 条会装成别的包。**
+
+  **现场取证**（`_verify/update-spec-precise.mjs`，真实目录 5786 条）：客户端「可更新」页点更新时发的是
+  `submitInstall({ name: bundle.name, spec: bundle.name })`。而宿主 `install()` 看到**显式 spec** 就走
+  精确匹配分支：`sameKey(item.spec|item.npm|item.url, spec)`，**不认 `item.name`**；匹配不上直接
+  `400 not-in-catalog`。可决定「哪条算可更新」的 `matchBundle` 是**认 name** 的（npm → shared(name/url)），
+  两处口径不一致，于是：
+
+  - `npm` 有值的条目 **2967** 条：bundle 名就是包名，命中 `npm` 键，更新正常；
+  - `npm` 为空、只有仓库地址的条目 **2819** 条：`spec` 是 URL、`npm` 是 null，拿包名当 spec
+    发出去**两个键都匹配不上** → 实测 **2819/2819 全部 400**。也就是说这一整类插件在
+    「可更新」页上永远更新不动，页面却一直显示「更新到 x.y.z」。
+
+  **修法：让目录告诉客户端该发什么，而不是猜。** `joinBundles` 多带一个 `updateSpec` ——
+  **匹配到的那条目录条目的真实 spec**（npm → 仓库地址），且与 `latest` **同源**（同一个循环里取，
+  避免「显示更新到 2.0.0、实际装 1.0.0 那条的 spec」）。客户端收成 `updateSpecFor(bundle)` 一处：
+  有 `updateSpec` 就用它，拿不到（老宿主 / 没匹配上 / 空串）退回 `bundle.name`——**行为与修复前
+  完全一致，不给老宿主制造新失败面**。
+
+  **为什么不修在宿主匹配上**（把 `item.name` 加进 spec 分支）：那会破坏「装什么只能落在目录里
+  **唯一确定**的条目上」这条安全约束。name 有重名（真实目录里 `dsh-pua` 同时属于两个 owner），
+  按 name 猜就会装错包。新套件 `update-spec` 里有一条断言**专门钉住**「不许把 name 加进匹配键」。
+
+  **变异对照**：把 `updateBundle` 的 spec 退回 `bundle.name` ⇒ `update-spec` 变红；
+  把 `joinBundles` 的 `updateSpec` 去掉 ⇒ 同样变红（两条路都要有断言，否则修一半也全绿）。
+
+- **feat：统一 UI 风格——暗色下主按钮看不见（对比度 1.05），以及 6 类令牌/刻度漂移。**
+
+  **先实测，再动手**（`_verify/style-contrast.mjs` + `theme-resolve.mjs`，全部对真宿主量）：
+  市场把宿主令牌 `--dsw-alias-brand-primary` 当按钮**底色**、文字写死 `#fff`。而这个令牌在官方
+  主题里是**标签色**（亮 `#0f1115` / 暗 `#f9fafb`）——暗色下就是**白字白底**，实测对比度
+  **1.05**（亮色 18.90）。按钮等于隐形。修法不是自己发明配色，而是**照抄官方组件的配对**
+  （从 `app.asar` 里翻出 `dsh-client-ui-settings-models` / `message-feedback` 的真实写法）：
+
+      background: var(--dsw-alias-button-primary-fill)      /* 亮 #0f1115 / 暗 #f9fafb */
+      color:      var(--dsw-alias-label-primary-foreground)  /* 亮 #fff   / 暗 #0f1115 */
+      hover:      var(--dsw-alias-button-primary-hover)
+
+  修后实测：亮 **18.90** / 暗 **18.08**，两态都清晰可读。同时删掉官方没有的 `filter:brightness(1.08)`
+  与品牌蓝光晕（`rgba(77,107,254,…)`，官方主按钮 hover 只换底色）。
+
+  **顺带清掉三类「看着有、其实没有」的东西**：
+
+  - **幻影令牌**：`--dsw-alias-danger`（崩溃卡左边框，用了 1 处）与 `--dsw-font-stack`（从没用过）
+    在全量 9972 个 JS 里**官方 0 声明**——引用它们等于永远走回退值，还会误导后来人以为有官方值。
+    前者换成真实的 `--dsw-alias-state-error-primary`（暗色下也终于跟着主题走，原来写死 `#e5484d`）；
+  - **回退值漂移**：`--dsw-alias-label-secondary` 有 29×`#6b6b6b` + 4×`#5b5b5b` 两套，另有 5 个令牌
+    各有多套回退。全部收敛成**一个**实测官方亮态值（`#61666b` 等）。回退只在主题缺席时生效，
+    多个值意味着「无主题时的样子」不可预测；
+  - **自造品牌蓝**：`#4d6bfe` 18 处 + `rgba(77,107,254,…)` 阴影 4 处全部清零，品牌语义改走
+    `--dsw-alias-state-business-primary`（官方亮 `#4176e6` / 暗 `#7aaaff`）。
+
+  **刻度收敛**（`_verify/style-unify.mjs`，一次性脚本 + 逐行审 diff，122 条被删规则**全部**在
+  新增侧有对应版本，0 条净删除）：字号 14 种 → **7 种**（对齐官方 13/12/11px 阶）；gap 8 种 → 4/6/8/12；
+  阴影 10 种全不同 → 官方 `--dsw-elevation-*` / `--dsw-shadow-lv*`；过渡 0.15/0.22/0.26/0.3/0.34s
+  等 8 档 → 0.12/0.16/0.18/0.2 四档；easing 的 `cubic-bezier(.22,1,.36,1)` 等 → 官方
+  `--ds-ease-in-out` = `cubic-bezier(.4,0,.2,1)`。焦点环 7 处统一成
+  `2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))` + `outline-offset:2px`
+  （入口原来是 `-2px`，描边被裁进元素内）。
+
+  **门禁**：新增 `style-scale` 18 条，钉住上面每一类（含「气泡退场时长必须等于 `NOTICE_CLOSE_MS`」、
+  「页面节距仍 12px」「卡片仍 16px 圆角」「底栏 padding-right:40px 让开回顶按钮」这些**不许被刻度改动
+  打破**的旧不变量）。全量门禁 **33/33**，真实浏览器验收 **128/128**。
+
+- **fix：热挂载——装完的插件直接挂进正在运行的 DSH，不用重启。**
   逻辑移植自官方 `dsh-market`（`dshmarket`）的 `src/hot.ts`（MIT），按本仓库的约定重写；
   新增 `lib/hot-mount.js`。它补的是宿主自己不做的那一步：`pluginManager.installBundle`
   对**已经装过**的包在 `reload()` **之前**就返回 `restart-required`（内核

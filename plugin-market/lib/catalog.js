@@ -744,22 +744,44 @@ export function joinInstalled(plugins, bundles) {
   })
 }
 
-/** 契约 §2.3：bundle 视角的 join，补 latest / updateAvailable。
- *  一个 bundle 命中同一仓库的多个条目时取**最高**目录版本（那个仓库里最新的那个）。 */
+/** 契约 §2.3：bundle 视角的 join，补 latest / updateAvailable / updateSpec。
+ *  一个 bundle 命中同一仓库的多个条目时取**最高**目录版本（那个仓库里最新的那个）。
+ *
+ *  `updateSpec` 是**这条目录条目真正该用的安装 spec**（npm → 仓库地址），
+ *  客户端「更新」必须用它，不能拿 bundle 名顶替：
+ *
+ *    宿主 install() 对显式 spec 只做 `sameKey(item.spec|item.npm|item.url, spec)`
+ *    精确匹配，**不认 item.name**；而 matchBundle（决定「哪条算可更新」）是认 name 的。
+ *    两处口径不一致，于是「npm 为空、只有仓库地址」的条目（实测真实目录 5786 条里
+ *    **2819 条**）在页面上显示「更新到 x.y.z」，点下去发的是包名 → 宿主匹配不上
+ *    → 400 not-in-catalog，更新永远失败。
+ *
+ *  不修在宿主匹配上（把 name 加进匹配键）是有意的：显式 spec 分支是安全约束，
+ *  保证「装什么」只能落在目录里已有的条目上；name 有重名（真实目录里 dsh-pua
+ *  属于两个 owner），按 name 猜就会装错包。把 spec 从**匹配到的那条**带出去，
+ *  既修好更新，又让目标仍是唯一确定的。
+ *
+ *  取不到（没匹配上 / 该条目不可安装）时是 null，客户端据此退回旧行为。 */
 export function joinBundles(bundles, plugins) {
   const list = Array.isArray(bundles) ? bundles : []
   const index = matchIndexFor(Array.isArray(plugins) ? plugins : [])
   return list.map((bundle) => {
     const hits = matchBundle(index, bundle)
     let latest = null
+    let updateSpec = null
     for (const item of hits) {
       if (item.version === null || item.version === undefined) continue
-      if (latest === null || compareVersions(item.version, latest) === 1) latest = item.version
+      // 严格大于才换：并列时保留先出现的，结果对输入顺序不敏感（与 latest 同一条）。
+      if (latest === null || compareVersions(item.version, latest) === 1) {
+        latest = item.version
+        updateSpec = optionalText(item.spec)
+      }
     }
     return {
       ...bundle,
       latest,
-      updateAvailable: isUpdateAvailable(bundle?.version, latest)
+      updateAvailable: isUpdateAvailable(bundle?.version, latest),
+      updateSpec
     }
   })
 }

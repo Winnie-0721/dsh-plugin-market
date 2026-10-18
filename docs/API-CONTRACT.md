@@ -150,7 +150,7 @@ Query 参数（全部可选，未知参数忽略）：
       "enabled": true, "installed": true, "removable": true, "official": false, "market": false,
       "error": null,
       "rows": [ { "rowId": "usage-plugin", "moduleName": "@feiyang666/dsh-usage-plugin", "entryId": "usage-plugin" } ],
-      "latest": "1.18.0", "updateAvailable": false }
+      "latest": "1.18.0", "updateAvailable": false, "updateSpec": "@feiyang666/dsh-usage-plugin" }
   ],
   "plugins": [
     { "entryId": "usage-plugin", "moduleName": "@feiyang666/dsh-usage-plugin",
@@ -162,6 +162,20 @@ Query 参数（全部可选，未知参数忽略）：
 - `bundles` 直接投影 `pluginManager.listBundles()`：`name`、`version`、`description`、`enabled`、`installed`、`removable`、`rows`；`official` = 名称以 `@deepseek-ai/` 开头；`market` = 名称为 `deepseek-harness-market`。
 - `error` 为 `null` 或 `{ "code": string, "diagnostic"?: string }`。
 - `latest` / `updateAvailable` 通过与目录缓存 join 得到；目录不可用时为 `null` / `false`。`latest` = 目录当前版本（可能低于已装版本）；`updateAvailable` 仅当目录版本 **严格更高** 时为 `true`。
+- `updateSpec`（v1.3.0 新增）：**这条目录条目真正该用的安装 spec**（`npm` → 仓库地址），取自
+  与 `latest` **同一条**匹配结果（同一个循环里取，避免「显示更新到 2.0.0、实际装 1.0.0 那条的 spec」）。
+  取不到（没匹配上 / 该条目不可安装）为 `null`。
+
+  **客户端「更新」必须用它，不能拿 `bundle.name` 顶替**——这是一条被实测的硬约束：
+  §2.4 的显式 `spec` 分支只认 `spec`/`npm`/`url` **三个键，不认 `item.name`**，而决定「哪条算可更新」的
+  `matchBundle` 是**认 name** 的。两处口径不一致，于是「npm 为空、只有仓库地址」的条目（实测真实目录
+  5786 条里 **2819 条**）会显示「更新到 x.y.z」，点下去发的是包名 → `400 not-in-catalog`，
+  实测 **2819/2819 全部失败**。
+
+  不修在宿主匹配上（把 `item.name` 加进 spec 分支）是**有意的**：显式 spec 分支是安全约束，
+  保证「装什么」只能落在目录里**唯一确定**的条目上；`name` 有重名（真实目录里 `dsh-pua` 同时属于
+  两个 owner），按 name 猜就会装错包。客户端拿不到 `updateSpec`（老宿主 / 该字段缺失 / 空串）时
+  退回 `bundle.name`，行为与 v1.2.0 完全一致。
 - `plugins` 投影 `pluginManager.listPlugins()`，额外字段：`title`（本地化标题，取不到为 `null`）、`bundle`（该 entry 所属 bundle 名，取不到为 `null`）。
 - `manager.available=false` 时：`bundles: []`、`plugins: []`，并额外返回 `"manager": { "available": false }`。
 

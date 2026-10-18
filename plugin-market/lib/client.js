@@ -4198,10 +4198,33 @@ function errorCopy(error) {
         }, null);
       }
 
+      /**
+       * 「更新这一条」到底该发什么 spec。
+       *
+       * 为什么不能直接用 bundle.name：宿主 install() 对**显式 spec** 只做
+       * `sameKey(item.spec|item.npm|item.url, spec)` 精确匹配，**不认 item.name**；
+       * 而决定「哪条算可更新」的 matchBundle 是认 name 的。两处口径不一致，于是
+       * 「npm 为空、只有仓库地址」的条目（实测真实目录 5786 条里 2819 条）会显示
+       * 「更新到 x.y.z」，点下去发的是包名 → 400 not-in-catalog，更新永远失败。
+       *
+       * 修法：宿主在 /installed 里为每条 join 出 `updateSpec`（目录那条真正的 spec），
+       * 这里优先用它。拿不到（老宿主 / 没匹配上 / 空串）就退回 bundle.name ——
+       * 行为与修复前完全一致，不给老宿主制造新的失败面。
+       *
+       * 为什么不在宿主放宽匹配（把 name 加进 spec 分支）：那会破坏「装什么只能落在
+       * 目录里唯一确定的条目上」这条安全约束——name 有重名（真实目录里 dsh-pua 属于
+       * 两个 owner），按 name 猜就会装错包。
+       */
+      function updateSpecFor(bundle) {
+        var given = bundle && typeof bundle.updateSpec === "string" ? bundle.updateSpec.trim() : "";
+        if (given !== "") return given;
+        return bundle && typeof bundle.name === "string" ? bundle.name : "";
+      }
+
       /** 「可更新」页里点「更新到 x.y.z」：走同一条安装接口，把结果记回该条。
        *  silent 用于一键更新（回执只发汇总那一条）；onDone 用于顺序执行的下一步。 */
       function updateBundle(bundle, silent, onDone) {
-        submitInstall({ name: bundle.name, label: bundle.name, spec: bundle.name, kind: "update", key: bundle.name }, null, function (outcome) {
+        submitInstall({ name: bundle.name, label: bundle.name, spec: updateSpecFor(bundle), kind: "update", key: bundle.name }, null, function (outcome) {
           setUpdateResults(function (previous) {
             var next = {};
             var keys = Object.keys(previous);

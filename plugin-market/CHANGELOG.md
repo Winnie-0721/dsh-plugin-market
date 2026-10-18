@@ -2,6 +2,56 @@
 
 ## 1.3.0
 
+- **feat：跟上数据源升级——接入 6 个此前完全没接的目录字段（其中能力红线 597 条、截图 1289 条）。**
+
+  上游数据源仓库 `awesome-dsh-plugin/awesome-dsh-plugin` 的 `plugins.json` 新增了市场**完全没接**的
+  字段。权威 schema 在它的 `scripts/build-site.mjs` 里（拉下来逐条对齐语义，不是猜的）。
+  实测 2026-10-18 快照（5786 条，经 npm 包 `dsh-plugin-catalog@2026.1018.7716` 镜像发布，
+  两个镜像内容逐字节一致 `sha256 ea53264a…`）：
+
+  | 字段 | 条数 | 之前 | 现在 |
+  |---|---|---|---|
+  | `capabilityRedLines` | 5275（**597 条非空**） | 完全不显示 | 详情页「风险提示」 |
+  | `capabilityCheckedAt` | 5275 | 完全不显示 | 显示检测时间 |
+  | `screenshots` | 1289（3650 张） | 完全不显示 | 详情页缩略图 |
+  | `tarball` | 581 | 完全不显示 | 详情页 + 安装命令兜底 |
+  | `downloadsStart/End` | 2947 | 完全不显示 | 下载量的时间口径 |
+  | `downloadsCheckedAt` | 2947 | 完全不显示 | — |
+
+  **最重要的一条是红线。** 实测里最该让用户看到的是
+  `reads credentials/secrets AND has network access` —— **481 条**（读凭据 + 能联网 = 可能外传），
+  还有 `runs code at install time (postinstall)` 22 条、指向云元数据 `169.254.169.254` 的 7 条。
+  市场以前一条都不显示。红线文案**原样透传、不翻译**：它是检测器的原话，改写会让用户
+  以为是我们自己验证过。
+
+  **三条不能读错的语义**（都照上游注释原文落实）：
+
+  1. **「缺失」≠「干净」**。上游：「an entry absent here was NOT scanned — the surfaces print
+     that as 未检出, never as clean.」实测 `capabilities` 与 `capabilityRedLines` 是**一起出现/
+     一起缺失**的（都 5275 条），缺的 511 条是**没扫过**。所以内部用三态区分：
+     `null` = 未扫描、`[]` = 扫过没发现、非空 = 扫过有内容。界面上「未扫描」有明确文案
+     （「未扫描（目录没有这个插件的能力检测记录，不代表安全）」），**绝不渲染成空白或绿色**。
+     类型不对（字符串、数字）也判「未扫描」而不是「扫过、没问题」——把坏数据当成安全是在背书。
+  2. **`downloads` 的 `null` ≠ `0`**。上游：「null for the ~60% of entries with no npm package at
+     all — a coverage gap, not a zero. Consumers must tell "not published" apart from
+     "published, unused".」实测 null **2839 条**（无 npm 2819 + 有 npm 未探到 20），
+     真 0 是 **0 条**。原来写 `formatCount(item.downloads || 0)` ⇒ 把 2839 条「没数据」
+     显示成「↓ 0」，等于告诉用户「发布了但没人用」。现在显示「↓ 未发布到 npm」。
+  3. **截图只许 GitHub 自家 host**。上游白名单 4 个 host，理由是「a third-party image host
+     would let a list PR plant a tracking pixel in every storefront user's browser」。
+     **市场自己再校验一遍**（https + 白名单，逐条丢弃不合规的）：上游今天合规不代表缓存里的
+     旧数据合规，而这条约束的价值恰恰是防数据被投毒——只信数据源等于把唯一防线交出去。
+
+  **`tarball` 是「只能这样装」的兜底**：上游说明有些插件只发布构建产物、从源码装不了，
+  `github:owner/repo` 会给用户一条**坏命令**。它是会被塞进命令行的字符串，所以形状收紧为
+  https 且以 `.tgz`/`.tar.gz` 结尾，其余置 `null`。
+
+  **新增 `verify/catalog-fields.test.mjs`（14 条）**，钉住上面每一条语义（含三态区分、
+  host 白名单、`null` vs `0`、坏类型宽容、以及「新字段不能破坏既有搜索/排序」）。
+
+  顺带发现并修掉一个**早已存在**的语义错误：下载量把 `null` 折成 `0`（见第 2 条）。
+  它不是这次升级引入的，是这次对齐上游语义时才暴露出来的。
+
 - **fix：19 个宿主托管的包渲染出「点了必然被拒绝」的开关（用户报「宿主拒绝了这个操作」）。**
 
   **错在哪**：`installedCapabilities` 里两条判据不同源——

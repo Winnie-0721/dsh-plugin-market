@@ -271,6 +271,21 @@ window.__ModuleLoader__.load({
         "capability.other": "其它能力",
         "detail.description": "说明",
         "detail.capabilities": "能力",
+        // ── 能力披露（上游 2026-10 起）────────────────────────────────────
+        // 「未扫描」必须说出来：上游的原话是「an entry absent here was NOT scanned —
+        // the surfaces print that as 未检出, never as clean」。留空白等于给没检查过的
+        // 插件背书，所以这一态要有明确文案。
+        "detail.capabilitiesNotScanned": "未扫描（目录没有这个插件的能力检测记录，不代表安全）",
+        "detail.redLines": "风险提示",
+        "detail.redLinesNone": "已扫描，未发现风险模式",
+        "detail.redLinesCheckedAt": "检测于 {date}",
+        "detail.screenshots": "截图",
+        "detail.screenshotsAlt": "{name} 截图 {index}",
+        // 图床（GitHub raw）在国内网络下常常连不上：加载失败要变成可点链接，
+        // 而不是留一张破图。文案说清「点开看原图」，别让用户以为插件坏了。
+        "detail.screenshotFailed": "图片加载失败，点开原图",
+        "detail.tarball": "预构建产物",
+        "detail.downloadsRange": "近 30 天（{start} ~ {end}）",
         "detail.links": "链接",
         "detail.repo": "代码仓库",
         "detail.page": "目录页",
@@ -279,6 +294,7 @@ window.__ModuleLoader__.load({
         "detail.added": "收录时间",
         "meta.stars": "★ {count}",
         "meta.downloads": "↓ {count}",
+        "meta.downloadsNoData": "↓ 未发布到 npm",
         "action.checkUpdates": "检查更新",
         "action.checkSelf": "插件市场更新",
         "action.checkingSelf": "正在更新…",
@@ -590,6 +606,15 @@ window.__ModuleLoader__.load({
         "capability.other": "Other capability",
         "detail.description": "Description",
         "detail.capabilities": "Capabilities",
+        "detail.capabilitiesNotScanned": "Not scanned (the catalog has no capability record for this plugin; that does not mean it is safe)",
+        "detail.redLines": "Risk flags",
+        "detail.redLinesNone": "Scanned, no risk patterns found",
+        "detail.redLinesCheckedAt": "Checked {date}",
+        "detail.screenshots": "Screenshots",
+        "detail.screenshotsAlt": "Screenshot {index} of {name}",
+        "detail.screenshotFailed": "Image failed to load — open original",
+        "detail.tarball": "Prebuilt tarball",
+        "detail.downloadsRange": "Last 30 days ({start} ~ {end})",
         "detail.links": "Links",
         "detail.repo": "Repository",
         "detail.page": "Catalog page",
@@ -598,6 +623,7 @@ window.__ModuleLoader__.load({
         "detail.added": "Added",
         "meta.stars": "★ {count}",
         "meta.downloads": "↓ {count}",
+        "meta.downloadsNoData": "↓ not on npm",
         "action.checkUpdates": "Check for updates",
         "action.checkSelf": "Plugin market update",
         "action.checkingSelf": "Updating…",
@@ -1525,6 +1551,20 @@ function errorCopy(error) {
 .dshpm-detailKey { flex:none; width:5.5em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-detailValue { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
 .dshpm-tags { display:flex; gap:4px; flex-wrap:wrap; }
+/* 风险红线：用 warn 色描边而不是填充——它是提示，不是错误，也不该抢走「安装」按钮的注意力。
+   红线原文来自目录检测器（英文），不翻译、不改写：改写会让用户以为是我们自己验证过的。 */
+.dshpm-tag--warn { border-color:var(--dsw-alias-state-warn-primary,#f59e0b); color:var(--dsw-alias-state-warn-primary,#f59e0b); }
+.dshpm-detailValue--muted { color:var(--dsw-alias-label-secondary,#61666b); }
+.dshpm-detailHint { margin-top:4px; color:var(--dsw-alias-label-tertiary,#81858c); font-size:.86em; }
+.dshpm-cardMetaMuted { color:var(--dsw-alias-label-tertiary,#81858c); }
+/* 截图：小尺寸横向排布，点击在详情里看不全也没关系（链接可开原图）；
+   object-fit:cover 避免不同长宽比的图把行高撑乱。 */
+.dshpm-shots { display:flex; gap:6px; flex-wrap:wrap; }
+.dshpm-shot { width:120px; height:76px; object-fit:cover; border-radius:var(--dsw-radius-sm,8px); border:1px solid var(--dsw-alias-border-l1,#0000000a); background:var(--dsw-alias-bg-layer-2,#fff); }
+/* 图加载失败时的降级格子：同一个尺寸，变成一个可点的说明——不留破图占位，
+   也不让详情区因为一张图挂掉就错位。 */
+.dshpm-shot--failed { display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:4px; text-align:center; font-size:.86em; line-height:1.3; color:var(--dsw-alias-label-secondary,#61666b); text-decoration:none; border-style:dashed; }
+.dshpm-shot--failed:hover { text-decoration:underline; }
 .dshpm-tag { border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:999px; padding:1px 8px; font-size:.93em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-code { display:block; box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-2,#fff); color:var(--dsw-alias-label-primary,#0f1115); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.93em; overflow-wrap:anywhere; }
 .dshpm-link { color:var(--dsw-alias-brand-primary,#4176e6); text-decoration:none; display:inline-flex; align-items:center; gap:4px; }
@@ -2599,7 +2639,15 @@ function errorCopy(error) {
         el("p", { className: "dshpm-cardDesc" }, descriptionText(item.description)),
         el("div", { className: "dshpm-cardMeta" },
           el("span", null, t("meta.stars", { count: formatCount(item.stars || 0) })),
-          el("span", null, t("meta.downloads", { count: formatCount(item.downloads || 0) })),
+          // 下载量：上游的 downloads 是**近 30 天**的 npm 下载数，而 null 表示
+          // 「这个条目根本没有 npm 包」（实测 2839 条，其中无 npm 2819 条）——
+          // 是**覆盖缺口，不是 0**。上游注释原话：「Consumers must tell
+          // "not published" apart from "published, unused"」。
+          // 原来写 `item.downloads || 0` 把 2839 条「没数据」显示成「↓ 0」，
+          // 等于告诉用户「这个插件发布了但没人用」——两件完全不同的事。
+          item.downloads !== null && item.downloads !== undefined
+            ? el("span", null, t("meta.downloads", { count: formatCount(item.downloads) }))
+            : el("span", { className: "dshpm-cardMetaMuted" }, t("meta.downloadsNoData")),
           item.version ? el("span", null, "v" + item.version) : null,
           item.category ? el("span", null, categoryLabel(props.categories, item.category)) : null
         ),
@@ -2623,19 +2671,112 @@ function errorCopy(error) {
       );
     }
 
-    function PluginDetails(props) {
+    /**
+     * 能力披露：三种状态必须分开显示（上游 build-site.mjs 的硬要求）。
+     *
+     *   capabilities === null        ⇒ **未扫描**：说「未扫描（不代表安全）」，绝不写「无风险」
+     *   capabilities === []          ⇒ 扫过、没发现能力
+     *   capabilityRedLines 非空      ⇒ **风险提示**（597 条真实数据里有告警，例如
+     *                                  「reads credentials/secrets AND has network access」481 条、
+     *                                  「runs code at install time (postinstall)」22 条）
+     *   capabilityRedLines === []    ⇒ 扫过、未发现风险模式
+     *
+     * 为什么红线要单独一块而不是并进「能力」：能力标签是中性描述（能读文件），
+     * 红线是**风险组合**（读凭据 + 能联网 = 可能外传）。混在一起用户会滑过去。
+     */
+    function CapabilityDisclosure(props) {
       var item = props.item;
-      var capabilities = item.capabilities || [];
-      var command = item.install || (item.spec ? "dsh plugin add " + item.spec : "");
-      return el("div", { className: "dshpm-detail" },
-        el("div", { className: "dshpm-detailRow" },
-          el("span", { className: "dshpm-detailKey" }, t("detail.description")),
-          el("span", { className: "dshpm-detailValue" }, descriptionText(item.description) || "—")),
+      var scanned = Array.isArray(item.capabilities) || Array.isArray(item.capabilityRedLines);
+      if (!scanned) {
+        return el("div", { className: "dshpm-detailRow" },
+          el("span", { className: "dshpm-detailKey" }, t("detail.capabilities")),
+          el("span", { className: "dshpm-detailValue dshpm-detailValue--muted" }, t("detail.capabilitiesNotScanned")));
+      }
+      var capabilities = Array.isArray(item.capabilities) ? item.capabilities : [];
+      var redLines = Array.isArray(item.capabilityRedLines) ? item.capabilityRedLines : [];
+      return el(React.Fragment, null,
         capabilities.length
           ? el("div", { className: "dshpm-detailRow" },
             el("span", { className: "dshpm-detailKey" }, t("detail.capabilities")),
             el("span", { className: "dshpm-tags" }, capabilities.map(function (token) {
               return el("span", { className: "dshpm-tag", key: token }, capabilityLabel(token));
+            })))
+          : null,
+        el("div", { className: "dshpm-detailRow" },
+          el("span", { className: "dshpm-detailKey" }, t("detail.redLines")),
+          el("span", { className: "dshpm-detailValue" },
+            redLines.length
+              ? el("span", { className: "dshpm-tags" }, redLines.map(function (line) {
+                // 红线原文来自目录（英文），**不翻译**：它是检测器的原话，
+                // 改写会让用户以为我们自己也验证过。
+                return el("span", { className: "dshpm-tag dshpm-tag--warn", key: line }, line);
+              }))
+              : el("span", { className: "dshpm-detailValue--muted" }, t("detail.redLinesNone")),
+            item.capabilityCheckedAt
+              ? el("div", { className: "dshpm-detailHint" }, t("detail.redLinesCheckedAt", { date: formatDate(item.capabilityCheckedAt) }))
+              : null)));
+    }
+
+    /**
+     * 截图缩略图：**加载失败要降级成链接，不能留一张破图**。
+     *
+     * 现实约束（实测，不是推测）：截图只允许 GitHub 自家 host（上游白名单），
+     * 而 `raw.githubusercontent.com` 在国内网络下**经常直接连不上**
+     * （本机 2026-10-18 实测 HEAD 请求全部 fetch failed，与 GitHub 直连被 reset 同因）。
+     * 也就是说「数据合规」和「用户能看到」是两件事。
+     *
+     * 处理：onError 时把这一个格子换成「打开原图」链接。这样：
+     *   · 能连的环境照常看到图；
+     *   · 连不上的环境得到一个可点的链接（用户可自己挂代理/换网络），而不是一张破图占位；
+     *   · 绝不因为图挂了就把整个详情区搞乱（只影响那一个格子）。
+     */
+    function ScreenshotThumb(props) {
+      var failedState = React.useState(false);
+      var failed = failedState[0];
+      var setFailed = failedState[1];
+      if (failed) {
+        return el("a", {
+          className: "dshpm-shot dshpm-shot--failed",
+          href: props.src,
+          target: "_blank",
+          rel: "noreferrer",
+          title: props.src
+        }, t("detail.screenshotFailed"));
+      }
+      return el("img", {
+        className: "dshpm-shot",
+        src: props.src,
+        loading: "lazy",
+        referrerPolicy: "no-referrer",
+        alt: props.alt,
+        onError: function () { setFailed(true); }
+      });
+    }
+
+    function PluginDetails(props) {
+      var item = props.item;
+      // 安装命令：上游 tarball 是「只能这样装」的兜底（有些插件只发布构建产物，
+      // 用 github: 装会给用户一条坏命令）。命令串优先用目录给的 install；
+      // 若目录没给而我们拿到了 tarball，就用它拼一条，别退回那条坏的 github: 命令。
+      var command = item.install || (item.tarball ? 'dsh plugin --profile web add "' + item.tarball + '"' : (item.spec ? "dsh plugin add " + item.spec : ""));
+      var screenshots = Array.isArray(item.screenshots) ? item.screenshots : [];
+      return el("div", { className: "dshpm-detail" },
+        el("div", { className: "dshpm-detailRow" },
+          el("span", { className: "dshpm-detailKey" }, t("detail.description")),
+          el("span", { className: "dshpm-detailValue" }, descriptionText(item.description) || "—")),
+        el(CapabilityDisclosure, { item: item }),
+        screenshots.length
+          ? el("div", { className: "dshpm-detailRow" },
+            el("span", { className: "dshpm-detailKey" }, t("detail.screenshots")),
+            el("span", { className: "dshpm-shots" }, screenshots.map(function (src, index) {
+              // loading=lazy：详情展开时才下载，1289 条目录项里 3650 张图，
+              // 一次性全拉会拖慢列表。referrerPolicy=no-referrer 不把当前地址带给图床。
+              // 加载失败降级成链接（见 ScreenshotThumb）：GitHub 图床在国内常常连不上。
+              return el(ScreenshotThumb, {
+                key: src,
+                src: src,
+                alt: t("detail.screenshotsAlt", { name: item.name, index: index + 1 })
+              });
             })))
           : null,
         el("div", { className: "dshpm-detailRow" },
@@ -2645,6 +2786,23 @@ function errorCopy(error) {
               item.url ? el("a", { className: "dshpm-link", href: item.url, target: "_blank", rel: "noreferrer", key: "repo" }, t("detail.repo"), el(IconExternal, { size: 11 })) : null,
               item.page ? el("a", { className: "dshpm-link", href: item.page, target: "_blank", rel: "noreferrer", key: "page" }, t("detail.page"), el(IconExternal, { size: 11 })) : null,
               !item.url && !item.page ? el("span", null, "—") : null))),
+        item.downloads !== null && item.downloads !== undefined
+          ? el("div", { className: "dshpm-detailRow" },
+            el("span", { className: "dshpm-detailKey" }, t("meta.downloads", { count: formatCount(item.downloads) })),
+            el("span", { className: "dshpm-detailValue dshpm-detailValue--muted" },
+              item.downloadsStart && item.downloadsEnd
+                ? t("detail.downloadsRange", { start: item.downloadsStart, end: item.downloadsEnd })
+                : "—"))
+          : null,
+        // 预构建产物：有些插件只发布构建产物、从源码装不了（上游说明），
+        // 所以这个字段本身就是「该怎么装」的信息，值得单独一行并可点开。
+        item.tarball
+          ? el("div", { className: "dshpm-detailRow" },
+            el("span", { className: "dshpm-detailKey" }, t("detail.tarball")),
+            el("span", { className: "dshpm-detailValue" },
+              el("a", { className: "dshpm-link", href: item.tarball, target: "_blank", rel: "noreferrer" },
+                t("detail.tarball"), el(IconExternal, { size: 11 }))))
+          : null,
         item.added
           ? el("div", { className: "dshpm-detailRow" },
             el("span", { className: "dshpm-detailKey" }, t("detail.added")),

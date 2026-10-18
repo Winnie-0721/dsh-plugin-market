@@ -105,8 +105,15 @@ Query 参数（全部可选，未知参数忽略）：
       "page": "https://awesome-dsh-plugin.com/p/AnonyJcy/dsh-j-space/",
       "stars": 4,
       "downloads": 1156,
+      "downloadsStart": "2026-09-18",
+      "downloadsEnd": "2026-10-17",
+      "downloadsCheckedAt": "2026-10-18T00:00:00.000Z",
       "added": "2026-09-20",
       "capabilities": ["fs-read"],
+      "capabilityRedLines": [],
+      "capabilityCheckedAt": "2026-10-17T00:00:00.000Z",
+      "screenshots": ["https://raw.githubusercontent.com/AnonyJcy/dsh-j-space/HEAD/assets/a.png"],
+      "tarball": null,
       "install": "dsh plugin --profile web add @anonyjcy/dsh-j-space",
       "installed": false,
       "installedVersion": null,
@@ -118,6 +125,30 @@ Query 参数（全部可选，未知参数忽略）：
 ```
 
 - `id` = `owner/name`（目录内唯一）。`spec` 优先级：`npm` → `url`（git 仓库地址）→ `null`；`spec` 为 `null` 时 `installable=false`。
+- **上游目录新字段（v1.3.0 适配）**。权威 schema 在数据源仓库的 `scripts/build-site.mjs`
+  （`https://github.com/awesome-dsh-plugin/awesome-dsh-plugin`，经 npm 包 `dsh-plugin-catalog`
+  镜像发布）。实测 2026-10-18 快照 5786 条：
+  - `capabilities` / `capabilityRedLines` / `capabilityCheckedAt`（各 5275 条）：能力披露三件套。
+    **`null` = 未扫描**（上游原话：「an entry absent here was NOT scanned — the surfaces print
+    that as 未检出, never as clean」），**`[]` = 扫过、没发现**，**非空 = 扫过、有内容**。
+    三者必须分开渲染：把未扫描画成空白/绿色等于给没检查过的插件背书。
+    实测 597 条有红线，其中 `reads credentials/secrets AND has network access` **481 条**、
+    `runs code at install time (postinstall)` **22 条**、指向云元数据 `169.254.169.254` 的 7 条。
+    红线文案**原样透传、不翻译**：它是检测器的原话，改写会让用户以为是我们自己验证过。
+  - `screenshots`（1289 条 / 3650 个 URL）：截图。上游白名单只有 GitHub 自家 host
+    （`raw.githubusercontent.com` / `user-images.githubusercontent.com` /
+    `camo.githubusercontent.com` / `github.com`），理由是「a third-party image host would let
+    a list PR plant a tracking pixel in every storefront user's browser」。
+    **市场自己再校验一遍**（https + 白名单 host，逐条丢弃不合规的）：上游今天合规不代表
+    缓存里的旧数据合规，而这条约束的价值恰恰是防数据被投毒。
+  - `downloads` 的 **`null` ≠ `0`**：上游原话「null for the ~60% of entries with no npm package
+    at all — a coverage gap, not a zero. Consumers must tell "not published" apart from
+    "published, unused"」。实测 null **2839 条**（无 npm 2819 + 有 npm 但未探到 20），
+    而真 0 是 **0 条**。`downloadsStart`/`downloadsEnd`（2947 条）给出统计区间（**近 30 天**），
+    `downloadsCheckedAt` 是探测时间。
+  - `tarball`（581 条）：作者声明的预构建产物。上游说明：有些插件只发布构建产物、从源码装不了，
+    `github:owner/repo` 会给用户一条**坏命令**。它是会被塞进命令行的字符串，所以形状收紧为
+    **https 且以 `.tgz` / `.tar.gz` 结尾**，其余一律置 `null`。
 - `installed` 依据宿主 `pluginManager.listBundles()` 的 `name` 匹配，**按身份可信度分层**（v1.1.6）：
   1. **npm 名**（含 scope，大小写不敏感）——权威身份；
   2. **仓库身份** `owner/repo` 与 `@owner/repo`（`repo` 取**仓库名**：`/<owner>/<repo>/…` 的前两段，

@@ -196,6 +196,62 @@ export function normalizeLabels(raw) {
   return labels
 }
 
+/**
+ * 截图允许的 host（上游 build-site.mjs 的白名单，照抄）。
+ *
+ * 上游为什么限定这几个（原文）：「a third-party image host would let a list PR plant
+ * a tracking pixel in every storefront user's browser」。
+ *
+ * 市场**仍然自己再校验一遍**：上游今天合规不代表缓存里的旧数据合规，而这条约束的
+ * 价值恰恰是防「数据被投毒」——只信数据源自己，等于把唯一防线交给可能被改的那一端。
+ */
+const SCREENSHOT_HOSTS = new Set([
+  'raw.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'github.com'
+])
+
+/** 截图 URL 只接受 https + 白名单 host；其余丢弃（不是整条作废）。 */
+function safeScreenshots(value) {
+  if (!Array.isArray(value)) return null
+  const kept = []
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry === '') continue
+    let parsed
+    try {
+      parsed = new URL(entry)
+    } catch {
+      continue
+    }
+    if (parsed.protocol !== 'https:') continue
+    if (!SCREENSHOT_HOSTS.has(parsed.hostname)) continue
+    kept.push(entry)
+  }
+  return kept.length > 0 ? kept : null
+}
+
+/**
+ * 预构建产物地址（上游 tarball 字段）：作者声明的 release tarball。
+ *
+ * 上游说明：有些插件只发布构建产物、从源码装不了，`github:owner/repo` 会给用户
+ * 一条坏命令。所以这个字段要能进安装命令——**它是会被塞进命令行的字符串**，
+ * 因此形状必须收紧：只接受 https 且以 .tgz / .tar.gz 结尾。
+ */
+function safeTarball(value) {
+  const raw = optionalText(value)
+  if (raw === null) return null
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'https:') return null
+  if (!/\.(tgz|tar\.gz)$/i.test(parsed.pathname)) return null
+  return raw
+}
+
 /** 单条目录项 → 契约 §2.2 的 item 形状；不做过滤，源里有多少条就产出多少条。 */
 export function normalizeItem(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
@@ -215,9 +271,28 @@ export function normalizeItem(raw) {
           en: text(rawDescription?.en)
         }
 
+  // ── 能力披露三件套（上游 2026-10 起）────────────────────────────────────
+  //
+  // **「缺失」≠「干净」**：上游 build-site.mjs 的原话是
+  //   「An entry absent here was NOT scanned — the surfaces print that as 未检出,
+  //     never as clean.」
+  // 实测（2026-10-18，5786 条）capabilities 与 capabilityRedLines 是**一起出现/一起
+  // 缺失**的（都 5275 条），缺失的 511 条是**没扫过**。
+  //
+  // 所以这里必须让三种状态可区分：
+  //   null       = 未扫描（不知道，不能说安全）
+  //   []         = 扫过、没发现
+  //   [...]      = 扫过、有内容
+  // 把未扫描渲染成空数组/空白，等于给一个没检查过的插件背书。
   const capabilities = Array.isArray(source.capabilities)
     ? source.capabilities.filter((entry) => typeof entry === 'string' && entry !== '')
-    : []
+    : null
+  const capabilityRedLines = Array.isArray(source.capabilityRedLines)
+    ? source.capabilityRedLines.filter((entry) => typeof entry === 'string' && entry !== '')
+    : null
+  // 「扫过」的判据是**至少一侧给出了数组**。类型不对（字符串、数字…）不算扫过：
+  // 把坏数据当成「扫过、没问题」比当成「未扫描」更危险——那是在替它背书。
+  const scanned = capabilities !== null || capabilityRedLines !== null
 
   return {
     id: owner === '' ? name : `${owner}/${name}`,
@@ -232,9 +307,19 @@ export function normalizeItem(raw) {
     url,
     page: optionalText(source.page),
     stars: numberOrNull(source.stars) ?? 0,
+    // **downloads 的 null ≠ 0**：上游说 null 是「这个条目根本没有 npm 包」
+    // （实测 2839 条，其中无 npm 2819 条），是覆盖缺口而不是「发布了没人用」。
+    // 调用方必须把两者分开显示（见 client.js 的 meta.downloadsNoData）。
     downloads: numberOrNull(source.downloads),
+    downloadsStart: optionalText(source.downloadsStart),
+    downloadsEnd: optionalText(source.downloadsEnd),
+    downloadsCheckedAt: optionalText(source.downloadsCheckedAt),
     added: optionalText(source.added),
-    capabilities,
+    capabilities: scanned ? capabilities ?? [] : null,
+    capabilityRedLines: scanned ? capabilityRedLines ?? [] : null,
+    capabilityCheckedAt: optionalText(source.capabilityCheckedAt),
+    screenshots: safeScreenshots(source.screenshots),
+    tarball: safeTarball(source.tarball),
     install: optionalText(source.install),
     // 以下四项是 join 结果的位置；先给默认值，保证 item 形状恒定。
     installed: false,

@@ -228,6 +228,44 @@ check('截图加载失败要降级成链接（图床在国内常连不上，不�
   assert.match(thumb, /rel:\s*"noreferrer"/, '带 noreferrer，不泄露来源')
 })
 
+console.log('\n[4] 详情是跨整行的独立卡片（用户反馈「展开太丑」）')
+
+check('详情不再内嵌在卡片里渲染', () => {
+  // 错过的样子：详情作为 <article class="dshpm-card"> 的子节点渲染，于是被塞进
+  // 232px 的网格窄列——截图一排挤到换行、风险提示英文长句成一坨、整行被撑到几百像素，
+  // 同排其它卡片跟着变高留白。用户原话：「展开太丑了」。
+  const cardStart = clientSource.indexOf('function PluginCard(props)')
+  assert.ok(cardStart > 0)
+  const cardEnd = clientSource.indexOf('function PluginDetailCard(', cardStart)
+  assert.ok(cardEnd > cardStart, 'PluginCard 后面应当跟着 PluginDetailCard')
+  const cardBody = clientSource.slice(cardStart, cardEnd)
+  assert.doesNotMatch(cardBody, /el\(PluginDetails/, 'PluginCard 里**不许**再渲染 PluginDetails（否则又内嵌了）')
+})
+
+check('详情卡存在、且带 data-detail-for + 关闭按钮', () => {
+  assert.match(clientSource, /function PluginDetailCard\(/, '要有独立的详情卡组件')
+  const start = clientSource.indexOf('function PluginDetailCard(')
+  const body = clientSource.slice(start, start + 1200)
+  assert.match(body, /data-detail-for/, '要能定位它是给哪一条的（e2e/排查都靠它）')
+  assert.match(body, /dshpm-detailCardClose/, '右上角要有就地关闭按钮')
+  assert.match(body, /el\(PluginDetails/, '详情卡里渲染 PluginDetails')
+})
+
+check('详情卡跨整行：grid-column:1/-1', () => {
+  const rule = clientSource.match(/\.dshpm-detailCard\s*\{[^}]*\}/)
+  assert.ok(rule, '要有 .dshpm-detailCard 规则')
+  assert.match(rule[0], /grid-column:\s*1\s*\/\s*-1/, '必须跨满整行（这就是「独立卡片」的机制）')
+})
+
+check('网格用 Fragment 把卡片与详情卡成对渲染（详情紧跟被点那张）', () => {
+  const gridAt = clientSource.indexOf('className: "dshpm-grid"')
+  assert.ok(gridAt > 0)
+  const seg = clientSource.slice(gridAt, gridAt + 1600)
+  assert.match(seg, /el\(React\.Fragment/, '要用 Fragment 成对渲染，详情才会紧跟目标卡')
+  assert.match(seg, /el\(PluginDetailCard/, '展开时渲染详情卡')
+  assert.match(seg, /expanded\s*\n?\s*\?/, '按 expanded 决定是否渲染')
+})
+
 console.log('')
 if (failures.length > 0) {
   console.log(`目录新字段适配：${passed}/${passed + failures.length} 通过，${failures.length} 失败`)

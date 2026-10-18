@@ -1547,6 +1547,19 @@ function errorCopy(error) {
 .dshpm-cardMeta { display:flex; align-items:center; gap:12px; flex-wrap:wrap; color:var(--dsw-alias-label-secondary,#61666b); font-size:.79em; }
 .dshpm-cardActions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:auto; }
 .dshpm-detail { display:flex; flex-direction:column; gap:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#0000000a); font-size:.86em; }
+/* ── 独立详情卡片（用户反馈「展开太丑」后重做）────────────────────────────
+   以前详情是卡片自己的子节点，被塞进 232px 的网格窄列：截图一排挤到换行、
+   风险提示的英文长句变成一大坨、整行卡片被撑到几百像素高，同排其它卡片跟着变高留白。
+   现在详情是**跨整个网格宽度的一张独立卡片**，紧跟被点那张之后。
+   grid-column:1/-1 是它跨行的唯一机制；放在 grid 里而不是 grid 外面，
+   是为了让它自然落在「被点卡片的下方一行」，不用手算插入位置。 */
+.dshpm-detailCard { grid-column:1/-1; }
+.dshpm-detailCardHead { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.dshpm-detailCardName { margin:0; font-size:1.02em; font-weight:600; overflow-wrap:anywhere; }
+.dshpm-detailCardClose { margin-left:auto; }
+/* 详情卡里内容更宽：两列（键/值）在窄屏下会自动堆叠，宽屏下把键列固定住更好读。 */
+.dshpm-detailCard .dshpm-detail { padding-top:0; border-top:none; font-size:.93em; }
+.dshpm-detailCard .dshpm-detailKey { width:6.5em; }
 .dshpm-detailRow { display:flex; gap:8px; align-items:flex-start; }
 .dshpm-detailKey { flex:none; width:5.5em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-detailValue { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
@@ -2666,8 +2679,41 @@ function errorCopy(error) {
             "aria-expanded": props.expanded ? "true" : "false",
             onClick: function () { props.onToggleDetails(item.id); }
           }, props.expanded ? t("action.hideDetails") : t("action.details"))
+        )
+        // 详情**不再在卡片里展开**（用户反馈「展开太丑」）：它以前是这个 <article> 的子节点，
+        // 于是详情被塞进 232px 的网格窄列里，行高被撑到几百像素，同排其它卡片跟着变高、
+        // 留下一大片空白。现在改成由外面渲染一张**跨整行的独立卡片**（见 PluginDetailCard）。
+      );
+    }
+
+    /**
+     * 独立详情卡片：跨整个网格宽度，紧跟在被点那张卡片之后。
+     *
+     * 为什么单独一张卡而不是在卡片里展开：网格列宽只有 232px，详情里有截图（120px 缩略图
+     * 一排）、能力标签、风险提示原文（英文长句）——挤在窄列里必然换行成一大坨，还把整行
+     * 拉高。跨整行后宽度够用，也不影响同排其它卡片的高度。
+     *
+     * 关闭入口有两处：卡片自己右上角的 ×（用户点开就得能就地关掉），
+     * 以及原卡片上那颗已变成「收起详情」的按钮（保持原交互不变）。
+     */
+    function PluginDetailCard(props) {
+      var item = props.item;
+      return el("article", {
+        className: "dshpm-card dshpm-detailCard",
+        "data-detail-for": item.id || item.name
+      },
+        el("div", { className: "dshpm-detailCardHead" },
+          el("h3", { className: "dshpm-detailCardName" }, item.name || item.id),
+          el("span", { className: "dshpm-cardOwner" }, "@" + (item.owner || "")),
+          el("button", {
+            type: "button",
+            className: "dshpm-iconBtn dshpm-detailCardClose",
+            title: t("action.hideDetails"),
+            "aria-label": t("action.hideDetails"),
+            onClick: function () { props.onClose(); }
+          }, el(IconClose, { size: 14 }))
         ),
-        props.expanded ? el(PluginDetails, { item: item, onCopy: props.onCopy, copied: props.copied }) : null
+        el(PluginDetails, { item: item, onCopy: props.onCopy, copied: props.copied })
       );
     }
 
@@ -2897,20 +2943,32 @@ function errorCopy(error) {
         items.length
           ? el("div", { className: "dshpm-grid" }, items.map(function (item, index) {
             var key = item.id || item.name;
-            return el(PluginCard, {
-              key: key,
-              index: index,
-              item: item,
-              categories: props.categories,
-              expanded: !!props.expanded[key],
-              busy: props.busyKey === "install:" + key,
-              busyKind: props.busyKind,
-              copied: props.copied === key,
-              readOnly: props.readOnly,
-              onInstall: props.onInstall,
-              onToggleDetails: props.onToggleDetails,
-              onCopy: function (command) { props.onCopy(command, key); }
-            });
+            var expanded = !!props.expanded[key];
+            // 卡片 + 它的详情卡组成一对：详情**跨整行**（grid-column:1/-1）紧跟在这张卡后面。
+            // 以前详情是卡片自己的子节点，被挤进 232px 窄列、把整行撑高（用户：「展开太丑」）。
+            return el(React.Fragment, { key: key },
+              el(PluginCard, {
+                index: index,
+                item: item,
+                categories: props.categories,
+                expanded: expanded,
+                busy: props.busyKey === "install:" + key,
+                busyKind: props.busyKind,
+                copied: props.copied === key,
+                readOnly: props.readOnly,
+                onInstall: props.onInstall,
+                onToggleDetails: props.onToggleDetails,
+                onCopy: function (command) { props.onCopy(command, key); }
+              }),
+              expanded
+                ? el(PluginDetailCard, {
+                  item: item,
+                  copied: props.copied === key,
+                  onClose: function () { props.onToggleDetails(key); },
+                  onCopy: function (command) { props.onCopy(command, key); }
+                })
+                : null
+            );
           }))
           : el(EmptyState, {
             title: t("list.empty.title"),

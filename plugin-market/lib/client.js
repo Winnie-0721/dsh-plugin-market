@@ -2819,6 +2819,23 @@ function errorCopy(error) {
       var locked = readOnly === true || !!hostReason;
       var marketSelf = source.market === true;
       var notRemovable = source.removable === false;
+      // **不可移除 ⇒ 开关也不能点**（v1.3.0 修）。
+      //
+      // 错过的样子：toggle 只看 locked，remove 才看 notRemovable，两条判据不同源。
+      // 于是 `removable:false` 且 `readOnlyReason` 为空的包——实测真宿主 desktop profile
+      // 30 个 bundle 里 removable=false 有 22 条、其中 readOnlyReason 非空只有 3 条，
+      // 剩下 **19 条**（@deepseek-ai/dsh-headless、dsh-sdk-app、dsh-subagent-codex…）
+      // ——卸载按钮不渲染（对），开关却照常渲染且可点（错）：点下去宿主回
+      // `400 not-allowed`，界面上就是那句「这个操作被宿主拒绝」。
+      //
+      // 为什么 notRemovable 能作为独立判据：它是宿主直接给的布尔值，不依赖任何文案，
+      // 所以不违反上面那条「查不到文案不要凭空锁」的约定（locked 的判据一行没动）。
+      // 宿主侧 `selectBundle(name, enabled)` 对这类包两个方向都没有可写目标：
+      // 禁用方向 `previous.includes(name)` 为 false 会静默跳过，启用方向
+      // `bundleManifest` 取不到就抛 `ManagementFailure("not-bundle")`。
+      // 宿主已经用 removable:false 表达了「这个包不归 profile 管」，
+      // 市场不该把它渲染成一个可点的控件再让它失败。
+      var toggle = !locked && !notRemovable;
       var notes = [];
       // 只在「没被宿主整体锁住」时补额外说明：那时 hostReason 已经写在行内了。
       if (!locked) {
@@ -2826,7 +2843,7 @@ function errorCopy(error) {
         else if (notRemovable) notes.push(t("installed.notRemovable"));
       }
       return {
-        toggle: !locked,
+        toggle: toggle,
         remove: !locked && !marketSelf && !notRemovable,
         hostReason: hostReason,
         locked: locked,

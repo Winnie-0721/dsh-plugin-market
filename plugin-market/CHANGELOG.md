@@ -2,6 +2,47 @@
 
 ## 1.3.0
 
+- **fix：19 个宿主托管的包渲染出「点了必然被拒绝」的开关（用户报「宿主拒绝了这个操作」）。**
+
+  **错在哪**：`installedCapabilities` 里两条判据不同源——
+
+      toggle: !locked                                    // 只看 readOnlyReason / 全局只读
+      remove: !locked && !marketSelf && !notRemovable     // 还看 removable
+
+  于是 `removable === false` 且 `readOnlyReason` 为空（或查不到文案）的包：卸载按钮**不渲染**（对），
+  开关却**照常渲染且可点**（错）。点下去宿主回 `400 not-allowed`，界面上就是那句
+  「这个操作被宿主拒绝」——一个永远不可能成功的控件。
+
+  **实测规模**（真宿主 `/plugin-market/installed`，desktop profile，30 个 bundle）：
+  `removable=false` 共 **22** 条，其中 `readOnlyReason` 非空的只有 **3** 条
+  （`@deepseek-ai/dsh-base` / `dsh-web-app` / `dsh-sdk-minimal`，都是 `management-required`）。
+  剩下 **19** 条（`@deepseek-ai/dsh-headless`、`dsh-sdk-app`、`dsh-subagent-codex`、
+  `dsh-acp-app`、`dsh-experimental-*` …）就是「开关点得动但必然被拒」的那一类。
+
+  **为什么 `removable:false` 就该锁住开关**（不是猜，读了宿主实现）：
+  `selectBundle(name, enabled)` 对这类包两个方向都没有可写目标——
+  禁用方向 `previous.includes(name)` 为 false（官方 bundle 由 base 间接引入，名字不在
+  profile 的 `dsh.profile.bundles` 里）会静默跳过；启用方向 `bundleManifest` 取不到就抛
+  `ManagementFailure("not-bundle")`。宿主已经用 `removable:false` 表达了「这个包不归 profile 管」，
+  市场不该把它渲染成可点的控件再让它失败。
+
+  **与既有约定的关系**（这条不能破坏）：v1.2.0 定的是「`readOnlyReason` 查不到文案时
+  **不要凭空锁住**」——文案缺失只是 i18n 缺键，不代表宿主没给理由。这条**一行没动**：
+  `locked` 的判据保持不变。这次补的是另一条**独立事实**：`removable === false` 是宿主直接
+  给出的布尔值，不依赖任何文案。测试里有一条专门钉住「查不到文案时不凭空锁住」仍成立。
+
+  **连带效果（用户选定）**：这类包现在**整卡隐藏**（`shouldHideInstalledCard` 依据
+  `!toggle && !remove`），符合此前「做不到的动作就整卡藏掉，别留一个点不动的按钮」的要求。
+  已安装页会少 19 行，摘要里如实写「另有 N 个已隐藏」——那条断言 e2e 一直在盯着
+  （「摘要里的数字等于实际渲染的行数」）。全局只读时**不隐藏**（豁免不变：那时页面唯一
+  价值就是这份清单）。
+
+  **只修客户端**：宿主已经会用 `not-allowed` 正确拒绝，再加一道检查是重复；改动面最小。
+
+  新增 `verify/installed-capabilities.test.mjs`（11 条），把 `installedCapabilities` 与
+  `shouldHideInstalledCard` 两个真函数抠出来执行，覆盖：不可移除必须锁开关、普通包不能误伤、
+  有文案时仍锁、**查不到文案时不凭空锁**（v1.2.0 约定）、市场自身、全局只读、整卡隐藏四条口径。
+
 - **fix：「更新」把 spec 发错包——2819 条插件点更新必然 400，66 条会装成别的包。**
 
   **现场取证**（`_verify/update-spec-precise.mjs`，真实目录 5786 条）：客户端「可更新」页点更新时发的是

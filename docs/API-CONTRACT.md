@@ -836,18 +836,34 @@ window.__ModuleLoader__.load({
       而是在承诺一个永远不会发生的动作——用户会反复点、去猜为什么点不动。
     - **临时不可用**（写操作进行中、批量更新在跑、这一条正在处理）⇒ **保留控件、只禁用**。
       否则操作期间按钮时隐时现，用户会以为功能丢了，那比灰着更吓人。
-    两条判据不同，**不能一起砍**：`removable:false` 只是不能**卸载**，开关仍然是可用的。
+    两条判据不同，**不能一起砍**：但注意 `removable:false` **两个动作都不能给**（见下条）。
+    - **`removable:false` ⇒ 开关也一并锁住（v1.3.0 修）**。此前 `toggle` 只看 `readOnlyReason`
+      （`toggle: !locked`），而 `remove` 还看 `removable`（`remove: !locked && !marketSelf && !notRemovable`）
+      ——两条判据不同源，于是 `removable:false` 且 `readOnlyReason` 为空/查不到文案的包
+      **卸载按钮不渲染、开关却照常可点**。点下去宿主回 `400 not-allowed`，界面上就是
+      「这个操作被宿主拒绝」：一个永远不可能成功的控件。
+      实测规模（真宿主 `/installed`，desktop profile，30 个 bundle）：`removable=false` 共 **22** 条，
+      `readOnlyReason` 非空只有 **3** 条（`management-required`），剩下 **19** 条
+      （`@deepseek-ai/dsh-headless`、`dsh-sdk-app`、`dsh-subagent-codex`、`dsh-acp-app`、
+      `dsh-experimental-*` …）就是这一类。
+      为什么 `removable:false` 能当独立判据（读了宿主实现，不是猜）：`selectBundle(name, enabled)` 对这类包
+      **两个方向都没有可写目标**——禁用方向 `previous.includes(name)` 为 false（官方 bundle 由 base 间接引入，
+      名字不在 profile 的 `dsh.profile.bundles` 里）会静默跳过；启用方向 `bundleManifest` 取不到就抛
+      `ManagementFailure("not-bundle")`。宿主已经用 `removable:false` 表达了「这个包不归 profile 管」。
+      这不违反 v1.2.0 那条约定：`locked` 的判据（`readOnlyReason` 查不到文案时**不要凭空锁住**）
+      **一行没动**——`removable` 是宿主直接给的布尔值，不依赖任何文案。
     - **隐藏了动作就必须在同一行说明原因**：控件没了 tooltip 也没了，只留"东西不见了"是最难排查的状态。
     - 同理，详情里 `entryId` 缺失的条目开关也不渲染（`toggleEntry` 用 `entryId` 发请求，缺它就是**假开关**：
       能点、点了静默返回），改为用已有的 `installed.noEntryId` / `badge.disabled` / `badge.enabled` 报状态。
     - **整卡不渲染（v1.3.0 续）**：`shouldHideInstalledCard` —— **开关和卸载都做不到**时整张卡片也不画。
-      只要还有一个动作能用（`removable:false` 但可开关、`market:true` 但可停用），卡片就必须留着，
+      于是 `removable:false` 的包现在**整卡隐藏**（用户选定的口径：做不到的动作就整卡藏掉，
+      别留一个点不动的按钮）。只有还有一个动作能用的（`market:true` 但可停用）卡片才留着，
       否则会把一个**本来可用**的功能一起藏掉。三个配套约束：
       ① `readOnly === true`（宿主没有 pluginManager）时**绝不隐藏任何卡片**——那种情况下每个包
       都"不可操作"，字面执行会把整页藏空。这条豁免**是可测的**：`readOnly` 来自 `/status`
       （挂载时读一次），而 `/installed` 是**另一个请求**，所以"status 说没有管理器、列表仍回得来"
       是真实可构造的形状（本仓库 index.js 自己就写着「宿主服务可能比本插件晚注册」）。
-      e2e `[18]` 用探针造出这个形状并量到：只读态渲染 **6 行**（正常态 5 行——托管那个被藏）、
+      e2e `[18]` 用探针造出这个形状并量到：只读态渲染 **7 行**（正常态 5 行——托管与不可移除两个被藏）、
       开关 **0 个**（豁免只是"显示"，不是"解锁"）。
       > 我一度把这条豁免判成"防御性、不可达、变异体无效"——**那是因为我当时没给它场景**。
       > 补上 `[18]` 之后它立刻变成真缺口并被杀掉（5/5）。教训：**"测不到"必须区分
@@ -856,9 +872,13 @@ window.__ModuleLoader__.load({
       差额用 `installed.hiddenCount` 写在明面上；
       ③ 全都被藏光时**不能回落到"没装插件"那个空状态**——那与"这页没有可操作的项"是两回事，
       用 `installed.allHidden.*` 分开说，并指向 `dsh plugin list`。
-    真浏览器断言在 e2e `[17]`（含**反向对照**：普通包必须仍然有开关和卸载、`removable:false` 的卡片
-    必须还在——只测"隐藏"的话，把按钮或整卡全删了也能全绿）与 `[18]`（全局只读豁免）；
+    真浏览器断言在 e2e `[17]`（含**反向对照**：普通包必须仍然有开关和卸载——只测"隐藏"的话，
+    把按钮或整卡全删了也能全绿；`removable:false` 与宿主托管的两张卡片都必须**不渲染**）
+    与 `[18]`（全局只读豁免）；
     变异测试 `_verify/installed-hide-mutation.mjs` **5/5 被杀**（含"摘要报总数"与"全局只读"两条）。
+    单元级：`verify/installed-capabilities.test.mjs` **11 条**，把 `installedCapabilities` 与
+    `shouldHideInstalledCard` 两个真函数抠出来执行（含「查不到文案时不凭空锁住」这条 v1.2.0 约定
+    仍然成立的反向断言）。
   - 详情：可展开区域，显示完整描述、能力标签、仓库/目录页外链（`target="_blank" rel="noreferrer"`）。
   - 已安装页：bundle 行（名称、版本、启用开关、卸载按钮、有更新时「更新到 x.y.z」）。
   - 可更新页：与已安装页同一份 `/installed` 数据，只显示 `updateAvailable === true` 的条目；空态区分「全部都是最新」与「目录还没就绪」；页脚不再有独立按钮（「重新检查」已并入页头的状态机按钮）。三个页签互相切换时另一侧的内容卸载（同一时间只有一份在 DOM 里）。

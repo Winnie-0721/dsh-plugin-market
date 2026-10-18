@@ -80,12 +80,25 @@ const INJECTED_INSTALLED = {
       readOnlyReason: 'management-required',
     },
     {
+      // v1.3.0：这个夹具**现在整卡隐藏**了——宿主说不可移除，开关也一并锁掉
+      // （原来只锁卸载、开关照常渲染，点下去宿主回 not-allowed，就是用户报的
+      // 「宿主拒绝了这个操作」）。留着它正是为了钉住「该藏的藏了」。
       name: '@fixture/not-removable',
       version: '2.1.0',
       description: '宿主说这个包不可移除。',
       rows: [{ rowId: 'row-e' }],
       enabled: true,
       removable: false,
+    },
+    {
+      // 「能开关、卡片必须在」的守门夹具：上一版这个角色由 @fixture/not-removable 担任，
+      // 但它现在整卡隐藏了，反向对照就失去了对象。市场自身那条也守着，但它同时受
+      // market 规则影响、不够干净，所以单独给一个普通包。
+      name: '@fixture/removable-normal',
+      version: '2.3.0',
+      description: '普通包：能开关、能卸载。',
+      rows: [{ rowId: 'row-g' }],
+      enabled: true,
     },
     {
       name: '@fixture/no-entry-id',
@@ -1728,6 +1741,10 @@ try {
     // 注入 6 个包，其中 @fixture/managed-by-host 会被**整卡藏掉**（见 v1.3.0 的
     // shouldHideInstalledCard），所以实际渲染 5 行。这里等的是"注入已生效"，
     // 不是"6 行都在"——写 >=6 会永远等不到（第一版就是这么假红的）。
+    // 注入 7 个包，其中 **两个**会被整卡藏掉（见 v1.3.0 的 shouldHideInstalledCard）：
+    //   · @fixture/managed-by-host  —— readOnlyReason 有文案 ⇒ locked
+    //   · @fixture/not-removable    —— removable:false ⇒ 开关也锁（v1.3.0 修）
+    // 所以实际渲染 5 行。这里等的是"注入已生效"，不是"7 行都在"。
     await waitFor(client, `document.querySelectorAll('.dshpm-row').length >= 5`, 8000, '[17] 已安装页渲染出注入的包')
 
     const caps = await evaluate(
@@ -1755,6 +1772,7 @@ try {
            normal: describe('@fixture/needs-update'),
            managed: describe('@fixture/managed-by-host'),
            notRemovable: describe('@fixture/not-removable'),
+           removableNormal: describe('@fixture/removable-normal'),
            noEntryId: describe('@fixture/no-entry-id'),
            market: describe('deepseek-harness-market'),
          };
@@ -1774,14 +1792,23 @@ try {
       caps?.managed === null,
       JSON.stringify(caps?.managed),
     )
-    // ③ 不可移除：卡片**必须还在**（它还能开关）。这条是"别隐藏过头"的守门人：
-    //    只测"该藏的藏了"的话，把所有卡片都藏掉也能全绿。
+    // ③ 不可移除：v1.3.0 起**整卡也不渲染**了（宿主说不可移除 ⇒ 开关也一并锁掉）。
+    //    原来这条断言的是「卡片仍在、开关仍在、只有卸载不渲染」——那正是被修掉的旧行为：
+    //    那个开关点下去宿主回 not-allowed（用户报的「宿主拒绝了这个操作」）。
     expect(
-      '宿主说不可移除的包：卡片仍在、开关仍在、只有卸载不渲染（三者是不同能力）',
-      caps?.notRemovable !== null
-        && caps.notRemovable.switches === 1
-        && !caps.notRemovable.buttons.some((b) => /卸载|Uninstall/.test(b)),
+      '宿主说不可移除的包：整张卡片都不渲染（开关点了也只会被拒）',
+      caps?.notRemovable === null,
       JSON.stringify(caps?.notRemovable),
+    )
+    // ③b 「别藏过头」的守门人：普通包必须**仍然**有开关和卸载。
+    //     上一版这个角色由 @fixture/not-removable 担任，但它现在整卡隐藏了，
+    //     所以换成一个干净的普通夹具——否则「把所有卡片都藏掉」也能全绿。
+    expect(
+      '普通夹具包：卡片仍在、开关与卸载都在（反向对照：不能藏过头）',
+      caps?.removableNormal !== null
+        && caps.removableNormal.switches === 1
+        && caps.removableNormal.buttons.some((b) => /卸载|Uninstall/.test(b)),
+      JSON.stringify(caps?.removableNormal),
     )
     // ④ 市场自身：卡片**仍在**（能开关），只有卸载不在
     expect(
@@ -1791,12 +1818,13 @@ try {
         && !caps.market.buttons.some((b) => /卸载|Uninstall/.test(b)),
       JSON.stringify(caps?.market),
     )
-    // ⑤ 隐藏了动作就必须**在同一行说明原因**——否则用户只看到"东西不见了"
+    // ⑤ 隐藏了动作就必须**在同一行说明原因**——否则用户只看到"东西不见了"。
+    //    v1.3.0 起 notRemovable 整卡隐藏了（没有行内可写的地方），所以原因说明
+    //    只剩「市场自身不能卸载」这一处可验；整卡隐藏的原因由摘要里的「另有 N 个已隐藏」承担（见 ⑥）。
     expect(
       '被隐藏的动作在同一行给出原因（不能只是「按钮没了」）',
-      /不能卸载自己|市场不能卸载自己/.test(String(caps?.market?.meta))
-        && String(caps?.notRemovable?.meta).length > 0,
-      JSON.stringify({ marketMeta: caps?.market?.meta, notRemovableMeta: caps?.notRemovable?.meta }),
+      /不能卸载自己|市场不能卸载自己/.test(String(caps?.market?.meta)),
+      JSON.stringify({ marketMeta: caps?.market?.meta }),
     )
     // ⑥ 藏了卡片，摘要的数字就**必须等于实际渲染的行数**。这才是不变量：
     //    只断言"摘要里出现了'已隐藏'字样"是不够的——那句话与计数是两个独立的表达式，
@@ -1824,7 +1852,8 @@ try {
     )
     console.log(`  · 实测：普通 switches=${caps?.normal?.switches} 按钮=${JSON.stringify(caps?.normal?.buttons)}`)
     console.log(`          托管 整卡是否渲染=${caps?.managed !== null}（期望 false）`)
-    console.log(`          不可移除 switches=${caps?.notRemovable?.switches} 按钮=${JSON.stringify(caps?.notRemovable?.buttons)}`)
+    console.log(`          不可移除 整卡是否渲染=${caps?.notRemovable !== null}（期望 false，v1.3.0 起开关也锁）`)
+    console.log(`          普通守门夹具 switches=${caps?.removableNormal?.switches} 按钮=${JSON.stringify(caps?.removableNormal?.buttons)}`)
     console.log(`          市场自身 switches=${caps?.market?.switches} 按钮=${JSON.stringify(caps?.market?.buttons)}`)
     console.log(`          摘要=「${counts?.text}」，数字 ${counts?.summaryCount} vs 行数 ${counts?.rows}`)
     await screenshot(client, join(shotDir, 'market-installed-hidden-actions.png'))
@@ -1872,10 +1901,10 @@ try {
          return { rows: rows.length, names, switches, summary: s ? s.textContent.trim() : '' };
        })()`,
     )
-    // 注入 6 个包；正常态下托管那个被藏（→5 行）。只读态**一个都不该藏**（→6 行）。
+    // 注入 7 个包；正常态下**两个**被藏（托管 + 不可移除 → 5 行）。只读态**一个都不该藏**（→7 行）。
     expect(
       '宿主没有 pluginManager 时，被宿主托管的卡片也照常渲染（豁免生效，没有整页藏空）',
-      readOnlyView?.rows === 6,
+      readOnlyView?.rows === 7,
       JSON.stringify(readOnlyView),
     )
     expect(

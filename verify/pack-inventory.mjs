@@ -141,7 +141,7 @@ function group1() {
     'dry-run writes nothing: npm walks the "files" whitelist, reports each entry uncompressed, and sums them into unpackedSize.',
     real.bytes == null
       ? 'Real .tgz bytes are NOT measured, so no dry-run-vs-tarball delta is claimed.'
-      : `Same 18 entries, two rulers: dry-run reports UNCOMPRESSED payload ${d.unpackedSize} bytes; the real .tgz on disk is COMPRESSED to ${real.bytes} bytes, i.e. ${(d.unpackedSize / real.bytes).toFixed(3)}x smaller. npm's per-file "size" in dry-run JSON is file length, npm's top-level "size" (${d.npmReportedTarballSize}) is the tarball size and matches the real file (delta ${real.bytes - d.npmReportedTarballSize}); the on-disk byte count is the shipping size.`,
+      : `Same ${d.fileCount} entries, two rulers: dry-run reports UNCOMPRESSED payload ${d.unpackedSize} bytes; the real .tgz on disk is COMPRESSED to ${real.bytes} bytes, i.e. ${(d.unpackedSize / real.bytes).toFixed(3)}x smaller. npm's per-file "size" in dry-run JSON is file length, npm's top-level "size" (${d.npmReportedTarballSize}) is the tarball size and matches the real file (delta ${real.bytes - d.npmReportedTarballSize}); the on-disk byte count is the shipping size.`,
     'Neither number equals the repo total: files-whitelist only, so tests/docs/sources outside lib + the 5 root entries are excluded.',
   ];
   return g;

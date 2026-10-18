@@ -319,3 +319,33 @@ node -e "import('file:///E:/Code/dsh-plugin-market/plugin-market/lib/catalog.js'
 - **未发现假绿灯**：脚本真 import `catalog.js`（sha256 `AB78AF0A…CC4FD`），无实现副本、无联网、无写盘。
 - **红线全绿**（`plugin-market/` 零改动、1.3.1、无新依赖、无删除、无 commit/tag/push、脚本侧不写 Profile、无 pack-inv/tgz 遗留）；`release.ps1 -LocalOnly` 与 `git diff --check` 均 exit 0。
 - **3 个须改**：D1 文档分辨力清单与 JSON 不一致；D2 `refresh-chain` label 命名歧义（+ §3.3「ui 约 200 条」应为 764）；D3 synthetic-100 链快于其组件却未被标分辨力不足。
+
+---
+
+# 附：TASK-PERF-02 之后 — D1 / D2 / D3 的处置状态
+
+> 本节由 **Lead** 追加（2026-10-18），用于把本报告发现的三条缺陷与后续修复对齐。
+> **上面 §1–§10 是 TASK-PERF-01c 当时的历史记录，一字未改**——它们描述的是 `a314349` 时刻的事实。
+
+| 编号 | 当时的判定 | TASK-PERF-02 的处置 | 证据 |
+|---|---|---|---|
+| **D1** | 文档分辨力清单与脚本 JSON 不一致（误列 `synthetic-100/categoryCounts`，漏列 `sortPlugins:top`/`joinInstalled`） | **已修正** `docs/PERF-AUDIT.md` §3.4 | 按脚本 JSON `resolution.insufficientCells` 对齐；本次运行该清单为 10 格 |
+| **D2** | `refresh-chain` label 同时容纳「热复用 6.99ms」与「冷刷新 21.2ms」两种相反结论；`ui` 类应为 764 条 | **已修正**：op 拆成 3 个自解释 label；§3.3 补口径更正块与 764 条 | §11.1 第 5 项；新 label 为 `…:query+category (warm)` / `…:query only / category=all (warm)` / `…:no query / browse (warm)` |
+| **D3** | `synthetic-100` chain(0.0755) < 其组件 normalize(0.0995)，却被判 `resolvable` | **已修复**：根因判定为**独立 pass 测量**（非算术错误），改为**交错取样** + `isChainConsistent` 判据 + `unreliable` 状态 | §11.1；修复后 **15/15 组一致、0 倒挂** |
+
+## 对本报告 §10「一句话结论」的修订
+
+| 原结论 | 修订 |
+|---|---|
+| `pack-inventory`：18/861935/303588 | **已变化**（TASK-PERF-02 移除了 npm 包内 `CHANGELOG.md`）→ 现为 **17 / 691,578 / 227,751**。本报告的旧数字作为**基线**仍然正确 |
+| 作者 `refresh-chain` = 热复用 + category 剪枝 | **维持**。TASK-PERF-02 把该口径命名为 `…:query+category (warm)`，并补了另两条链路 |
+| 「分项 14ms > 整链」不是算术错误 | **维持**，且进一步确认根因是**口径混用**（组件测在全量/冷 raw，链路测在剪枝/热态） |
+| **未发现假绿灯**（真 import、无副本） | **维持**。TASK-PERF-02 未改 import 路径与实现来源 |
+
+## TASK-PERF-02 新增的可信度守护（本报告未覆盖，因为当时不存在）
+
+1. `chainConsistency.detectorSelfTest` —— 每次运行都用**故意倒挂的伪造对**调用**真判定函数** `isChainConsistent`，实测 `pass:true`。证明守护逻辑**会触发**，不是死代码。
+2. `unreliableCells` —— 倒挂格子标 `unreliable` 并写入 `untested`，**不进可信结论**，且**不**导致非零退出（否则正常测量噪声会频繁产生假红）。
+3. `coldStart` —— 进程内首次调用（折叠缓存冷）单独 n=1 记录，明确标注「不可当分布」。
+
+**仍未由本报告作者复核的项**：TASK-PERF-02 的改动由 `verify/PERF02-VERIFY.md` 的独立复核者验证（含把脚本副本改成故意倒挂、确认 `unreliableCells` 非空且退出码仍为 0 的端到端反例）。

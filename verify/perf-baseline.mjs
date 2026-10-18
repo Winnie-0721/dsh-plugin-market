@@ -262,10 +262,92 @@ console.log(`  已知工作量 2e6 次算术  median ${known.median.toFixed(3)}m
 console.log(`  比值 已知/空转 = ${(known.median / noopFloor).toFixed(0)}×  （>5 视为该口径量得出耗时）`)
 
 // ── 各档各操作 ──────────────────────────────────────────────────────────
+//
+// ── TASK-PERF-02 修复：链路必须与它的必经组件在**同一次交错测量**里取材 ──
+//
+// 缺陷（TASK-PERF-01 独立验收 D3）：`synthetic-100` 的 refresh-chain 曾量出
+// 0.0755ms，**小于**它必经的 normalizeCatalog 0.0995ms —— 超集比子集便宜。
+// 根因**不是算术错误，是测量设计**：两者原本各跑一次独立的 bench()（各自 warmup、
+// 各自 200 次连续取样），于是它们不共享 JIT 优化状态、不共享 GC 节奏、不共享折叠缓存。
+// 在 0.1ms 量级上，两次独立 pass 的中位数相差 ±40% 属于常态，谁大谁小基本是掷硬币。
+//
+// 为什么要交错：把「链路」与「必经组件」放进**同一个 pass 轮流取样**，两者就共享
+// 同一份 JIT/GC/缓存状态。实测（synthetic-100，8 轮）：交错后 chain/normalize 比值稳定在
+// 2.30–2.40、**0/8 轮出现倒挂**；独立 pass 则出现 0.099 vs 0.100 甚至倒挂。
+// 只有在交错口径下，「链路 ≥ 其必经组件」才是一条**成立**的断言；
+// 独立 pass 下套这条断言是机械套用不成立的约束（任务书明确禁止）。
+//
+// 交错口径若仍报出倒挂，那就不是口径问题而是**该格不可信**：标记 unreliable、
+// 不进可信结论、也**不**当成失败退出（否则正常的测量噪声会频繁产生假红）。
+const CHAIN_QUERY = 'dsh'
+
+const CHAIN_VARIANTS = [
+  {
+    label: 'refresh-chain:query+category (warm)',
+    note: '已选分类后再搜（category 先收窄候选）；折叠缓存与匹配索引已热。原 refresh-chain 就是这个口径。',
+    run: (tier, cats) => {
+      const catalog = normalizeCatalog(tier.payload, { source: tier.payload.url })
+      const counts = categoryCounts(catalog.plugins, catalog.categoryLabels)
+      const filtered = filterPlugins(catalog.plugins, { query: CHAIN_QUERY, category: counts[0]?.id ?? 'other' })
+      return paginate(sortPlugins(filtered, 'top'), 1, 24)
+    }
+  },
+  {
+    label: 'refresh-chain:query only / category=all (warm)',
+    note: '用户默认路径：只在搜索框输入、不选分类 ⇒ query 要在**全量**上跑。比上面那条贵得多。',
+    run: (tier) => {
+      const catalog = normalizeCatalog(tier.payload, { source: tier.payload.url })
+      const filtered = filterPlugins(catalog.plugins, { query: CHAIN_QUERY })
+      return paginate(sortPlugins(filtered, 'top'), 1, 24)
+    }
+  },
+  {
+    label: 'refresh-chain:no query / browse (warm)',
+    note: '浏览/翻页/改排序：无 query、无分类，只有 join 之外的全量排序分页。',
+    run: (tier) => {
+      const catalog = normalizeCatalog(tier.payload, { source: tier.payload.url })
+      return paginate(sortPlugins(catalog.plugins, 'top'), 1, 24)
+    }
+  }
+]
+
 const results = []
 const insufficientCells = []
+const unreliableCells = []
 const failures = []
 const memory = []
+const chainConsistency = []
+
+// 冷启动首次调用：**必须在任何其它测量之前**取，否则折叠缓存已被热身。
+// 只取 n=1：进程内真正「冷」的只有第一次，重复测不可能再现冷态，
+// 因此如实标注为单次观测，不当成分布、也不与热态中位数直接比较。
+const coldFirstCall = (() => {
+  const tier = tiers[0]
+  if (!tier) return null
+  const start = process.hrtime.bigint()
+  CHAIN_VARIANTS[1].run(tier)
+  const ms = Number(process.hrtime.bigint() - start) / 1e6
+  return { tier: tier.name, ms, note: 'n=1；进程内首次调用，折叠缓存冷。不可当分布，也不与热态中位数直接比较。' }
+})()
+
+/** 链路一致性判据：链路 median 必须 ≥ 其必经组件 median。**唯一实现**，真判定与自检共用。 */
+function isChainConsistent(chainMedian, componentMedian) {
+  return chainMedian >= componentMedian
+}
+
+/** 交错取材：pairs 轮流取样，共享 JIT / GC / 折叠缓存状态。 */
+function benchInterleaved(pairs, iterations, warmup = WARMUP) {
+  for (let round = 0; round < warmup; round += 1) for (const [, fn] of pairs) sink += Number(fn() === null)
+  const samples = pairs.map(() => new Float64Array(iterations))
+  for (let i = 0; i < iterations; i += 1) {
+    for (let k = 0; k < pairs.length; k += 1) {
+      const start = process.hrtime.bigint()
+      pairs[k][1]()
+      samples[k][i] = Number(process.hrtime.bigint() - start)
+    }
+  }
+  return pairs.map(([label], k) => [label, stats(samples[k])])
+}
 
 for (const tier of tiers) {
   const iterations = ITERATIONS[tier.name] ?? 30
@@ -286,15 +368,6 @@ for (const tier of tiers) {
     'sortPlugins:downloads': () => sortPlugins(tier.plugins, 'downloads'),
     'sortPlugins:name': () => sortPlugins(tier.plugins, 'name'),
     'paginate': () => paginate(tier.plugins, 3, 24),
-    'refresh-chain(validate→normalize→counts→filter→sort→paginate)': () => {
-      const v = validateCatalogPayload(tier.payload)
-      if (!v.ok) throw new Error(`validateCatalogPayload 失败：${v.message}`)
-      const catalog = normalizeCatalog(tier.payload, { source: tier.payload.url })
-      const cats = categoryCounts(catalog.plugins, catalog.categoryLabels)
-      const filtered = filterPlugins(catalog.plugins, { query: 'dsh', category: cats[0]?.id ?? 'other' })
-      const sorted = sortPlugins(filtered, 'top')
-      return paginate(sorted, 1, 24)
-    },
     'joinInstalled(附加)': () => joinInstalled(tier.plugins, tier.bundles)
   }
 
@@ -311,6 +384,37 @@ for (const tier of tiers) {
     const resolvable = measured.median >= RESOLUTION_MIN_MS
     if (!resolvable) insufficientCells.push({ tier: tier.name, op: label, median: measured.median })
     opResults[label] = { ...measured, resolvable }
+  }
+
+  // 链路变体 + 必经组件（normalizeCatalog）在同一次交错 pass 里取材
+  const mandatory = 'normalizeCatalog'
+  const chainFns = Object.fromEntries(CHAIN_VARIANTS.map((variant) => [variant.label, () => variant.run(tier, topCategory)]))
+  const triples = [[mandatory, ops[mandatory]], ...Object.entries(chainFns)]
+  const measured = benchInterleaved(triples, iterations)
+  const component = measured.find(([label]) => label === mandatory)[1]
+  for (const [label, m] of measured) {
+    const resolvable = m.median >= RESOLUTION_MIN_MS
+    opResults[label] = { ...m, resolvable, measurement: 'interleaved-with-' + mandatory }
+    if (!resolvable) insufficientCells.push({ tier: tier.name, op: label, median: m.median })
+  }
+  // 一致性：链路 ≥ 其必经组件（同口径下才成立；倒挂 ⇒ 该格不可信）
+  for (const variant of CHAIN_VARIANTS) {
+    const m = opResults[variant.label]
+    if (m.error !== undefined) continue
+    const ratio = component.median === 0 ? null : m.median / component.median
+    const consistent = isChainConsistent(m.median, component.median)
+    if (!consistent) {
+      unreliableCells.push({
+        tier: tier.name,
+        op: variant.label,
+        median: m.median,
+        componentMedian: component.median,
+        ratio,
+        reason: `链路 median ${m.median.toFixed(4)}ms < 必经组件 ${mandatory} ${component.median.toFixed(4)}ms（超集快于子集）⇒ 该格在本次运行的噪声下不可信`
+      })
+      m.unreliable = true
+    }
+    chainConsistency.push({ tier: tier.name, op: variant.label, componentMedian: component.median, chainMedian: m.median, ratio, consistent })
   }
 
   const shape = shapeOf(tier.plugins)
@@ -334,8 +438,14 @@ for (const tier of tiers) {
   } else {
     const heapUsedAtTierBytes = heapAfterGc()
     const perOp = {}
-    for (const label of ['normalizeCatalog', 'filterPlugins:query(dsh)', 'sortPlugins:top', 'refresh-chain(validate→normalize→counts→filter→sort→paginate)', 'joinInstalled(附加)']) {
-      const fn = ops[label]
+    const memoryTargets = [
+      ['normalizeCatalog', ops.normalizeCatalog],
+      ['filterPlugins:query(dsh)', ops['filterPlugins:query(dsh)']],
+      ['sortPlugins:top', ops['sortPlugins:top']],
+      ...Object.entries(chainFns),
+      ['joinInstalled(附加)', ops['joinInstalled(附加)']]
+    ]
+    for (const [label, fn] of memoryTargets) {
       heapAfterGc()
       const base = process.memoryUsage().heapUsed
       let held = fn()
@@ -358,10 +468,19 @@ for (const tier of tiers) {
   console.log(`\n[${tier.name}] ${tier.plugins.length} 条 · 每操作 ${iterations} 次`)
   console.log('  操作                                          min      median   P95      max')
   for (const [label, m] of Object.entries(opResults)) {
-    if (m.error) { console.log(`  ${label.padEnd(44)} ERROR ${m.error}`); continue }
-    console.log(`  ${label.padEnd(44)} ${m.min.toFixed(3).padStart(8)} ${m.median.toFixed(3).padStart(8)} ${m.p95.toFixed(3).padStart(8)} ${m.max.toFixed(3).padStart(8)}${m.resolvable ? '' : '  ⚠分辨力不足'}`)
+    if (m.error) { console.log(`  ${label.padEnd(52)} ERROR ${m.error}`); continue }
+    const flags = `${m.resolvable ? '' : '  ⚠分辨力不足'}${m.unreliable === true ? '  ⚠不可信(链路<组件)' : ''}`
+    console.log(`  ${label.padEnd(52)} ${m.min.toFixed(3).padStart(8)} ${m.median.toFixed(3).padStart(8)} ${m.p95.toFixed(3).padStart(8)} ${m.max.toFixed(3).padStart(8)}${flags}`)
   }
 }
+
+// ── 链路一致性汇总（TASK-PERF-02 新增）──────────────────────────────────
+console.log('\n[链路一致性] 交错口径下「链路 median ≥ 必经组件 normalizeCatalog median」')
+for (const row of chainConsistency) {
+  console.log(`  ${row.tier.padEnd(20)} ${row.op.padEnd(46)} 组件 ${row.componentMedian.toFixed(3)}ms  链路 ${row.chainMedian.toFixed(3)}ms  比值 ${row.ratio === null ? 'n/a' : row.ratio.toFixed(2)}×  ${row.consistent ? '✓' : '✗ 不可信'}`)
+}
+const inconsistent = chainConsistency.filter((row) => !row.consistent)
+console.log(`  合计 ${chainConsistency.length} 组，倒挂 ${inconsistent.length} 组${inconsistent.length === 0 ? '（无倒挂）' : ' —— 这些格子已标 unreliable，不进可信结论'}${coldFirstCall ? `\n[冷启动] 进程内首次调用（折叠缓存冷，n=1，不可当分布）：${coldFirstCall.tier} / query only / category=all = ${coldFirstCall.ms.toFixed(2)}ms` : ''}`)
 
 // ── 随规模单调性（分辨力的一部分；只对合成阶梯，真实档规模不同不参与）────
 const syntheticSeries = results
@@ -378,8 +497,28 @@ console.log(`[分辨力] 真实档单点：${realSeries.map((e) => `${e.count}=$
 const realShape = results.find((entry) => entry.tier === 'real-snapshot-4412')?.shape ?? null
 const syntheticShape = results.find((entry) => entry.tier === 'synthetic-5000')?.shape ?? null
 
+// ── 检测器自检：证明「链路<组件」这条规则真的会触发（否则就是死代码/假绿灯）──
+// 用一个**故意倒挂**的伪造对（慢「组件」+ 快「链路」）走一遍真正的判定逻辑。
+// 不测性能，只验证判定分支；开销微秒级，每次都跑。
+const detectorSelfTest = (() => {
+  // 直接调用**真判定函数** isChainConsistent（不复制谓词），否则自检只能证明副本正确。
+  const fakeInverted = isChainConsistent(0.1, 0.5) // 链路 0.1 < 组件 0.5 ⇒ 必须判不通过
+  const fakeOk = isChainConsistent(0.5, 0.1) // 链路 0.5 ≥ 组件 0.1 ⇒ 必须判通过
+  const fakeEqual = isChainConsistent(0.25, 0.25) // 相等 ⇒ 通过（≥ 语义）
+  return {
+    checked: true,
+    invertsDetected: fakeInverted === false,
+    consistentAccepted: fakeOk === true,
+    equalityAccepted: fakeEqual === true,
+    pass: fakeInverted === false && fakeOk === true && fakeEqual === true
+  }
+})()
+if (!detectorSelfTest.pass) {
+  failures.push({ tier: '(self-test)', op: 'chain-consistency-detector', message: '一致性检测器自检失败：倒挂样本未被判为不通过' })
+}
+
 const report = {
-  schema: 'dsh-plugin-market/perf-baseline@1',
+  schema: 'dsh-plugin-market/perf-baseline@2',
   generatedAt: new Date().toISOString(),
   node: process.version,
   command: gcAvailable ? 'node --expose-gc verify/perf-baseline.mjs' : 'node verify/perf-baseline.mjs',
@@ -390,6 +529,9 @@ const report = {
     warmup: WARMUP,
     iterations: ITERATIONS,
     resolutionFloorMs: RESOLUTION_MIN_MS,
+    // TASK-PERF-02：链路与其必经组件必须交错取材，否则两者的中位数不可比
+    chainMeasurement: '链路变体与其必经组件 normalizeCatalog 在**同一次交错 pass** 内轮流取样（benchInterleaved），共享 JIT/GC/折叠缓存状态；label 带 measurement:"interleaved-with-normalizeCatalog" 标记',
+    chainConsistencyRule: '链路 median ≥ 必经组件 median。仅交错口径下成立；倒挂的格子标 unreliable 并列入 unreliableCells，不进可信结论，也**不**算失败退出',
     memory: gcAvailable ? '逐操作：gc → 基线 heapUsed → 单次调用持有结果时取峰值 → 丢弃结果再 gc 取 retained（单次采样）' : '未测（需 --expose-gc）'
   },
   limits: [
@@ -411,6 +553,15 @@ const report = {
     realSnapshotSeries: realSeries,
     normalizeStrictlyIncreasing: monotonic
   },
+  chainConsistency: {
+    rule: '交错口径下：链路 median ≥ 必经组件 normalizeCatalog median',
+    whyInterleaved: '两者若各跑独立 bench()，则不共享 JIT/GC/折叠缓存状态，0.1ms 量级下中位数可差 ±40%，大小关系近乎掷硬币——此时套用「链路 ≥ 组件」是不成立的约束。交错取样后同一台机器实测比值稳定（synthetic-100 八轮 2.30–2.40，0/8 倒挂）。',
+    pairs: chainConsistency,
+    invertedCount: inconsistent.length,
+    detectorSelfTest,
+    unreliableCells
+  },
+  coldStart: coldFirstCall,
   tiers: results,
   memory,
   divergence: {
@@ -428,7 +579,8 @@ const report = {
   untested: [
     ...(gcAvailable ? [] : ['内存测量：未测（需 --expose-gc）']),
     ...(realTierMissing === null ? [] : [`真实快照档位未测：读/解析 ${REAL_SNAPSHOT} 失败（${realTierMissing}）`]),
-    ...insufficientCells.map((cell) => `分辨力不足（median ${cell.median.toFixed(4)}ms < ${RESOLUTION_MIN_MS}ms）：${cell.tier} / ${cell.op}`)
+    ...insufficientCells.map((cell) => `分辨力不足（median ${cell.median.toFixed(4)}ms < ${RESOLUTION_MIN_MS}ms）：${cell.tier} / ${cell.op}`),
+    ...unreliableCells.map((cell) => `本轮不可信（链路 < 必经组件，本次噪声下不可比）：${cell.tier} / ${cell.op} —— ${cell.reason}`)
   ]
 }
 
@@ -436,9 +588,16 @@ console.log('\n=== 汇总统一报告 ===')
 if (!gcAvailable) console.log('内存：未测（需 --expose-gc）——不在本机做任何推算。')
 for (const entry of memory) {
   if (entry.status !== 'measured') continue
-  const chain = entry.ops['refresh-chain(validate→normalize→counts→filter→sort→paginate)']
   const search = entry.ops['filterPlugins:query(dsh)']
-  console.log(`  ${entry.tier}: 该档常驻 heapUsed ${(entry.heapUsedWithTierBytes / 1048576).toFixed(2)} MiB · 单次最大峰值增量 ${(entry.maxPeakDeltaBytes / 1048576).toFixed(2)} MiB（query）· 刷新链路峰值 ${(chain.peakDeltaBytes / 1048576).toFixed(2)} MiB / retained ${(chain.retainedBytes / 1048576).toFixed(2)} MiB · query retained ${(search.retainedBytes / 1024).toFixed(0)} KiB`)
+  const chainKeys = Object.keys(entry.ops).filter((k) => k.startsWith('refresh-chain:'))
+  const chainText = chainKeys
+    .map((k) => `${k.replace('refresh-chain:', '')} ${(entry.ops[k].peakDeltaBytes / 1048576).toFixed(2)}/${(entry.ops[k].retainedBytes / 1048576).toFixed(2)} MiB`)
+    .join(' · ')
+  console.log(`  ${entry.tier}: 该档常驻 heapUsed ${(entry.heapUsedWithTierBytes / 1048576).toFixed(2)} MiB · 单次最大峰值增量 ${(entry.maxPeakDeltaBytes / 1048576).toFixed(2)} MiB（query）· 链路峰值/retained [${chainText}] · query retained ${(search.retainedBytes / 1024).toFixed(0)} KiB`)
+}
+if (unreliableCells.length > 0) {
+  console.log('本轮不可信（已排除在可信结论之外，非失败）：')
+  for (const cell of unreliableCells) console.log(`  ⚠ ${cell.tier} / ${cell.op}: ${cell.reason}`)
 }
 if (failures.length > 0) {
   console.log('失败：')

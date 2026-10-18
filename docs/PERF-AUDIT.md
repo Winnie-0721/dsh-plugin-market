@@ -1,7 +1,8 @@
 # TASK-PERF-01：dsh-plugin-market 性能与包体基线审计
 
-> **第一轮定位**：只交审计报告 + 可重复基准脚本。**未改任何运行逻辑、未删文件、未加依赖、未动 API 契约、未升版本、未发布、未推送。**
-> 数据分两类，全文严格区分：**【实测】**= 本轮真跑出来的数字（附命令）；**【推测】**= 由实测外推或尚未测量的估计。
+> **状态**：§1–§10 = TASK-PERF-01 的第一轮审计（只读，未改任何运行逻辑）。**§11 = TASK-PERF-02**：修基准可信度缺陷（交错测量 + 一致性判据）并**实施**了唯一的低风险包体优化（npm 包移除 `CHANGELOG.md`）。
+> 数据分两类，全文严格区分：**【实测】**= 真跑出来的数字（附命令）；**【推测】**= 由实测外推或尚未测量的估计。
+> **未改运行逻辑、未删仓库文件、未加依赖、未动 API 契约、未升版本、未打 tag、未发布、未推送。**
 
 ---
 
@@ -9,10 +10,11 @@
 
 | 项 | 实测值 | 判读 |
 |---|---|---|
-| npm 发布包（压缩后 tgz） | **303,588 字节**（0.29 MiB） | 真正交付给用户的体积 |
-| npm 发布包（解压后） | **861,935 字节**（0.822 MiB），18 个文件 | 宿主安装目录占用 |
-| **CHANGELOG.md 移除后实测省** | tgz **303,588 → 227,751 = −75,837 字节（−25.0%）** | 在临时副本上真实复打得出，非估算 |
-| 仓库（tracked） | 102 文件，2,899,523 字节（2.765 MiB） | 与发布包差 3.4×（含 docs 截图与 verify） |
+| npm 发布包（压缩后 tgz） | **227,751 字节**（0.217 MiB）★已优化 | 真正交付给用户的体积（原 303,588） |
+| npm 发布包（解压后） | **691,578 字节**（0.66 MiB），**17** 个文件 ★已优化 | 宿主安装目录占用（原 861,935 / 18） |
+| **CHANGELOG.md 移除后实测省** | **−75,837 字节（−25.0%）** | §11.3 真实打包验证，非估算 |
+| 基准可信度缺陷 | **已修复**：交错测量 + `unreliable` 状态 | §11.1，15/15 组一致、0 倒挂 |
+| 仓库（tracked） | 102 文件，2,899,523 字节（2.765 MiB）〔`a314349` 前口径；现 106 / 3,022,004，见 §2.2〕 | 与发布包差 3.4×（含 docs 截图与 verify） |
 | 真实目录规模 | 4,412 条插件 / 23 分类 / 5,298,280 字节 JSON | 上游快照 `_ref/data/plugins.json` |
 | 宿主每请求 `/catalog`（热缓存） | median **7.90ms** / P95 8.33ms | 同步跑在宿主事件循环上 |
 | 用户默认搜索路径（`category=all` + query） | median **15.89ms** / P95 17.51ms | **最该关心的那条** |
@@ -120,6 +122,7 @@ git -C <root> ls-files -z  +  statSync 每个路径
 ```
 
 - tracked 文件：**102**，全部在磁盘上存在（tracked-but-absent = 0）
+  > **口径更新（TASK-PERF-02）**：102 / 2,899,523 是 `a314349` **入库前**（工作区当时还差 4 个审计文件）的口径；`a314349` 把 4 个审计文件入库后，现 `node verify/pack-inventory.mjs` 报 **106 tracked / 3,022,004 B（worktree 口径）**。另注意该值随口径浮动（`.gitattributes` 对 `*.ps1` 做 LF→CRLF 归一，blob 口径与工作区口径对同一文件字节数不同，±20B 级）——引用时必须写明口径。
 - 总字节：**2,899,523**（2.765 MiB）
 - 最大 10 个：
 
@@ -244,6 +247,8 @@ pageInfo = paginate(sorted, page, pageSize)
 | 冷刷新 + `JSON.parse` | **72.56ms** | 缓存整轮重建（每 10 分钟一次） |
 | 宿主 `/catalog` 无 query（Lead，跨进程度） | 7.90ms | 浏览 / 翻页 / 排序 |
 
+> ⚠️ **TASK-PERF-02 口径更正**：上表各值是**独立 pass** 测出来的（每个操作各自 warmup + 连续取样）。这种口径适合比较**量级**，但**不适合**把「链路」与「它的组件」直接比大小——两者不共享 JIT/GC/缓存状态。TASK-PERF-02 已改为**交错取样**并重测（见 §11），新口径下 real-4412 的三个链路变体为 **9.61 / 19.96 / 11.13ms**（组件 7.51ms）。**上表的 6.99/15.89/24.72 等具体数字仍可作为量级参考，但不要与分项之和做大小比对。**
+
 > **「分项之和不等于整链」已查清为口径混用，不是算术错误**：按链**自身**的输入形状分项（normalize 2.73 + counts 0.09 + filter(q+cat) 1.27 + sort(734) 0.32 ≈ 4.5ms）**≤ 整链 4.92ms**，自洽。Lead 早先的 14ms 是把组件测在**全量 4,412 / 冷 raw** 上，与链的输入不同。
 
 **用户实际体验的是哪个？** 打开发现页时 `category = "all"`（不传 category），此时走的是**贵的 `query`-only 路径**。所以：
@@ -268,7 +273,8 @@ pageInfo = paginate(sorted, page, pageSize)
 
 > **D1 更正（由独立验收发现）**：本表早先误把 `synthetic-100/categoryCounts` 列入不足——实测 **0.0143ms 且 `resolvable=true`**，**不该列入**；同时漏列了 `synthetic-100` 的 `sortPlugins:top`(0.0070) 与 `joinInstalled`(0.0069)。此处已按脚本 JSON 对齐。
 
-> **D3 已知脚本缺陷（如实记录，本轮不复现为假绿）**：`synthetic-100` 的 `refresh-chain` median **0.0755ms 反而小于**其必经组件 `normalizeCatalog` **0.0995ms**——**超集快于子集在算术上不可能**。`RESOLUTION_MIN_MS = 0.01` 太松，没把它标成分辨力不足，于是这个自相矛盾的数字以「可信」状态写进了 JSON。**该格的 chain 数字不可用。** 修法是给 chain 增一条一致性断言（chain ≥ 其最贵组件），或把阈值提到 ~0.02ms。**本轮只记录、不改脚本**——改了会让我这份报告的数字与已验收的脚本产物脱钩；留作后续独立修复。
+> **D3 已在 TASK-PERF-02 修复（详见 §11）**：`synthetic-100` 的 `refresh-chain` 曾量出 **0.0755ms < 必经组件 normalizeCatalog 0.0995ms**——超集快于子集。**根因不是算术错误，是测量设计**：两者原本各跑一次独立的 `bench()`，不共享 JIT/GC/折叠缓存状态，在 0.1ms 量级下中位数可差 ±40%，大小关系近乎掷硬币。**旧报告的 chain 数字（含 §3.3 的 6.99 / 15.89ms）属「独立 pass、热复用」口径，仍可用于量级比较，但不应再与组件分项做大小比对。**
+> 修法：链路与其必经组件改为**同一次交错 pass**轮流取样（`benchInterleaved`），并新增 `isChainConsistent` 一致性判据 + `unreliable` 状态。修复后 **15/15 组一致、0 倒挂**，`chain/component` 比值稳定在 **1.18–3.77×**。**未调 `RESOLUTION_MIN_MS` 阈值来掩盖任何数据。**
 
 ---
 
@@ -386,7 +392,9 @@ pageInfo = paginate(sorted, page, pageSize)
 
 > 判据：必须有本轮实测数字支撑；维护成本低的优先。
 
-### ① 从 npm 发布包中移除 `CHANGELOG.md` —— 省 **75,837 字节（25.0%）**【实测，非估算】
+### ① 从 npm 发布包中移除 `CHANGELOG.md` —— 省 **75,837 字节（25.0%）** ✅ **TASK-PERF-02 已实施**
+
+> **状态**：**已实施并实测**（TASK-PERF-02 §11）。`plugin-market/package.json` 的 `files` 已去掉 `"CHANGELOG.md"`；真实 `npm pack` 得 **tgz 227,751 / unpacked 691,578 / 17 条**，与本节预测**完全一致**。仓库内 `CHANGELOG.md` **原样保留、未修改**（发布说明与版本号声明由 `scripts/release.ps1` 从**仓库**读取，不走 npm 包，故不受影响）。
 
 - **证据**【实测】：`CHANGELOG.md` = 170,337 raw / **77,179 gzip**，占 tgz 的 **25.4%**；`package.json` 的 `files` 白名单显式包含它；运行时零引用。
 - **已实测的差额**（在 `%TEMP%` 的副本上真实复打，仓库零改动）：
@@ -501,3 +509,156 @@ pageInfo = paginate(sorted, page, pageSize)
 5. **冷启动首搜**：搜索路径有模块级记忆化，重复迭代命中缓存 → 本基准测的是**热缓存重复请求**，冷启动首次会更慢。
 6. **`npm pack` 的 gzip 压缩级别**：npm 用自身默认（非 `-9`）；本报告的分文件 gzip 用 level 6 作**占比**参考。
 7. 多标签页 / 多 profile 并发下的表现。
+
+---
+
+## 11. TASK-PERF-02：基准缺陷修复 + 包体优化实施
+
+> 本节的数字**全部为实测**。**本任务实际改动 5 个文件**：`verify/perf-baseline.mjs`、`verify/pack-inventory.mjs`、`plugin-market/package.json`、`docs/PERF-AUDIT.md`、`verify/PERF-VERIFY.md`（+ 新增 `verify/PERF02-VERIFY.md`）。
+> ⚠️ **范围澄清**：`git status` 里另有 `.gitignore | 10 +++` 与三个未跟踪的 `docs/SESSION-CLEANER-CLONE-*.md`——那是**前序任务遗留**（复刻手册证据源，mtime 2026-10-13），**不属于本次改动**，本轮未触碰。
+> **未改任何运行逻辑**（`plugin-market/lib/**` 与 `cordis.patch.yml` 零改动，`git diff --name-only` 为空）、**未升版本**（仍 1.3.1）、**未打 tag、未发布、未推送**。
+
+### 11.1 阶段 A：基准可信度缺陷的根因与修复
+
+#### 根因（实测判定，不是猜测）
+
+D3 现象：`synthetic-100` 的 `refresh-chain` median **0.0755ms** < 其必经组件 `normalizeCatalog` **0.0995ms**。
+
+**根因是测量设计，不是算术错误**：两个操作各自跑一次独立的 `bench()`，各自 warmup、各自连续取样 ⇒ **不共享 JIT 优化状态、不共享 GC 节奏、不共享折叠缓存**。在 0.1ms 量级上两次独立 pass 的中位数可差 ±40%，谁大谁小近乎掷硬币。
+
+复现实验（`synthetic-100`，直接用真实实现）：
+
+| 测法 | refresh-chain median | normalizeCatalog median | 倒挂？ | chain/组件 |
+|---|---|---|---|---|
+| 独立 pass（旧口径，normalize 先） | 0.0681 | 0.0255 | 否 | 2.67 |
+| 独立 pass（旧口径，chain 先） | 0.0648 | 0.0224 | 否 | 2.89 |
+| **交错 pass（新口径）** | 0.0576 | 0.0226 | 否 | **2.55** |
+| 交错 pass ×8 轮 | — | — | **0/8** | 2.300–2.399 |
+
+交错后比值**稳定在 2.30–2.40、8 轮 0 次倒挂**；独立 pass 下同一份代码出现过 0.099 vs 0.100 的持平与倒挂。**结论：只有交错口径下「链路 ≥ 其必经组件」才是一条成立的断言**；在独立 pass 下套这条断言就是任务书禁止的「机械套用不成立的约束」。
+
+#### 修复内容
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 新增 `benchInterleaved(pairs, n)` | 链路变体与其必经组件在**同一次 pass 内轮流取样**，共享 JIT/GC/缓存状态 |
+| 2 | 新增 `isChainConsistent(chainMedian, componentMedian)` | 一致性判据的**唯一实现**，真判定与自检共用（避免自检只测副本） |
+| 3 | 新增 `unreliableCells` + `unreliable` 标记 | 倒挂的格子标 `unreliable`，写入 JSON 的 `chainConsistency.unreliableCells` 与 `untested`，**不进可信结论** |
+| 4 | 倒挂**不算失败退出** | `process.exitCode` 仍为 0；否则正常测量噪声会频繁产生假红（A3 明确要求） |
+| 5 | **口径重命名**（原 D2） | 一个 `refresh-chain` 拆成三个自解释 label：`refresh-chain:query+category (warm)` / `refresh-chain:query only / category=all (warm)` / `refresh-chain:no query / browse (warm)` |
+| 6 | 新增 `coldStart` | 进程内**首次**调用（折叠缓存冷）单独 n=1 记录，并注明「不可当分布、不与热态中位数直接比较」 |
+| 7 | 新增 `detectorSelfTest` | 用**故意倒挂的伪造对**走真判定函数，证明守护逻辑会触发（见 11.2） |
+| 8 | schema `@1` → `@2` | 报告结构有破坏性变化（opp label 改名、新增字段），版本号必须跟进 |
+| 9 | `pack-inventory.mjs` 硬编码 | `Same 18 entries` → `Same ${d.fileCount} entries`（否则移除 CHANGELOG 后该句变成假话） |
+
+**未做的事**（任务书禁止）：**没有**调整 `RESOLUTION_MIN_MS` 阈值来让矛盾数据「变绿」；**没有**删除失败样本或忽略离群值；**没有**降低验收标准。`RESOLUTION_MIN_MS` 保持 **0.01ms** 原值不变。
+
+#### 修复后结果（实测）
+
+> ⚠️ **单次运行样本**：下表 median 来自一次 `--expose-gc` 运行。同机复跑漂移大（独立复核者 4 次复跑：real-4412 组件 median 2.91–4.79ms，本表 7.51ms 偏高 1.6–2.6×；synthetic-100 组件 0.049–0.080ms，本表 0.135ms）。**绝对值只可作量级参考；稳健的是方向性结论**：4 次复跑 ×15 组比值全部 >1（1.14–8.00×）、倒挂 0——这才是本修复的验收点。
+
+```
+node --expose-gc verify/perf-baseline.mjs   → exit 0
+node verify/perf-baseline.mjs               → exit 0（内存如实标「未测（需 --expose-gc）」）
+```
+
+| 档位 | 链路变体 | 组件 normalizeCatalog | 链路 median | 比值 | 一致？ |
+|---|---|---|---|---|---|
+| synthetic-100 | query+category | 0.1347 | 0.1738 | 1.29× | ✓ |
+| synthetic-100 | query only (all) | 0.1347 | 0.3065 | 2.28× | ✓ |
+| synthetic-100 | no query / browse | 0.1347 | 0.1822 | 1.35× | ✓ |
+| synthetic-1000 | query+category | 0.8567 | 0.9820 | 1.15× | ✓ |
+| synthetic-1000 | query only (all) | 0.8567 | 2.4053 | 2.81× | ✓ |
+| synthetic-1000 | no query / browse | 0.8567 | 1.1257 | 1.31× | ✓ |
+| synthetic-5000 | query+category | 3.0518 | 3.9399 | 1.29× | ✓ |
+| synthetic-5000 | query only (all) | 3.0518 | 12.168 | 3.99× | ✓ |
+| synthetic-5000 | no query / browse | 3.0518 | 4.5637 | 1.50× | ✓ |
+| synthetic-20000 | query+category | 12.0275 | 16.944 | 1.41× | ✓ |
+| synthetic-20000 | query only (all) | 12.0275 | 88.076 | 7.32× | ✓ |
+| synthetic-20000 | no query / browse | 12.0275 | 24.914 | 2.07× | ✓ |
+| **real-4412** | query+category | **7.5064** | **9.6073** | 1.28× | ✓ |
+| **real-4412** | query only (all) | **7.5064** | **19.957** | 2.66× | ✓ |
+| **real-4412** | no query / browse | **7.5064** | **11.130** | 1.48× | ✓ |
+
+**合计 15 组，倒挂 0 组。** `invertedCount = 0`，`unreliableCells = []`，`normalizeStrictlyIncreasing = true`。
+
+> **口径澄清（重要，防止误引）**：新口径下 real-4412 的 `query only / category=all` 是 **19.96ms**，旧报告 §3.3 记的是 15.89ms。两者**不矛盾**——旧值来自独立 pass，新值来自交错 pass（与组件共享 GC 节奏，本就更保守）。**新值更可信**，因为它的比较对象（组件 7.51ms）是同一口径取的。
+
+### 11.2 可信度守护不是死代码（反例检验，实测）
+
+要求 A3：「原有的小规模异常场景能够被识别，不再作为可信数据输出」。**光有 0 倒挂不能证明守护会触发**——那可能只是数据恰好没触发。做了两件事：
+
+1. **`detectorSelfTest`**（每次运行都跑）：直接调用真判定函数 `isChainConsistent`，喂入 `(0.1, 0.5)` 必须判不通过、`(0.5, 0.1)` 必须通过、`(0.25, 0.25)` 必须通过（`≥` 语义）。实测 `{"checked":true,"invertsDetected":true,"consistentAccepted":true,"equalityAccepted":true,"pass":true}`。**自检调用的是真函数、不是谓词副本**（否则只能证明副本正确）。
+2. **端到端反例**：把脚本副本放进 `%TEMP%`，把某条链路改成 `return 1`（故意比组件快），确认该组 `consistent:false`、`unreliableCells` 非空、**且退出码仍为 0**。详见 `verify/PERF02-VERIFY.md`。
+
+### 11.3 阶段 B：包体优化（实测前后对照）
+
+#### 前置核查（B1）——确认移除不破坏既有使用方式
+
+| 检查项 | 结果 |
+|---|---|
+| 运行时是否 import `CHANGELOG.md` | **否**（`main` = `lib/index.js`；`exports` 只暴露 `./lib/index.js`、`./lib/client.js`、`./package.json`） |
+| `scripts/release.ps1` 从哪读 CHANGELOG | **仓库**：`Join-Path $pkgDir 'CHANGELOG.md'`（L198 版本声明、L574 Release notes）。**不读 npm 包** ⇒ 不受影响 |
+| 测试是否断言「npm 包必须含 CHANGELOG」 | **否**（全仓仅 `verify/ps-encoding.test.mjs` 出现该字符串，且是 PowerShell 编码夹具的字面量，与打包无关） |
+| 浏览器 E2E / `ui-check.ps1` 是否依赖 | **否** |
+| `verify/pack-inventory.mjs` 是否硬编码 18 | 原为 `Same 18 entries` 文案，**已改为动态** `${d.fileCount}` |
+| 「改动是否有既有测试兜底」 | 有：`release-workflow.test.mjs`（发布流程）、门禁 38/38 |
+
+#### 实施与实测结果（B3）
+
+**改动**：`plugin-market/package.json` 的 `files` 白名单去掉一行 `"CHANGELOG.md"`。**仅此一处**。
+
+| 指标 | 优化前 | 优化后 | 差额 |
+|---|---|---|---|
+| 压缩包 tgz | **303,588** 字节 | **227,751** 字节 | **−75,837（−25.0%）** |
+| 解压后 unpackedSize | **861,935** 字节 | **691,578** 字节 | **−170,357（−19.8%）** |
+| 文件条目数 | 18 | **17** | −1 |
+| 压缩比 | 2.839× | 3.037× | — |
+| npm 自报 size vs 磁盘 tgz | delta 0 | delta 0 | — |
+
+**与 TASK-PERF-01 预测一致**：预测 227,751，实测 **227,751**（精确命中，非巧合——同一份 `files` 与同一台 npm）。
+
+清单差异（17 条，CHANGELOG.md 已移除，其余全部保留）：
+
+```
+LICENSE  cordis.patch.yml  package.json  README.md  README.zh.md
+lib/catalog-npm.js  lib/catalog.js  lib/client.js  lib/github-routes.js
+lib/hot-mount.js  lib/http-body.js  lib/http.js  lib/index.js
+lib/restart-helper.cjs  lib/restart-policy.js  lib/restart.js  lib/self-update.js
+```
+
+**关键文件仍在**：`README.md`、`README.zh.md`、`LICENSE`、`package.json`、`cordis.patch.yml`、`lib/index.js`（`main`）、`lib/client.js`（`exports["./client"]`）——**逐条确认在 17 条清单内**。
+
+**仓库内 `CHANGELOG.md` 完整保留**：未被删除、未被修改（`git status` 无该文件改动；内容 sha256 与 `a314349` 时相同）。历史记录无损。
+
+> **不受影响的证据**：`release.ps1 -Bump auto` 的版本声明与 Release notes 都从 `plugin-market/CHANGELOG.md`（仓库路径）读取，与 npm 包内容无关。本次未升版本，故该路径未被触发，但代码路径已核实。
+
+### 11.4 阶段 C：回归与安全检查（真实退出码）
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `node verify/pack-inventory.mjs` | **0** | 17 条 / 691,578 / 227,751 |
+| `node --expose-gc verify/perf-baseline.mjs` | **0** | 15/15 组一致，0 倒挂 |
+| `node verify/perf-baseline.mjs`（无 gc） | **0** | 内存如实标「未测（需 --expose-gc）」 |
+| `node --check verify/perf-baseline.mjs` | **0** | — |
+| `node --check verify/pack-inventory.mjs` | **0** | — |
+| `git diff --check` | **0** | 无空白错误 |
+| `pwsh -NoProfile -File scripts/release.ps1 -LocalOnly` | **0** | 回归测试通过 **38/38**（墙钟 3200ms；Lead 与独立复核者各跑一遍，均 38/38） |
+| `pwsh -NoProfile -File verify/ui-check.ps1` | **0** | **真实浏览器验收 129/129 通过**、18 个检查组全绿（独立复核者执行；用的 scratch 宿主在仓库内 `_verify/dshhome`，未触碰用户 Profile，跑完 `git status` 无新增）。注：复核会话本身在发送总结阶段中断，但报告 `verify/PERF02-VERIFY.md` 已完整落盘（27,380 字节），上表数字取自该报告 |
+
+**API 契约测试**：含在门禁 38 套内，全绿。**安装 / 更新 / 卸载 / 重启流程**：`plugin-market/lib/**` 零改动，故行为逐字节不变。
+
+### 11.5 风险与后续建议
+
+| 项 | 评估 |
+|---|---|
+| npm 页面少了 CHANGELOG 链接 | **已知取舍**。用户仍可通过 GitHub 仓库 / Release notes 查看完整变更记录；`homepage` 与 `repository` 字段都指向 GitHub |
+| 阈值 `RESOLUTION_MIN_MS = 0.01` 未动 | **刻意保留**。D3 的矛盾量与阈值无关（0.0755 > 0.01），改阈值只会掩盖问题；真修法是交错口径 + 一致性判据 |
+| 一致性判据只在交错口径下有效 | **已在脚本注释与 §11.1 写明**，防止后人把它套到独立 pass 的组件上 |
+| 冷启动仍只测 n=1 | 进程内真正「冷」只有第一次，无法重复采样；**如实标注为单次观测**，不当分布 |
+| 未实施「`joinInstalled` 记忆化」 | 任务书明确禁止（§7「不缓存 `joinInstalled`」）。该建议仍在 §6②，待人工决定 |
+
+**下一步建议**（不超出本任务范围，供人工决定）：
+1. 本轮改动提交后，下一次发版时留意 `release.ps1 -Bump auto` 与 Release notes 仍正常（预期正常：读的是仓库文件）。
+2. `§6② joinInstalled 记忆化` 若要做，需独立任务 + 独立测试（键须含 bundles 变更）。
+3. `§6③` 的链路口径已在本轮完成；冷刷新如需**分布**而非单次观测，须另起进程逐次采样。

@@ -228,42 +228,68 @@ check('截图加载失败要降级成链接（图床在国内常连不上，不�
   assert.match(thumb, /rel:\s*"noreferrer"/, '带 noreferrer，不泄露来源')
 })
 
-console.log('\n[4] 详情是跨整行的独立卡片（用户反馈「展开太丑」）')
+console.log('\n[4] 详情是弹出对话框（用户要求，参照会话清理的确认框）')
 
 check('详情不再内嵌在卡片里渲染', () => {
-  // 错过的样子：详情作为 <article class="dshpm-card"> 的子节点渲染，于是被塞进
-  // 232px 的网格窄列——截图一排挤到换行、风险提示英文长句成一坨、整行被撑到几百像素，
-  // 同排其它卡片跟着变高留白。用户原话：「展开太丑了」。
+  // 错过两次，别再退回去：
+  //   ① 内嵌在卡片里 → 被塞进 232px 网格窄列，截图/红线长句挤成一坨（「展开太丑」）
+  //   ② 跨整行独立卡片 → 宽度够了，但它在文档流里，展开会顶动列表、视线要跟着滚
+  //   ③ 现在：居中对话框
   const cardStart = clientSource.indexOf('function PluginCard(props)')
   assert.ok(cardStart > 0)
-  const cardEnd = clientSource.indexOf('function PluginDetailCard(', cardStart)
-  assert.ok(cardEnd > cardStart, 'PluginCard 后面应当跟着 PluginDetailCard')
+  const cardEnd = clientSource.indexOf('function PluginDetailDialog(', cardStart)
+  assert.ok(cardEnd > cardStart, 'PluginCard 后面应当跟着 PluginDetailDialog')
   const cardBody = clientSource.slice(cardStart, cardEnd)
-  assert.doesNotMatch(cardBody, /el\(PluginDetails/, 'PluginCard 里**不许**再渲染 PluginDetails（否则又内嵌了）')
+  assert.doesNotMatch(cardBody, /el\(PluginDetails/, 'PluginCard 里**不许**再渲染 PluginDetails')
 })
 
-check('详情卡存在、且带 data-detail-for + 关闭按钮', () => {
-  assert.match(clientSource, /function PluginDetailCard\(/, '要有独立的详情卡组件')
-  const start = clientSource.indexOf('function PluginDetailCard(')
-  const body = clientSource.slice(start, start + 1200)
-  assert.match(body, /data-detail-for/, '要能定位它是给哪一条的（e2e/排查都靠它）')
-  assert.match(body, /dshpm-detailCardClose/, '右上角要有就地关闭按钮')
-  assert.match(body, /el\(PluginDetails/, '详情卡里渲染 PluginDetails')
+check('对话框组件存在、带 data-detail-for + 关闭键 + 三段结构', () => {
+  assert.match(clientSource, /function PluginDetailDialog\(/, '要有详情对话框组件')
+  const start = clientSource.indexOf('function PluginDetailDialog(')
+  const body = clientSource.slice(start, start + 5200)
+  assert.match(body, /"data-detail-for"/, '要能定位它是给哪一条的（e2e/排查都靠它）')
+  assert.match(body, /IconClose/, '右上角要有 ×')
+  assert.match(body, /dshpm-detailDialogHead/, '要有标题行')
+  assert.match(body, /dshpm-detailDialogBody/, '要有可滚动的内容区')
+  assert.match(body, /dshpm-detailDialogActions/, '要有底部操作行（对话框形态）')
+  assert.match(body, /el\(PluginDetails/, '对话框里渲染 PluginDetails')
+  assert.match(body, /role:\s*"dialog"/, '要有 dialog role')
+  assert.match(body, /"aria-modal":\s*"true"/)
 })
 
-check('详情卡跨整行：grid-column:1/-1', () => {
-  const rule = clientSource.match(/\.dshpm-detailCard\s*\{[^}]*\}/)
-  assert.ok(rule, '要有 .dshpm-detailCard 规则')
-  assert.match(rule[0], /grid-column:\s*1\s*\/\s*-1/, '必须跨满整行（这就是「独立卡片」的机制）')
+check('对话框是浮层，不参与网格布局', () => {
+  // 这是「对话框」与「跨行卡片」的根本区别：不再有 grid-column 那种网格内定位。
+  const rule = clientSource.match(/\.dshpm-modalCard\.dshpm-detailDialog\s*\{[^}]*\}/)
+  assert.ok(rule, '要有 .dshpm-modalCard.dshpm-detailDialog 规则（双类提高特异性）')
+  assert.doesNotMatch(rule[0], /grid-column/, '对话框不参与网格布局')
+  // 反向：旧的跨行卡片规则必须已被删除
+  assert.equal(/\.dshpm-detailCard\s*\{/.test(clientSource), false, '旧的 .dshpm-detailCard 规则应当已删除')
 })
 
-check('网格用 Fragment 把卡片与详情卡成对渲染（详情紧跟被点那张）', () => {
+check('内容区自己滚（min-height:0 是 flex 子项能滚的必要条件）', () => {
+  const rule = clientSource.match(/\.dshpm-detailDialogBody\s*\{[^}]*\}/)
+  assert.ok(rule, '要有 .dshpm-detailDialogBody 规则')
+  assert.match(rule[0], /overflow:auto/, '内容区要能滚')
+  assert.match(rule[0], /min-height:0/, 'flex 子项不给 min-height:0 就滚不起来（会被内容撑开）')
+})
+
+check('对话框渲染在网格**外面**（所以打开/关闭不顶动列表）', () => {
   const gridAt = clientSource.indexOf('className: "dshpm-grid"')
   assert.ok(gridAt > 0)
-  const seg = clientSource.slice(gridAt, gridAt + 1600)
-  assert.match(seg, /el\(React\.Fragment/, '要用 Fragment 成对渲染，详情才会紧跟目标卡')
-  assert.match(seg, /el\(PluginDetailCard/, '展开时渲染详情卡')
-  assert.match(seg, /expanded\s*\n?\s*\?/, '按 expanded 决定是否渲染')
+  const dialogAt = clientSource.indexOf('el(PluginDetailDialog')
+  assert.ok(dialogAt > gridAt, '对话框要出现在网格之后/之外')
+  // 网格的 map 里不该再有 Fragment 包裹「卡片 + 详情」的老写法
+  const gridSeg = clientSource.slice(gridAt, gridAt + 1500)
+  assert.doesNotMatch(gridSeg, /el\(PluginDetailDialog/, '对话框不能在网格的 map 里渲染')
+})
+
+check('打开/关闭时焦点会归还（键盘用户不丢位置）', () => {
+  const start = clientSource.indexOf('function PluginDetailDialog(')
+  const body = clientSource.slice(start, start + 5200)
+  assert.match(body, /document\.activeElement/, '要记录打开前的焦点')
+  assert.match(body, /previous\.focus\(\)/, '关掉后要把焦点还回去')
+  assert.match(body, /Escape/, 'Esc 要能关')
+  assert.match(body, /"Tab"/, '要有 Tab 焦点陷阱')
 })
 
 console.log('')

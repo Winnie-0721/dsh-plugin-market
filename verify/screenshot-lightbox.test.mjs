@@ -101,17 +101,20 @@ check('三条退出路径都在：Esc / 点遮罩 / 关闭按钮', () => {
   assert.match(body, /"data-action":\s*"close"/, '有显式的关闭按钮')
 })
 
-check('浮层挂成兄弟节点，不是详情卡的子节点', () => {
-  const body = grep('function PluginDetailCard(')
-  assert.match(body, /el\(React\.Fragment,\s*null/, '详情卡外层要包 Fragment')
+check('浮层挂在详情对话框之后，是它的兄弟节点', () => {
+  // v1.3.0：详情从「跨行卡片」改成了弹出对话框（PluginDetailDialog），这条断言随之改名字，
+  // 但守的东西没变：全屏浮层必须是**兄弟节点**、且出现在对话框内容之后 ——
+  // 不能塞进任何被几何断言盯着的容器里（与重启弹窗同一套约定）。
+  const body = grep('function PluginDetailDialog(')
+  assert.match(body, /el\(React\.Fragment,\s*null/, '对话框外层要包 Fragment')
   const fragAt = body.indexOf('el(React.Fragment')
   const layerAt = body.indexOf('el(ScreenshotLightbox')
-  assert.ok(layerAt > fragAt, '浮层在 Fragment 里、与 article 并列')
-  // article 必须在浮层之前闭合：即 ScreenshotLightbox 不出现在 article 的 children 里
-  const articleAt = body.indexOf('el("article"')
-  const closeArticle = body.indexOf('el(PluginDetails', articleAt)
-  assert.ok(closeArticle > articleAt && layerAt > closeArticle,
-    '浮层要出现在 article 的内容之后（作为兄弟），不能在 article 内部')
+  assert.ok(layerAt > fragAt, '浮层在 Fragment 里、与对话框并列')
+  // 对话框卡片必须在浮层之前闭合：即 ScreenshotLightbox 不出现在 modalCard 的 children 里
+  const cardAt = body.indexOf('dshpm-detailDialog",')
+  const detailsAt = body.indexOf('el(PluginDetails', cardAt)
+  assert.ok(detailsAt > cardAt && layerAt > detailsAt,
+    '浮层要出现在对话框内容之后（作为兄弟），不能在对话框内部')
 })
 
 console.log('\n[3] 图片显示与可访问性')
@@ -148,6 +151,47 @@ check('文案键齐全（中英各一条，否则僵尸文案检查会红）', (
 check('浮层的图片也带 referrerPolicy=no-referrer（不把当前地址带给图床）', () => {
   const body = grep('function ScreenshotLightbox(')
   assert.match(body, /referrerPolicy:\s*"no-referrer"/)
+})
+
+console.log('\n[4] STYLES 模板里不许出现裸反引号（本轮反复栽的坑）')
+
+check('STYLES 模板内部没有多余的裸反引号', () => {
+  // 真实事故（本轮发生两次）：CSS 在 `var STYLES = \`...\`` 模板字符串里，
+  // 注释里写一个反引号就会**提前结束字符串**，后面的 CSS 被当成 JS 解析。
+  // 更难受的是：有时它恰好是合法语法 —— `node --check` 通过、门禁全绿，
+  // 但浏览器里整个客户端起不来（实测报 "detailDialogBody is not defined"，
+  // 页面显示 "Failed to load plugins"，面板根本不挂载）。
+  // 所以这条检查必须留在门禁里，不能只靠人工记住。
+  const declAt = source.indexOf('var STYLES =')
+  assert.ok(declAt > 0, '要能找到 var STYLES =')
+  const open = source.indexOf('`', declAt)
+  let close = -1
+  for (let i = open + 1; i < source.length; i += 1) {
+    if (source[i] === '\\') { i += 1; continue }
+    if (source[i] === '`') { close = i; break }
+  }
+  assert.ok(close > open, '要能找到 STYLES 的收尾反引号')
+  const body = source.slice(open + 1, close)
+  const stray = []
+  const lines = body.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes('`')) stray.push({ lineNo: i + 1, text: lines[i].trim().slice(0, 100) })
+  }
+  assert.deepEqual(stray, [], '模板内部出现裸反引号会截断字符串（把 ` 换成普通文字）')
+})
+
+check('STYLES 模板之后没有漏出来的 CSS 行', () => {
+  // 截断的另一种表现：CSS 漏到字符串外面，变成 JS 里的裸语句。
+  const declAt = source.indexOf('var STYLES =')
+  const open = source.indexOf('`', declAt)
+  let close = -1
+  for (let i = open + 1; i < source.length; i += 1) {
+    if (source[i] === '\\') { i += 1; continue }
+    if (source[i] === '`') { close = i; break }
+  }
+  const after = source.slice(close + 1)
+  const leaked = after.split('\n').filter((l) => /^\s*\.dshpm-[A-Za-z-]+\s*\{/.test(l))
+  assert.deepEqual(leaked, [], '模板之后出现 CSS 行说明模板被截断了')
 })
 
 console.log('')

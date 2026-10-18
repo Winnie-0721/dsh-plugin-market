@@ -328,6 +328,8 @@ window.__ModuleLoader__.load({
         // 点击缩略图全屏看：缩略图再大也只有 320px，看清一行字还得全屏。
         "detail.screenshotZoom": "点击全屏查看",
         "detail.screenshotOpen": "在浏览器里打开原图",
+        // 详情现在是居中对话框：关闭入口写「关闭详情」比「收起详情」更贴合浮层语义。
+        "action.closeDetails": "关闭详情",
         "detail.tarball": "预构建产物",
         "detail.downloadsRange": "近 30 天（{start} ~ {end}）",
         "detail.links": "链接",
@@ -695,6 +697,7 @@ window.__ModuleLoader__.load({
         "detail.screenshotFailed": "Image failed to load — open original",
         "detail.screenshotZoom": "Click to view full screen",
         "detail.screenshotOpen": "Open original in browser",
+        "action.closeDetails": "Close details",
         "detail.tarball": "Prebuilt tarball",
         "detail.downloadsRange": "Last 30 days ({start} ~ {end})",
         "detail.links": "Links",
@@ -1656,19 +1659,33 @@ function errorCopy(error) {
 .dshpm-cardMeta { display:flex; align-items:center; gap:12px; flex-wrap:wrap; color:var(--dsw-alias-label-secondary,#61666b); font-size:.79em; }
 .dshpm-cardActions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:auto; }
 .dshpm-detail { display:flex; flex-direction:column; gap:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#0000000a); font-size:.86em; }
-/* ── 独立详情卡片（用户反馈「展开太丑」后重做）────────────────────────────
-   以前详情是卡片自己的子节点，被塞进 232px 的网格窄列：截图一排挤到换行、
-   风险提示的英文长句变成一大坨、整行卡片被撑到几百像素高，同排其它卡片跟着变高留白。
-   现在详情是**跨整个网格宽度的一张独立卡片**，紧跟被点那张之后。
-   grid-column:1/-1 是它跨行的唯一机制；放在 grid 里而不是 grid 外面，
-   是为了让它自然落在「被点卡片的下方一行」，不用手算插入位置。 */
-.dshpm-detailCard { grid-column:1/-1; }
-.dshpm-detailCardHead { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.dshpm-detailCardName { margin:0; font-size:1.02em; font-weight:600; overflow-wrap:anywhere; }
-.dshpm-detailCardClose { margin-left:auto; }
-/* 详情卡里内容更宽：两列（键/值）在窄屏下会自动堆叠，宽屏下把键列固定住更好读。 */
-.dshpm-detailCard .dshpm-detail { padding-top:0; border-top:none; font-size:.93em; }
-.dshpm-detailCard .dshpm-detailKey { width:6.5em; }
+/* ── 详情对话框（用户要求：弹出对话框，参照会话清理的「确认删除」框）──────────
+   演进史（别再退回前两版）：
+     ① 内嵌在卡片里 → 被塞进 232px 网格窄列，截图/红线长句挤成一坨、整行被撑高（「展开太丑」）
+     ② 跨整行独立卡片 → 宽度够用了，但它在**文档流**里，展开会把下面内容整体顶下去，
+        用户视线要跟着滚，关掉又跳回来
+     ③ 现在：居中对话框 → 浮在页面上，列表位置完全不动，进出都不丢上下文
+
+   形态照 dsh-dialogue-cleanup 的确认框：标题行（名字 + @owner + ×）、可滚动内容区、
+   底部操作行。不用原生 <dialog>、不 portal 到 body —— 理由见 PluginDetailDialog 的注释。
+
+   position:fixed 与 z-index 由 .dshpm-modalLayer 提供（既有层级约定：
+   回顶 55 < 通知条 60 < 弹层 70）。这里只负责「对话框这一块」的尺寸与内部布局。
+   （注释里不写反引号：这段 CSS 在模板字符串里，反引号会提前结束字符串。） */
+/* 详情内容比重启弹窗宽得多（截图一排、键值成对），所以要覆写 modalCard 的 width。
+   用双类提高特异性：单类会因为 .dshpm-modalCard 定义在后面而被盖掉（lightbox 栽过这次）。 */
+.dshpm-modalCard.dshpm-detailDialog { width:min(760px, 100%); max-height:min(84vh, 100%); padding:0; gap:0; overflow:hidden; }
+.dshpm-detailDialogHead { display:flex; align-items:center; gap:8px; flex-wrap:wrap; box-sizing:border-box; padding:14px 16px 10px; border-bottom:1px solid var(--dsw-alias-border-l1,#0000000a); }
+.dshpm-detailDialogName { margin:0; font-size:1.02em; font-weight:600; overflow-wrap:anywhere; }
+.dshpm-detailDialogOwner { color:var(--dsw-alias-label-secondary,#61666b); font-size:.86em; }
+/* × 靠右：margin-left:auto 是它唯一的位置来源（标题长度不定，不能靠固定宽度）。 */
+.dshpm-detailDialogHead .dshpm-iconBtn { margin-left:auto; }
+/* 内容区**自己滚**，对话框不超出视口：详情长短差异很大（有的 6 个字段、有的带截图和长命令）。
+   min-height:0 是 flex 子项能真正滚起来的必要条件（否则会被内容撑开、整页跟着滚）。 */
+.dshpm-detailDialogBody { flex:1 1 auto; min-height:0; overflow:auto; box-sizing:border-box; padding:14px 16px; }
+.dshpm-detailDialogBody .dshpm-detail { padding-top:0; border-top:none; font-size:.93em; }
+.dshpm-detailDialogBody .dshpm-detailKey { width:6.5em; }
+.dshpm-detailDialogActions { display:flex; align-items:center; justify-content:flex-end; gap:8px; box-sizing:border-box; padding:10px 16px 14px; border-top:1px solid var(--dsw-alias-border-l1,#0000000a); }
 .dshpm-detailRow { display:flex; gap:8px; align-items:flex-start; }
 .dshpm-detailKey { flex:none; width:5.5em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-detailValue { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
@@ -1687,6 +1704,17 @@ function errorCopy(error) {
    宽面板也不必浪费空间只显示小图。16:10 是截图常见比例（GitHub README 截图多为 1280x800）。
    object-fit:contain 而不是 cover：截图里是界面/图表，裁掉边缘会丢掉信息。 */
 .dshpm-shot { width:clamp(200px, 26vw, 320px); height:auto; aspect-ratio:16/10; object-fit:contain; box-sizing:border-box; border-radius:var(--dsw-radius-sm,8px); border:1px solid var(--dsw-alias-border-l1,#0000000a); background:var(--dsw-alias-bg-layer-2,#fff); }
+/* 对话框里缩略图要更小：框宽只有 760px，26vw 在宽屏上会算到 400px+，
+   三张图各占一行 16:10 的格子，把内容区撑到必须滚动（实测对话框高 743px）。
+   这里改为固定上限 180px：一行能放两三张，图也仍然看得清轮廓，点开还能全屏。
+   注意必须用双类 .dshpm-detailDialogBody .dshpm-shot 提高特异性 ——
+   单类会被上面的 .dshpm-shot 盖掉（这个坑 lightbox 的背景已经栽过一次）。
+   （注释里不写反引号：这段 CSS 在模板字符串里，反引号会提前结束字符串，
+    结果是 node --check 通过、但浏览器里报 detailDialogBody is not defined。） */
+.dshpm-detailDialogBody .dshpm-shot { width:180px; }
+/* 图还没加载完时 aspect-ratio 会占位成一块空白：给个中性底色+边框，看起来是"正在加载"
+   而不是"这里坏了"。加载完成后图本身就是内容。 */
+.dshpm-detailDialogBody .dshpm-shotBtn { flex:none; }
 /* 图加载失败时的降级格子：同一个尺寸，变成一个可点的说明——不留破图占位，
    也不让详情区因为一张图挂掉就错位。 */
 .dshpm-shot--failed { display:flex; align-items:center; justify-content:center; padding:8px; text-align:center; font-size:.93em; line-height:1.3; color:var(--dsw-alias-label-secondary,#61666b); text-decoration:none; border-style:dashed; }
@@ -2837,57 +2865,157 @@ function errorCopy(error) {
             type: "button",
             className: "dshpm-btn dshpm-btn--quiet",
             "aria-expanded": props.expanded ? "true" : "false",
+            // 标记这颗按钮：对话框关掉时靠它把焦点还回来（见 PluginDetailDialog 的清理函数）。
+            // 用 data 标记而不是传 ref：对话框与卡片不在同一条 props 链上，
+            // 而标记对 React 重渲染换 DOM 也照样有效。
+            "data-detail-opener": props.expanded ? "true" : "false",
             onClick: function () { props.onToggleDetails(item.id); }
           }, props.expanded ? t("action.hideDetails") : t("action.details"))
         )
-        // 详情**不再在卡片里展开**（用户反馈「展开太丑」）：它以前是这个 <article> 的子节点，
-        // 于是详情被塞进 232px 的网格窄列里，行高被撑到几百像素，同排其它卡片跟着变高、
-        // 留下一大片空白。现在改成由外面渲染一张**跨整行的独立卡片**（见 PluginDetailCard）。
+        // 详情**不在卡片里**（用户反馈「展开太丑」，后又要求改成弹出对话框）：它以前是
+        // <article> 的子节点，被塞进 232px 的网格窄列里，行高被撑到几百像素、同排其它卡片
+        // 跟着变高。现在由 DiscoverPane 在网格外渲染一张浮层对话框（见 PluginDetailDialog）。
       );
     }
 
     /**
-     * 独立详情卡片：跨整个网格宽度，紧跟在被点那张卡片之后。
+     * 详情对话框（用户要求）：点「详情」弹出一个**居中对话框**，
+     * 形态参照 dsh-dialogue-cleanup 的「确认删除」框——标题、内容区、底部操作按钮。
      *
-     * 为什么单独一张卡而不是在卡片里展开：网格列宽只有 232px，详情里有截图（120px 缩略图
-     * 一排）、能力标签、风险提示原文（英文长句）——挤在窄列里必然换行成一大坨，还把整行
-     * 拉高。跨整行后宽度够用，也不影响同排其它卡片的高度。
+     * ## 为什么从「跨行卡片」改成「对话框」
+     * 上一版是跨整行的独立卡片（因为内嵌在 232px 窄列里太丑）。但卡片在**文档流**里，
+     * 展开时会把下面的内容整体顶下去：用户点详情，视线要跟着滚动，关掉又跳回来。
+     * 对话框浮在页面之上，列表位置不动，进出都不丢上下文。
      *
-     * 关闭入口有两处：卡片自己右上角的 ×（用户点开就得能就地关掉），
-     * 以及原卡片上那颗已变成「收起详情」的按钮（保持原交互不变）。
+     * ## 与官方 Modal 的语义对齐（照 dsh-dialogue-cleanup 的做法拷贝行为，不 require 包）
+     *   · `position:fixed` 覆盖层 + 高 z-index，**不用原生 <dialog>**：官方自己没用它，
+     *     而且原生 dialog 会带来 ::backdrop 叠加、DOM 里多一个 dialog 元素被样式/选择器误命中、
+     *     以及「关闭时机交给浏览器」这三件事——我们要求 Esc 能被明确控制。
+     *   · **不 portal 到 document.body**：覆盖层就渲染在它该在的位置，靠 z-index 取胜。
+     *   · Esc 关闭；Tab / Shift+Tab 在卡片内**循环**（焦点陷阱）；关掉后焦点**还给**打开它的那颗按钮。
+     *   · 点遮罩关闭，但点卡片本身不关。
+     *
+     * 关闭入口三处：右上角 ×、底部「关闭」按钮、Esc。总之用户点开就一定能退出来。
      */
-    function PluginDetailCard(props) {
+    function PluginDetailDialog(props) {
       var item = props.item;
-      // 全屏截图的状态放在这层：它是详情卡的最外层可交互容器，
+      // 全屏截图的状态放在这层：它是对话框的最外层可交互容器，
       // PluginDetails 只是渲染函数、不该自己持有跨节点的浮层状态。
       var shotState = React.useState(null);
       var shot = shotState[0];
       var setShot = shotState[1];
+      var cardRef = React.useRef(null);
+      // 关闭回调走 ref：它是每次渲染都会变的新闭包，而 effect 只该在挂载时绑一次。
+      var closeRef = React.useRef(props.onClose);
+      closeRef.current = props.onClose;
+
+      React.useEffect(function () {
+        var card = cardRef.current;
+        var FOCUSABLE = "button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex='-1'])";
+        // 记录打开前的焦点元素：关掉后要还回去，否则焦点掉到 body，键盘用户丢失位置。
+        //
+        // 两次踩坑，记下来：
+        //   ① 只在挂载时读一次 document.activeElement —— 实测拿到的是**卡片里那颗按钮被
+        //      重渲染换掉后的旧节点**（或干脆是 body），关掉后 previous.focus() 落空，
+        //      焦点停在对话框标题的 H2 上（探针实测 focusReturned:false）。
+        //   ② 所以改成「双保险」：优先用打开前那个元素（若它还在文档里且可见），
+        //      否则按 data-detail-opener 标记找回来（DiscoverPane 渲染卡片时打的）。
+        //      标记法不依赖节点身份，React 换 DOM 也照样能找回同一个按钮。
+        var previous = document.activeElement;
+        function focusables() {
+          if (!card || typeof card.querySelectorAll !== "function") return [];
+          return Array.prototype.slice.call(card.querySelectorAll(FOCUSABLE));
+        }
+        // 打开时把焦点移进卡片：优先关闭键（安全出口），没有就第一个可聚焦元素。
+        var list = focusables();
+        var first = card && card.querySelector("[data-autofocus]");
+        if (!first) first = list.length ? list[0] : null;
+        if (first && typeof first.focus === "function") first.focus();
+
+        function onKey(event) {
+          var key = event.key;
+          if (key === "Escape" || key === "Esc") {
+            // repeat 不重复触发：按住 Esc 不应该反复调用 onClose。
+            if (!event.repeat) closeRef.current();
+            return;
+          }
+          if (key !== "Tab") return;
+          var items = focusables();
+          if (items.length === 0) return;
+          var head = items[0];
+          var tail = items[items.length - 1];
+          var active = document.activeElement;
+          // 焦点陷阱：在首尾之间循环，别让 Tab 走到背后的页面上。
+          if (event.shiftKey) {
+            if (active === head || !card.contains(active)) { event.preventDefault(); tail.focus(); }
+          } else if (active === tail || !card.contains(active)) {
+            event.preventDefault(); head.focus();
+          }
+        }
+        document.addEventListener("keydown", onKey);
+        return function () {
+          document.removeEventListener("keydown", onKey);
+          // 焦点归还 —— 三层兜底，任一层成功即可：
+          //   ① 打开前那个元素（若它还在文档里）——最精确；
+          //   ② 按 data-detail-opener 标记找回卡片上那颗「详情」按钮 ——
+          //      React 重渲染换掉 DOM 节点时 ① 会落空，但标记法照样找得回来；
+          //   ③ 都不行就不动焦点（让浏览器按默认走），总比强行 focus 一个已卸载节点强。
+          var target = null;
+          if (previous && typeof previous.focus === "function" && document.contains(previous)) {
+            target = previous;
+          } else {
+            target = document.querySelector("[data-detail-opener]");
+          }
+          if (target && typeof target.focus === "function" && document.contains(target)) target.focus();
+        };
+      }, []);
+
       return el(React.Fragment, null,
-        el("article", {
-          className: "dshpm-card dshpm-detailCard",
-          "data-detail-for": item.id || item.name
+        el("div", {
+          className: "dshpm-modalLayer dshpm-detailDialogLayer",
+          role: "presentation",
+          onClick: function (event) { if (event.target === event.currentTarget) props.onClose(); }
         },
-          el("div", { className: "dshpm-detailCardHead" },
-            el("h3", { className: "dshpm-detailCardName" }, item.name || item.id),
-            el("span", { className: "dshpm-cardOwner" }, "@" + (item.owner || "")),
-            el("button", {
-              type: "button",
-              className: "dshpm-iconBtn dshpm-detailCardClose",
-              title: t("action.hideDetails"),
-              "aria-label": t("action.hideDetails"),
-              onClick: function () { props.onClose(); }
-            }, el(IconClose, { size: 14 }))
-          ),
-          el(PluginDetails, {
-            item: item,
-            onCopy: props.onCopy,
-            copied: props.copied,
-            onZoomShot: function (src, alt) { setShot({ src: src, alt: alt || "" }); }
-          })
+          el("div", {
+            className: "dshpm-modalCard dshpm-detailDialog",
+            ref: cardRef,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": (item.name || item.id || "") + " " + t("action.details"),
+            "data-detail-for": item.id || item.name
+          },
+            el("div", { className: "dshpm-detailDialogHead" },
+              el("h3", { className: "dshpm-detailDialogName" }, item.name || item.id),
+              el("span", { className: "dshpm-detailDialogOwner" }, "@" + (item.owner || "")),
+              el("button", {
+                type: "button",
+                className: "dshpm-iconBtn",
+                title: t("action.closeDetails"),
+                "aria-label": t("action.closeDetails"),
+                "data-autofocus": "true",
+                onClick: function () { props.onClose(); }
+              }, el(IconClose, { size: 14 }))
+            ),
+            // 内容区可滚动：详情长短不一（有的带 3650 张截图里的几张、有的有长安装命令），
+            // 让**内容**滚，对话框本身不超出视口。
+            el("div", { className: "dshpm-detailDialogBody" },
+              el(PluginDetails, {
+                item: item,
+                onCopy: props.onCopy,
+                copied: props.copied,
+                onZoomShot: function (src, alt) { setShot({ src: src, alt: alt || "" }); }
+              })
+            ),
+            el("div", { className: "dshpm-detailDialogActions" },
+              el("button", {
+                type: "button",
+                className: "dshpm-btn",
+                onClick: function () { props.onClose(); }
+              }, t("action.closeDetails"))
+            )
+          )
         ),
-        // 浮层挂成兄弟节点（Fragment 的第二项）而不是 article 的子节点：
-        // 与重启弹窗同一套约定，避免成为任何被几何断言盯着的容器的子项。
+        // 截图全屏浮层挂在对话框之后：它层级更高，且是兄弟节点（同一套「不做 portal」约定）。
         shot
           ? el(ScreenshotLightbox, { shot: shot, onClose: function () { setShot(null); } })
           : null
@@ -3139,6 +3267,19 @@ function errorCopy(error) {
       var summary = page.total === 0
         ? t("list.summaryEmpty")
         : t("list.summary", { total: page.total, page: page.page || 1, pages: page.pages || 1 });
+      // 当前打开详情的条目：从当前页里按 key 找回来（只存 key 而不是 item 对象，
+      // 这样刷新/换页后条目内容变了，对话框显示的是**最新**数据而不是打开那一刻的旧值）。
+      // 找不到（换页了 / 被筛掉了）就视为没打开——对话框自然消失，不留一个悬着的浮层。
+      var detailKey = null;
+      for (var dk in props.expanded) {
+        if (Object.prototype.hasOwnProperty.call(props.expanded, dk) && props.expanded[dk]) { detailKey = dk; break; }
+      }
+      var detailItem = null;
+      if (detailKey !== null) {
+        for (var di = 0; di < items.length; di += 1) {
+          if ((items[di].id || items[di].name) === detailKey) { detailItem = items[di]; break; }
+        }
+      }
       return el("div", { className: "dshpm-installed" },
         el("div", { className: "dshpm-toolbar" },
           el("div", { className: "dshpm-search" },
@@ -3198,31 +3339,23 @@ function errorCopy(error) {
           ? el("div", { className: "dshpm-grid" }, items.map(function (item, index) {
             var key = item.id || item.name;
             var expanded = !!props.expanded[key];
-            // 卡片 + 它的详情卡组成一对：详情**跨整行**（grid-column:1/-1）紧跟在这张卡后面。
-            // 以前详情是卡片自己的子节点，被挤进 232px 窄列、把整行撑高（用户：「展开太丑」）。
-            return el(React.Fragment, { key: key },
-              el(PluginCard, {
-                index: index,
-                item: item,
-                categories: props.categories,
-                expanded: expanded,
-                busy: props.busyKey === "install:" + key,
-                busyKind: props.busyKind,
-                copied: props.copied === key,
-                readOnly: props.readOnly,
-                onInstall: props.onInstall,
-                onToggleDetails: props.onToggleDetails,
-                onCopy: function (command) { props.onCopy(command, key); }
-              }),
-              expanded
-                ? el(PluginDetailCard, {
-                  item: item,
-                  copied: props.copied === key,
-                  onClose: function () { props.onToggleDetails(key); },
-                  onCopy: function (command) { props.onCopy(command, key); }
-                })
-                : null
-            );
+            // 详情**不在网格里**（用户要求改成居中对话框）：它以前是卡片子节点（挤在 232px
+            // 窄列里太丑），后来改成跨行卡片（会顶动列表、视线要跟着滚）。现在是浮层对话框，
+            // 列表位置完全不动。对话框在网格**外面**单独渲染（见下面的 detailItem）。
+            return el(PluginCard, {
+              key: key,
+              index: index,
+              item: item,
+              categories: props.categories,
+              expanded: expanded,
+              busy: props.busyKey === "install:" + key,
+              busyKind: props.busyKind,
+              copied: props.copied === key,
+              readOnly: props.readOnly,
+              onInstall: props.onInstall,
+              onToggleDetails: props.onToggleDetails,
+              onCopy: function (command) { props.onCopy(command, key); }
+            });
           }))
           : el(EmptyState, {
             title: t("list.empty.title"),
@@ -3241,7 +3374,17 @@ function errorCopy(error) {
           onPrev: function () { props.onPage((page.page || 1) - 1); },
           onNext: function () { props.onPage((page.page || 1) + 1); },
           onFirst: function () { props.onPage(1); }
-        })
+        }),
+        // 详情对话框：固定定位的浮层，放在这里（而**不是**网格内）——
+        // 它不参与网格布局，所以打开/关闭不会顶动列表，用户视线不丢。
+        detailItem
+          ? el(PluginDetailDialog, {
+            item: detailItem,
+            copied: props.copied === detailKey,
+            onClose: function () { props.onToggleDetails(detailKey); },
+            onCopy: function (command) { props.onCopy(command, detailKey); }
+          })
+          : null
       );
     }
 

@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.1
+
+- **fix(ci)：npm 发布永远 ENEEDAUTH —— 由 `workflow_call` 复用改为「publish-npm.yml 自己被标签触发」。**
+
+  v1.3.0 的 GitHub Release 与 tarball 都正常生成了，只有 npm 那步失败：
+
+  ```
+  npm error code ENEEDAUTH
+  npm error need auth This command requires you to be logged in to https://registry.npmjs.org/
+  ```
+
+  **根因**（npm 官方文档《Trusted publishing》原文）：
+
+  > Some GitHub Actions workflows use `workflow_call` to invoke other workflows that run
+  > `npm publish` ... When this happens, **validation checks the calling workflow's name
+  > instead of the workflow that actually contains the publish command**.
+
+  也就是说 npm **服务端校验的是调用方**。而 v1.2.0 记下的结论是「用 `uses:` 复用
+  publish-npm.yml，令牌里 `job_workflow_ref` 就是它」——**那只是 OIDC 令牌字段，
+  不等于 npm 按它校验**。v1.3.0 把这条错误结论的代价演得很清楚：自检打印
+  `job_workflow_ref = .../publish-npm.yml@refs/tags/v1.3.0`、判定「身份正确」，
+  紧接着发布仍然 ENEEDAUTH，因为 npm 看的是 `workflow_ref = .../pack-release.yml`。
+
+  历史对照（同一份代码，只差触发方式）：
+
+  | 版本 | 触发 | 调用方 | 结果 |
+  |---|---|---|---|
+  | v1.2.0 | 手动 `workflow_dispatch` 直接跑 publish-npm.yml | publish-npm.yml | ✅ |
+  | v1.3.0 | 标签 → pack-release.yml → `workflow_call` | **pack-release.yml** | ❌ |
+
+  **修法**：`publish-npm.yml` 自己监听 `push: tags: ['v*']`，与 `pack-release.yml`
+  **并列触发、互不调用**（一个发 GitHub Release，一个发 npm）；删掉 `pack-release.yml`
+  里那个注定失败的 `publish-npm` job，并去掉 `workflow_call`。
+  发布实现仍然只有一份（就在 publish-npm.yml），npm 看到的调用方永远是它自己。
+
+  **顺带修掉那个「假绿灯」自检**：原来的自检只比对 `job_workflow_ref`，在 `workflow_call`
+  下必然通过，于是**自检过了、发布却失败**——这正是 v1.3.0 排查绕弯的原因。现在要求
+  `job_workflow_ref` **和** `workflow_ref` **都**指向 publish-npm.yml。
+
+  **门禁同步纠正**：`release-workflow.test.mjs` 原来把「必须用 `uses:` 复用」钉成底线
+  （14 条里有 3 条在守这个错误结论），现在改为反向断言：**任何 workflow 都不得
+  `uses:` / `workflow_call` publish-npm.yml**，且 publish-npm.yml 必须自己监听标签。
+  门禁里的这些断言只查**生效行**、不查注释——`pack-release.yml` 的注释里刻意写着
+  「本文件也不去调用 publish-npm.yml」来解释原因，全文正则会把这句解释判成违规。
+
 ## 1.3.0
 
 - **fix：更新永远失败（「宿主拒绝了这个操作」）——更新改走 tarball 形态，绕开宿主的同名拦截。**

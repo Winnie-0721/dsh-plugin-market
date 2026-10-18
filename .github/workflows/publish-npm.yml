@@ -2,31 +2,48 @@ name: Publish to npm
 
 # 本文件是**唯一**的 npm 发布实现，也是 npm Trusted Publisher 上登记的那个文件名。
 #
-# ⚠️ 为什么必须由本文件亲自跑「发 npm」这件事（v1.2.0 第七轮查清的真因）：
-#    npm 的 Trusted Publisher 把信任绑定到**具体 workflow 文件名**（包设置页的
-#    Workflow filename 字段，含 .yml）。OIDC 令牌里 npm 校验的是 `job_workflow_ref`，
-#    而**实测**（见 docs/RELEASING.md §4.2.1）：
-#      用 workflow_call 调用时  job_workflow_ref = 被调用的那个文件（= 本文件）
-#                              workflow_ref     = 调用方文件
-#    所以 pack-release.yml **不能自己重写一遍发布步骤**——那样令牌里的文件名是
-#    pack-release.yml，与登记不符，npm 直接回：
+# ⚠️ 为什么本文件必须**自己**被标签触发，而不能由 pack-release.yml 用 workflow_call 调
+#    （v1.3.0 查清的真因；v1.1.6 / v1.2.0 / v1.3.0 三次 ENEEDAUTH 的同一个根）：
+#
+#    npm 官方文档《Trusted publishing》明确写着这条限制：
+#      "Some GitHub Actions workflows use workflow_call to invoke other workflows that
+#       run npm publish ... When this happens, validation checks **the calling
+#       workflow's name** instead of the workflow that actually contains the publish
+#       command, which can cause configuration mismatches."
+#      https://docs.npmjs.com/trusted-publishers/
+#
+#    也就是说：**OIDC 令牌**里的 `job_workflow_ref` 确实指向被调用的本文件（这点曾经
+#    实测过、也没错），但 **npm 服务端校验的是调用方**。两者不一致时，令牌看着完全正常、
+#    本文件里那段身份自检也一路绿灯，可一到 `npm stage publish` 就只回一句：
 #      npm error code ENEEDAUTH
 #      npm error need auth This command requires you to be logged in to https://registry.npmjs.org/
-#    v1.1.6 与 v1.2.0 都踩了这个坑（run #3 / #4），当时是靠手动跑本文件补发的。
-#    正确做法：pack-release.yml 用 `uses: ./.github/workflows/publish-npm.yml` 复用它。
-#    这样**发布逻辑只有一份**，且 OIDC 认的文件名仍然正确。
+#    v1.3.0 就是这样：自检打印 job_workflow_ref = publish-npm.yml@refs/tags/v1.3.0、
+#    判定「身份正确」，紧接着发布仍然 ENEEDAUTH。
+#
+#    历史对照（很能说明问题）：
+#      · v1.2.0 成功：是**手动 workflow_dispatch 直接跑本文件**（ref=refs/heads/main）
+#        → 调用方就是本文件 → 校验通过 → npm 上留下 trustedPublisher 与 provenance 记录。
+#      · v1.3.0 失败：标签触发 pack-release.yml → workflow_call 本文件
+#        → npm 看到的是 pack-release.yml → 与登记的 publish-npm.yml 不符 → ENEEDAUTH。
+#
+#    结论：**取消 workflow_call 这条复用路径**。本文件自己监听 `push: tags: ['v*']`，
+#    与 pack-release.yml **并列**触发（一个发 GitHub Release，一个发 npm），互不调用。
+#    这样 npm 看到的调用方永远是本文件，与登记一致。
+#
+#    代价与取舍：发布逻辑仍然只有一份（就在本文件），只是从「被复用」改成「并列触发」。
+#    pack-release.yml 里那个 publish-npm job 已删除——它不可能通过校验。
 #
 # 版本号由 release.ps1 独家管理，这里绝不 bump：
 # npm version patch 会破坏 versionCode 归零纪律，且同版本重发会被 npm 拒。
 on:
-  # 人工建 Release 时触发（注意：GITHUB_TOKEN 创建的 Release 不会触发 workflow，
-  # 所以标签发布那条路不靠这个事件，而是由 pack-release.yml 直接 workflow_call 本文件）。
+  # **主路径**：标签推送即发布（与 pack-release.yml 并列，两者互不调用）。
+  push:
+    tags: ['v*']
+  # 人工建 Release 时触发（注意：GITHUB_TOKEN 创建的 Release 不会触发 workflow）。
   release:
     types: [published]
-  # 手动触发：补发 / 重试都走这里。
+  # 手动触发：补发 / 重试都走这里（v1.2.0 就是靠它发成功的）。
   workflow_dispatch:
-  # 被 pack-release.yml 复用——**这是标签发布那条路的正解**。
-  workflow_call:
 
 # id-token: write = npm Trusted Publishing（OIDC）：在 npmjs.com 给本包添加
 # Trusted publisher（repository=本仓库、workflow=本文件名）后，publish 不再需要 NPM_TOKEN。
@@ -94,17 +111,33 @@ jobs:
           claims = json.loads(base64.urlsafe_b64decode(payload))
 
           job_ref = claims.get("job_workflow_ref", "")
+          wf_ref = claims.get("workflow_ref", "")
           print(f"job_workflow_ref = {job_ref}")
-          print(f"workflow_ref     = {claims.get('workflow_ref')}")
+          print(f"workflow_ref     = {wf_ref}")
 
+          # **两个字段都要是 publish-npm.yml**，缺一不可。
+          #
+          # 为什么：npm 官方文档写明，workflow_call 场景下它校验的是**调用方**
+          # （"validation checks the calling workflow's name instead of the workflow that
+          #  actually contains the publish command"）。
+          #   · job_workflow_ref = 实际执行发布命令的文件（workflow_call 时是被调用方）
+          #   · workflow_ref     = 触发整条链的入口文件（workflow_call 时是调用方）
+          # 只查前者会给出**假绿灯**：v1.3.0 就是这样——job_workflow_ref 是
+          # publish-npm.yml、自检打印「身份正确」，然后 npm 仍然 ENEEDAUTH，
+          # 因为 npm 看的是 workflow_ref（pack-release.yml）。
+          #
+          # 现在本文件自己被 `push: tags` 触发，两个字段都应该是本文件；任何一个是别的
+          # 文件，就说明有人又把它挂到了别的 workflow 下面，立刻在这里失败。
           expected = ".github/workflows/publish-npm.yml@"
-          if expected not in job_ref:
-              sys.exit(
-                  "OIDC 身份不对：npm 按 job_workflow_ref 的文件名匹配 Trusted Publisher，"
-                  f"登记的是 publish-npm.yml，但这次是 {job_ref.split('@')[0]}。"
-                  "不要把发布步骤复制到别的 workflow 里跑——请用 `uses: ./.github/workflows/publish-npm.yml` 复用。"
-              )
-          print("OIDC 身份正确：npm 会认这个文件名。")
+          for label, value in (("job_workflow_ref", job_ref), ("workflow_ref", wf_ref)):
+              if expected not in value:
+                  sys.exit(
+                      f"OIDC 身份不对：{label} = {value or '(空)'}，不是 publish-npm.yml。"
+                      "npm 的 Trusted Publisher 登记的是 publish-npm.yml，且它在 workflow_call "
+                      "场景下校验的是**调用方**文件名——所以本文件必须自己监听 push: tags，"
+                      "不能被别的 workflow 用 `uses:` 调用。"
+                  )
+          print("OIDC 身份正确：job_workflow_ref 与 workflow_ref 都是 publish-npm.yml，npm 会认。")
           PY
 
       # 幂等闸门（从原来 pack-release.yml 里那个重复 job 搬过来的，别丢）：

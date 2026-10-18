@@ -97,23 +97,48 @@ CI 段（`.github/workflows/pack-release.yml`，`push: tags: ['v*']` 触发；�
    Release 正文取标签上 CHANGELOG 的同名节（`-NotesFile` 可覆盖），读文件一律显式 `-Encoding UTF8`——
    PS 5.1 的 `Get-Content` 默认按系统 ANSI（GBK）解码 UTF-8，漏写就会上去一页乱码（v1.0.0–v1.1.5
    实际发生过，8 个页面已按标签版 CHANGELOG 重建；`verify/ps-encoding.test.mjs` 负责拦住再犯）；
-4. `publish-npm` job：**不自己写发布步骤，而是 `uses: ./.github/workflows/publish-npm.yml`
-   复用**（该文件新增了 `workflow_call` 触发器）。发布实现在 `publish-npm.yml` 里**只有一份**：
+4. **npm 发布是另一个并列的 workflow**（`.github/workflows/publish-npm.yml`，同样由
+   `push: tags: ['v*']` 触发）。两者**并列触发、互不调用**：`pack-release.yml` 只管打包 +
+   建 GitHub Release，`publish-npm.yml` 只管发 npm。发布实现在 `publish-npm.yml` 里**只有一份**：
    先自检 OIDC 身份，再看幂等闸门（该版本已在 npm 上就跳过），然后
    `npm stage publish --access public`（**暂存发布**，之后需人工 2FA 批准才公开）。
-   凭据是 npm Trusted Publishing（OIDC）——**调用方与被调用方都要声明 `id-token: write`**，
-   缺一个就拿不到令牌。前提是在 npmjs.com 给本包添加 Trusted publisher
-   （repository=本仓库 + **workflow 文件名**）。现在只有 `publish-npm.yml` 一个文件需要登记；
-   原来给 `pack-release.yml` 加的那条已经用不上了（留着无害，删掉也不会影响任何一条路径）。
+   凭据是 npm Trusted Publishing（OIDC）。前提是在 npmjs.com 给本包添加 Trusted publisher
+   （repository=本仓库 + **workflow 文件名 `publish-npm.yml`**）。
    npm ≥ 11.5.1 才支持 OIDC，job 里先 `npm install -g "npm@^11.5.1"`（**不要**用 `npm@latest`，
    见下方 ⚠ 块的第 1 条：npm 12 与 node 22.14.0 不相容）。
-   **为什么必须复用而不是自己写一遍**（v1.1.6 / v1.2.0 各踩一次，真因见 §4.2.1）：
-   npm 按 `job_workflow_ref` 里的**文件名**匹配 Trusted Publisher，而 `workflow_call` 下
-   `job_workflow_ref` 指向**被调用**的那个文件——只有复用才能让令牌里的文件名仍是
-   `publish-npm.yml`。这正是 `release-workflow.test.mjs` 反向断言盯住的那条底线。
+
+   **为什么不能由 pack-release.yml 用 `uses:` 复用（v1.2.0 的结论是错的，v1.3.0 推翻）**
+
+   npm 官方文档《Trusted publishing》（https://docs.npmjs.com/trusted-publishers/）原文：
+
+   > Some GitHub Actions workflows use `workflow_call` to invoke other workflows that run
+   > `npm publish` ... When this happens, **validation checks the calling workflow's name
+   > instead of the workflow that actually contains the publish command**, which can cause
+   > configuration mismatches.
+
+   即：npm **服务端校验的是调用方**。OIDC 令牌里的 `job_workflow_ref` 在 `workflow_call` 下
+   确实指向被调用文件——**但那只是令牌字段，不等于 npm 按它校验**。v1.2.0 只看了令牌这一侧，
+   于是得出「用 `uses:` 复用即可」的错误结论，还把错误断言写进了门禁。
+
+   v1.3.0 是这条错误结论最直观的代价：自检打印
+   `job_workflow_ref = .../publish-npm.yml@refs/tags/v1.3.0`、判定「身份正确」，
+   紧接着 `npm stage publish` 仍回 `ENEEDAUTH`，因为 npm 看的是
+   `workflow_ref = .../pack-release.yml@refs/tags/v1.3.0`。
+
+   历史对照（同一份代码、不同触发方式）：
+
+   | 版本 | 触发方式 | 调用方 | 结果 |
+   |---|---|---|---|
+   | v1.2.0 | 手动 `workflow_dispatch` **直接跑 publish-npm.yml** | publish-npm.yml | ✅ 成功（npm 上有 trustedPublisher + provenance） |
+   | v1.3.0 | 标签 → pack-release.yml → `workflow_call` publish-npm.yml | **pack-release.yml** | ❌ ENEEDAUTH |
+
+   差别只在「谁是调用方」。所以现在 `publish-npm.yml` **自己监听标签**，
+   `release-workflow.test.mjs` 反向钉住：**任何 workflow 都不得 `uses:` / `workflow_call` 它**。
+   身份自检也改成同时校验 `job_workflow_ref` **和** `workflow_ref`
+   （只查前者会给出假绿灯，正是 v1.3.0 排查绕弯的原因）。
+
    （`publish-npm.yml` 同时保留 `release(published)` 与 `workflow_dispatch`，用于人工建 Release
-   与手动补发——由 GITHUB_TOKEN 创建的 Release 不会触发其它 workflow，这也是 npm 发布必须
-   并进这条链的原因。）
+   与手动补发——v1.2.0 就是靠手动跑这条通道发成功的。）
 
 ## 3. 用法
 

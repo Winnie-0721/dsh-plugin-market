@@ -1573,10 +1573,14 @@ function errorCopy(error) {
 /* 截图：小尺寸横向排布，点击在详情里看不全也没关系（链接可开原图）；
    object-fit:cover 避免不同长宽比的图把行高撑乱。 */
 .dshpm-shots { display:flex; gap:6px; flex-wrap:wrap; }
-.dshpm-shot { width:120px; height:76px; object-fit:cover; border-radius:var(--dsw-radius-sm,8px); border:1px solid var(--dsw-alias-border-l1,#0000000a); background:var(--dsw-alias-bg-layer-2,#fff); }
+/* 截图缩略图：详情卡现在跨整行（用户反馈「展开太丑」后重做），宽度不再是 232px 窄列，
+   所以图可以放大。用 clamp 让它随面板宽度伸缩——窄面板不至于挤成一行两列，
+   宽面板也不必浪费空间只显示小图。16:10 是截图常见比例（GitHub README 截图多为 1280x800）。
+   object-fit:contain 而不是 cover：截图里是界面/图表，裁掉边缘会丢掉信息。 */
+.dshpm-shot { width:clamp(200px, 26vw, 320px); height:auto; aspect-ratio:16/10; object-fit:contain; box-sizing:border-box; border-radius:var(--dsw-radius-sm,8px); border:1px solid var(--dsw-alias-border-l1,#0000000a); background:var(--dsw-alias-bg-layer-2,#fff); }
 /* 图加载失败时的降级格子：同一个尺寸，变成一个可点的说明——不留破图占位，
    也不让详情区因为一张图挂掉就错位。 */
-.dshpm-shot--failed { display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:4px; text-align:center; font-size:.86em; line-height:1.3; color:var(--dsw-alias-label-secondary,#61666b); text-decoration:none; border-style:dashed; }
+.dshpm-shot--failed { display:flex; align-items:center; justify-content:center; padding:8px; text-align:center; font-size:.93em; line-height:1.3; color:var(--dsw-alias-label-secondary,#61666b); text-decoration:none; border-style:dashed; }
 .dshpm-shot--failed:hover { text-decoration:underline; }
 .dshpm-tag { border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:999px; padding:1px 8px; font-size:.93em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-code { display:block; box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-2,#fff); color:var(--dsw-alias-label-primary,#0f1115); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.93em; overflow-wrap:anywhere; }

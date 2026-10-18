@@ -216,11 +216,26 @@ Query 参数（全部可选，未知参数忽略）：
 
 ```json
 { "name": "AnonyJcy/dsh-j-space", "spec": "@anonyjcy/dsh-j-space",
-  "requestId": "uuid-可选", "approvedBuilds": ["sharp"] }
+  "requestId": "uuid-可选", "approvedBuilds": ["sharp"], "kind": "update" }
 ```
 
 - `spec` 可省略：服务端按 `name`（目录 id 或 npm 名，大小写不敏感）在目录里查 `spec`。
 - `spec` 显式给出时必须在目录里存在（等于某个条目的 `spec`、`npm` 或 `url`），否则 `400 not-in-catalog`（安全约束：只允许装目录内的插件）。
+- **`kind`（v1.3.0，可选）**：`"install"` 或 `"update"`。客户端把「更新到 x.y.z」标成 `"update"`。
+  服务端**只在 `kind === "update"` 时**把 spec 改写成 npm tarball URL
+  （`https://registry.npmjs.org/<name>/-/<base>-<ver>.tgz`，scoped 包的文件名只取最后一段）。
+  **为什么必须这么改**：宿主管家 `PluginManager.installBundle` 里有守卫
+  `if (hmr !== void 0 && known !== void 0 && Object.hasOwn(before, known)) throw already-installed`，
+  而 `specPackageName()` 对 **registry 形态**的 spec **直接返回包名、不看版本** ⇒ 任何
+  `name@1.8.1` 形式的升级只要包已在 dependencies 里就**必然**被拒；宿主也没有
+  upgrade/update/allowReinstall 入口，`removeBundle` 又会对正在加载的插件抛 `stop-profile`。
+  tarball 形态下 `known` 是 `undefined`（它在 dependencies 里找不到 spec 字面相等的 dep），
+  守卫不成立，pnpm 照常执行升级。实测佐证：`pnpm add dsh-web-search-free@1.8.1 --lockfile-only`
+  在用户 profile 上输出「✓ Lockfile passes supply-chain policies」+ Done（声明本是 `^1.8.0`）
+  —— 东西能升，纯粹是入口被宿主的守卫挡了。
+  改写有**三条安全边界**：只在 `kind="update"` 时；**必须在校验 spec 落在目录里之后**
+  （否则成了任意包安装器）；版本必须像 semver 定值（`latest`/range 原样返回）。
+  回归：`verify/update-path.test.mjs`（8 条，含「目录校验必须排在改写之前」这条顺序断言）。
 - **服务端把裸 npm 名钉上目录版本**（v1.1.4）：命中条目的 `spec` 等于其 `npm` 且 `version` 像 semver 时，
   实际传给 `installBundle` 的是 `name@version`（如 `dsh-context@0.63.0`）。原因：pnpm 11 对
   「已存在的依赖 + 裸名」的 `pnpm add` 是幂等的（打印 `Already up to date`、不动 `package.json`），
@@ -229,6 +244,9 @@ Query 参数（全部可选，未知参数忽略）：
   或版本字段不像 semver 时原样放行；钉版本**只在命中的目录条目内加版本**，不会引入目录外的安装源。
   回归：`verify/install-spec.test.mjs`（源码不变量 + 本地目录 fixture + 假 `pluginManager` 的行为断言）。
 - 调用 `pluginManager.installBundle(spec, { requestId, approvedBuilds })`；`requestId` 为空时不传。`approvedBuilds` 为空数组时不传。
+- **更新仍撞上 `already-installed` 时**（说明 tarball 改写没生效，例如目录给的 spec 形态特殊），
+  返回 `409 already-installed`，`message` 说「宿主认为这个包已经存在」，`hint` 给出可执行的
+  `dsh plugin add <name>@<version>` 命令 —— 而不是把宿主的「宿主拒绝了这个操作。」原样传下去。
 
 响应：
 

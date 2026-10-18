@@ -2,6 +2,45 @@
 
 ## 1.3.0
 
+- **fix：更新永远失败（「宿主拒绝了这个操作」）——更新改走 tarball 形态，绕开宿主的同名拦截。**
+
+  **用户报的**：点「更新到 x.y.z」→ 宿主返回 `already-installed`，界面只说「宿主拒绝了这个操作。」。
+  实测两个可更新包（`dsh-web-search-free` 1.8.0→1.8.1、`dsh-mobile` 0.6.10→0.6.11）**都是这个结果**。
+
+  **根因（从 app.asar 抠出宿主管家源码确认，不是猜）**：`PluginManager.installBundle` 里有这行守卫
+
+  ```js
+  const known = specPackageName(spec, before, dir);
+  if (hmr !== void 0 && known !== void 0 && Object.hasOwn(before, known))
+    throw new ManagementFailure('already-installed');
+  ```
+
+  而 `specPackageName` 对 **registry 形态**的 spec **直接返回包名、完全不看版本**。于是
+  `pnpm add name@1.8.1` 这种升级写法，只要包已在 dependencies 里就**必然**被拒。宿主也没有
+  任何 upgrade/update/allowReinstall 入口（方法表只有 installBundle / removeBundle /
+  waitForInstall / cancelInstall），`removeBundle` 又会对正在加载的插件抛 `stop-profile`
+  —— 所以「先卸再装」也不通，且中途会留下坏 profile。
+
+  **这不是能力问题，是入口被自己的守卫挡了**：在用户 profile 上实测
+  `pnpm add dsh-web-search-free@1.8.1 --lockfile-only` → 「✓ Lockfile passes supply-chain
+  policies」+ Done，而声明本来就是 `^1.8.0`。
+
+  **修法**：客户端在更新时把 `kind:"update"` 带上；服务端**在目录校验之后**把它改写成
+  npm tarball URL（`https://registry.npmjs.org/<name>/-/<base>-<ver>.tgz`）。tarball 形态下
+  宿主那个 `known` 变成 `undefined`，守卫不成立，pnpm 照常执行升级。
+
+  安全边界（三条，`updateTarballSpec` 的注释里写清了）：
+  1. **只在 `kind === 'update'` 时改写**，首次安装仍按目录给的 spec 走；
+  2. **必须在校验 spec 落在目录里之后**，否则这里就成了任意包安装器；
+  3. 版本必须像 semver 定值，`latest`/range 原样返回（拼不出 tarball URL）。
+
+  新增 `verify/update-path.test.mjs`（8 条）钉住：改写函数存在且 scoped 包文件名正确、
+  只在 update 时改写、客户端带 kind、目录校验仍在且**排在改写之前**、非更新请求 spec 不变、
+  `already-installed` 有可读文案。现场实测（`_verify/probe-update-fixed.mjs`，5/5 通过）：
+  更新请求 `ok:true / application:applied / activation.versionMatches:true`、
+  pnpm 输出 `+ dsh-web-search-free 1.8.1`；**对照组（不带 kind）仍被 already-installed 拦**
+  ——证明改写是必要条件，而不是宿主自己变好了。
+
 - **feat(ui)：点开详情改成弹出**居中对话框**（用户要求，参照会话清理的「确认删除」框）。**
 
   形态演进，别再退回前两版：

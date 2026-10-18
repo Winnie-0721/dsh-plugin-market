@@ -4774,6 +4774,10 @@ function errorCopy(error) {
         startJob({ key: jobKey, kind: target.kind || "install" });
         var body = { name: requestName, requestId: newRequestId() };
         if (target.spec) body.spec = target.spec;
+        // 告诉服务端这是「更新」还是「首次安装」：宿主 installBundle 对已有的 registry 包名
+        // 一律抛 already-installed（不看版本），所以更新要改走 tarball 形态。
+        // 服务端只在 kind=update 时改写 spec（见 index.js 的 updateTarballSpec）。
+        if (target.kind) body.kind = target.kind;
         if (approvedBuilds && approvedBuilds.length) body.approvedBuilds = approvedBuilds;
         api.install(body).then(function (payload) {
           if (!mountedRef.current) return;

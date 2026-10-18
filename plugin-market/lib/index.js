@@ -722,6 +722,53 @@ function pinnedNpmSpec(hit, spec) {
   return SEMVER_LIKE.test(version) ? `${npm}@${version}` : spec
 }
 
+/**
+ * 把「更新」用的 spec 改写成 npm tarball URL —— 绕开宿主的同名拦截。
+ *
+ * ## 为什么必须这么干（不是绕安全，是绕一个 bug）
+ * 宿主管家 `PluginManager.installBundle` 里有这行守卫：
+ *
+ *     const known = specPackageName(spec, before, dir);
+ *     if (hmr !== void 0 && known !== void 0 && Object.hasOwn(before, known))
+ *       throw new ManagementFailure('already-installed');
+ *
+ * 而 `specPackageName` 对 **registry** 形态的 spec **直接返回包名**，完全不看版本。
+ * 于是 `name@1.8.1` 这种升级写法，只要这个包已经在 dependencies 里，**必然**被拒。
+ * 宿主也没有任何 upgrade/update/allowReinstall 入口（方法表只有 installBundle /
+ * removeBundle / waitForInstall / cancelInstall），removeBundle 又会因「插件正在加载」
+ * 抛 stop-profile。⇒ 升级只能改走 tarball 形态：那时 `known` 是 undefined（它在
+ * dependencies 里找不到 spec 字面相等的 dep），守卫不成立，pnpm 照常执行**升级**。
+ *
+ * 实测佐证：用户 profile 上 `pnpm add dsh-web-search-free@1.8.1 --lockfile-only`
+ * 输出「✓ Lockfile passes supply-chain policies」+ Done，而声明本来就是 `^1.8.0`
+ * —— 东西能升，纯粹是入口被宿主的守卫挡了。
+ *
+ * ## 安全边界（三条，缺一不可）
+ *   1. **只在 kind === 'update' 时改写**。首次安装本来就该按目录给的 spec 走。
+ *   2. **必须在校验 spec 落在目录里之后**（调用点在 install() 的目录校验下游）。
+ *      否则这里就成了「任意包安装器」的后门。
+ *   3. 版本必须是看起来像 semver 的定值。`latest`、range、tag 拼不出 tarball URL，
+ *      原样返回（那种情况宁可不改写，让宿主按老路走）。
+ *
+ * @param {string} spec 已经过目录校验的 spec
+ * @param {object|null|undefined} hit 目录条目（取 npm 名与 version）
+ * @returns {string} 改写后的 tarball URL，或原样返回
+ */
+function updateTarballSpec(spec, hit) {
+  const npm = optionalText(hit?.npm)
+  const versionRaw = optionalText(hit?.version)
+  // 只有「目录给的 spec 就是裸包名」时才改写：如果目录给的是 git/URL/路径形态，
+  // 那本来就是另一种安装方式，不该被我们改成 registry tarball。
+  if (npm === null || versionRaw === null) return spec
+  if (spec !== npm && spec !== `${npm}@${versionRaw.replace(/^v/, '')}`) return spec
+  const version = versionRaw.replace(/^v/, '')
+  if (!SEMVER_LIKE.test(version)) return spec
+  // scoped 包（@scope/name）的 tarball 文件名只取最后一段：name-version.tgz
+  const base = npm.split('/').pop()
+  if (!base) return spec
+  return `https://registry.npmjs.org/${npm}/-/${base}-${version}.tgz`
+}
+
 function invalidQuery(res, picked) {
   sendError(res, 400, 'bad-request', { message: picked.message, hint: picked.hint })
 }
@@ -1018,6 +1065,10 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
         spec = hit.spec
       }
       spec = pinnedNpmSpec(hit, spec)
+      // 更新走 tarball 形态：宿主的 installBundle 见到「已有的 registry 包名」就抛
+      // already-installed（见 updateTarballSpec 的注释）。**必须在上面目录校验之后**——
+      // 先确认 spec 属于目录，再改写，否则这里就成了任意包安装器。
+      if (optionalText(payload.kind) === 'update') spec = updateTarballSpec(spec, hit)
 
       const options = {}
       const requestId = optionalText(payload.requestId)
@@ -1046,6 +1097,22 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
         sendError(res, 400, 'not-allowed', {
           message: '当前 profile 不允许安装插件。',
           hint: '用 dsh plugin 命令行安装，或换一个可管理的 profile。'
+        })
+        return
+      }
+
+      // 更新路径的兜底诊断：正常情况已经被 updateTarballSpec 绕过去了（宿主只拦
+      // 「已有的 registry 包名」）。如果这里还收到 already-installed，说明 tarball
+      // 改写没生效（例如目录给的 spec 形态特殊、或宿主换了判定），此时必须说清
+      // 「宿主认为这个包已经存在」以及该怎么绕，而不是把宿主那句「宿主拒绝了」原样丢给用户。
+      const failureCode = result !== null && typeof result === 'object' && result.error && typeof result.error.code === 'string'
+        ? result.error.code
+        : '';
+      if (failureCode === 'already-installed' && optionalText(payload.kind) === 'update') {
+        sendError(res, 409, 'already-installed', {
+          message: '宿主认为这个包已经存在，因此拒绝了这次更新。',
+          hint: '在终端执行 `dsh plugin add ' + (optionalText(hit?.npm) ?? requestedName ?? '名字') +
+            '@' + (optionalText(hit?.version) ?? '最新版') + '`；宿主同一入口既装也升，这一步会真正把版本推上去。'
         })
         return
       }

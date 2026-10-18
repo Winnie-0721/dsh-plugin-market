@@ -325,6 +325,9 @@ window.__ModuleLoader__.load({
         // 图床（GitHub raw）在国内网络下常常连不上：加载失败要变成可点链接，
         // 而不是留一张破图。文案说清「点开看原图」，别让用户以为插件坏了。
         "detail.screenshotFailed": "图片加载失败，点开原图",
+        // 点击缩略图全屏看：缩略图再大也只有 320px，看清一行字还得全屏。
+        "detail.screenshotZoom": "点击全屏查看",
+        "detail.screenshotOpen": "在浏览器里打开原图",
         "detail.tarball": "预构建产物",
         "detail.downloadsRange": "近 30 天（{start} ~ {end}）",
         "detail.links": "链接",
@@ -690,6 +693,8 @@ window.__ModuleLoader__.load({
         "detail.screenshots": "Screenshots",
         "detail.screenshotsAlt": "Screenshot {index} of {name}",
         "detail.screenshotFailed": "Image failed to load — open original",
+        "detail.screenshotZoom": "Click to view full screen",
+        "detail.screenshotOpen": "Open original in browser",
         "detail.tarball": "Prebuilt tarball",
         "detail.downloadsRange": "Last 30 days ({start} ~ {end})",
         "detail.links": "Links",
@@ -1686,6 +1691,38 @@ function errorCopy(error) {
    也不让详情区因为一张图挂掉就错位。 */
 .dshpm-shot--failed { display:flex; align-items:center; justify-content:center; padding:8px; text-align:center; font-size:.93em; line-height:1.3; color:var(--dsw-alias-label-secondary,#61666b); text-decoration:none; border-style:dashed; }
 .dshpm-shot--failed:hover { text-decoration:underline; }
+/* 缩略图现在是个按钮（点一下全屏看）：去掉按钮的默认外观，只保留图片本身的样子。
+   为什么要包一层按钮而不是给 <img> 加 onClick：img 不是可聚焦元素、键盘用户按不到，
+   也没有 role，读屏器不会说「这里可以点」。按钮保住了键盘与可访问名。 */
+.dshpm-shotBtn { display:inline-flex; padding:0; border:none; background:none; cursor:zoom-in; border-radius:var(--dsw-radius-sm,8px); }
+.dshpm-shotBtn:focus-visible { outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4176e6)); outline-offset:2px; }
+.dshpm-shotBtn:hover .dshpm-shot { border-color:var(--dsw-alias-border-l2,#0000001a); }
+/* ── 截图全屏浮层 ──────────────────────────────────────────────────────
+   复用 .dshpm-modalLayer 的定位与层级（fixed / z-index:70 / 居中），这里只加宽与配色。
+
+   **选择器必须写成 .dshpm-modalLayer.dshpm-lightboxLayer（两个类）**，不能只写
+   .dshpm-lightboxLayer：后者与 .dshpm-modalLayer 特异性相同（都是 0,1,0），
+   而 .dshpm-modalLayer 的规则定义在后面 —— 于是它的 background（用 bg-overlay
+   那个令牌）会把我这里的深色**盖掉**。（注释里刻意不写完整的 var(...) 形式：
+   样式表里「同一令牌只允许一套回退值」那条检查会把注释里的写法也算进去。）
+   （注意：注释里不能写反引号 —— 这段 CSS 就在模板字符串里，反引号会提前结束字符串。）
+   实测症状（真浏览器）：浮层背景量到 rgb(233,236,242) 浅灰、不是 rgba(15,17,21,.82)，
+   浅色截图铺在浅灰底上，整屏看起来就是「一片白」。
+   提高特异性比「靠顺序」可靠：以后谁把规则挪个位置都不会再坏。
+
+   图用 contain + max-*:100%：全屏是为了**看清**，不是为了铺满——
+   cover 会把截图边缘裁掉，而截图里常常正是边界处的信息。
+   背景比普通弹窗更暗（.82 而不是 .42）：截图本身浅色居多，浅底会让人眼抓不住图。 */
+.dshpm-modalLayer.dshpm-lightboxLayer { background:rgba(15,17,21,.82); padding:20px; }
+.dshpm-lightbox { display:flex; flex-direction:column; gap:10px; box-sizing:border-box; max-width:min(1400px, 100%); max-height:100%; min-height:0; }
+.dshpm-lightboxImg { display:block; max-width:100%; max-height:calc(100vh - 96px); width:auto; height:auto; margin:0 auto; object-fit:contain;
+  border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-2,#fff); box-shadow:var(--dsw-elevation-prominent,0 0 0 .5px #00000029, 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d); }
+.dshpm-lightboxBar { display:flex; align-items:center; gap:12px; justify-content:flex-end; box-sizing:border-box; padding:0 2px; color:var(--dsw-alias-label-secondary,#61666b); font-size:.93em; }
+/* 浮层在深色遮罩上：这里的链接与关闭键要用浅色，否则在 .82 的黑底上几乎看不见。
+   注意不能只改 .dshpm-link 的全局色 —— 详情卡里那个链接还在白底上。 */
+.dshpm-lightboxLayer .dshpm-link { color:var(--dsw-alias-bg-layer-1,#fff); }
+.dshpm-lightboxLayer .dshpm-iconBtn { color:var(--dsw-alias-bg-layer-1,#fff); }
+.dshpm-lightboxLayer .dshpm-iconBtn:hover { background:rgba(255,255,255,.16); }
 .dshpm-tag { border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:999px; padding:1px 8px; font-size:.93em; color:var(--dsw-alias-label-secondary,#61666b); }
 .dshpm-code { display:block; box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid var(--dsw-alias-border-l1,#0000000a); border-radius:var(--dsw-radius-md,12px); background:var(--dsw-alias-bg-layer-2,#fff); color:var(--dsw-alias-label-primary,#0f1115); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.93em; overflow-wrap:anywhere; }
 .dshpm-link { color:var(--dsw-alias-brand-primary,#4176e6); text-decoration:none; display:inline-flex; align-items:center; gap:4px; }
@@ -2821,22 +2858,39 @@ function errorCopy(error) {
      */
     function PluginDetailCard(props) {
       var item = props.item;
-      return el("article", {
-        className: "dshpm-card dshpm-detailCard",
-        "data-detail-for": item.id || item.name
-      },
-        el("div", { className: "dshpm-detailCardHead" },
-          el("h3", { className: "dshpm-detailCardName" }, item.name || item.id),
-          el("span", { className: "dshpm-cardOwner" }, "@" + (item.owner || "")),
-          el("button", {
-            type: "button",
-            className: "dshpm-iconBtn dshpm-detailCardClose",
-            title: t("action.hideDetails"),
-            "aria-label": t("action.hideDetails"),
-            onClick: function () { props.onClose(); }
-          }, el(IconClose, { size: 14 }))
+      // 全屏截图的状态放在这层：它是详情卡的最外层可交互容器，
+      // PluginDetails 只是渲染函数、不该自己持有跨节点的浮层状态。
+      var shotState = React.useState(null);
+      var shot = shotState[0];
+      var setShot = shotState[1];
+      return el(React.Fragment, null,
+        el("article", {
+          className: "dshpm-card dshpm-detailCard",
+          "data-detail-for": item.id || item.name
+        },
+          el("div", { className: "dshpm-detailCardHead" },
+            el("h3", { className: "dshpm-detailCardName" }, item.name || item.id),
+            el("span", { className: "dshpm-cardOwner" }, "@" + (item.owner || "")),
+            el("button", {
+              type: "button",
+              className: "dshpm-iconBtn dshpm-detailCardClose",
+              title: t("action.hideDetails"),
+              "aria-label": t("action.hideDetails"),
+              onClick: function () { props.onClose(); }
+            }, el(IconClose, { size: 14 }))
+          ),
+          el(PluginDetails, {
+            item: item,
+            onCopy: props.onCopy,
+            copied: props.copied,
+            onZoomShot: function (src, alt) { setShot({ src: src, alt: alt || "" }); }
+          })
         ),
-        el(PluginDetails, { item: item, onCopy: props.onCopy, copied: props.copied })
+        // 浮层挂成兄弟节点（Fragment 的第二项）而不是 article 的子节点：
+        // 与重启弹窗同一套约定，避免成为任何被几何断言盯着的容器的子项。
+        shot
+          ? el(ScreenshotLightbox, { shot: shot, onClose: function () { setShot(null); } })
+          : null
       );
     }
 
@@ -2887,17 +2941,18 @@ function errorCopy(error) {
     }
 
     /**
-     * 截图缩略图：**加载失败要降级成链接，不能留一张破图**。
+     * 截图缩略图：点一下**全屏看**（用户要求），加载失败降级成可点链接。
      *
-     * 现实约束（实测，不是推测）：截图只允许 GitHub 自家 host（上游白名单），
-     * 而 `raw.githubusercontent.com` 在国内网络下**经常直接连不上**
-     * （本机 2026-10-18 实测 HEAD 请求全部 fetch failed，与 GitHub 直连被 reset 同因）。
-     * 也就是说「数据合规」和「用户能看到」是两件事。
+     * 为什么要全屏：详情卡里的缩略图再怎么放大也只有 320px，而截图里是界面/图表，
+     * 经常要看清一行字或一条曲线。再点一次开原图会离开市场页面，全屏浮层则原地放大、
+     * Esc 就回来，不打断浏览。
      *
-     * 处理：onError 时把这一个格子换成「打开原图」链接。这样：
-     *   · 能连的环境照常看到图；
-     *   · 连不上的环境得到一个可点的链接（用户可自己挂代理/换网络），而不是一张破图占位；
-     *   · 绝不因为图挂了就把整个详情区搞乱（只影响那一个格子）。
+     * 全屏浮层复用现有 `.dshpm-modalLayer` 的那套约定（fixed 覆盖层 + Esc + 点遮罩关闭 +
+     * role=dialog/aria-modal），不另造一套——它的 z-index 与「不能挡住必须点的东西」这条
+     * 规则都是现成验证过的（见 .dshpm-top 的注释：回顶按钮 55 < 通知条 60 < 弹层 70）。
+     *
+     * 加载失败时**不给全屏**（那会打开一个空浮层），直接给原图链接：
+     * 图床（GitHub raw）在国内时通时断，实测一轮 9/12 成功。
      */
     function ScreenshotThumb(props) {
       var failedState = React.useState(false);
@@ -2912,14 +2967,89 @@ function errorCopy(error) {
           title: props.src
         }, t("detail.screenshotFailed"));
       }
-      return el("img", {
+      return el("button", {
+        type: "button",
+        className: "dshpm-shotBtn",
+        title: t("detail.screenshotZoom"),
+        "aria-label": t("detail.screenshotZoom"),
+        onClick: function () { props.onZoom(props.src, props.alt); }
+      }, el("img", {
         className: "dshpm-shot",
         src: props.src,
         loading: "lazy",
         referrerPolicy: "no-referrer",
         alt: props.alt,
         onError: function () { setFailed(true); }
-      });
+      }));
+    }
+
+    /**
+     * 截图全屏浮层。
+     *
+     * 关键取舍（与既有弹层一致，别改成别的样子）：
+     *   · `position:fixed` 覆盖层，**不放进 .dshpm-root** —— 否则会成为 root 的直接子项，
+     *     撞上 e2e [8]「任何直接子项都不得被压扁」那条几何断言（.dshpm-modalLayer 的注释里
+     *     记着同一件事）。所以它和重启弹窗一样，挂成 root 的兄弟节点。
+     *   · Esc / 点遮罩关闭：键盘用户必须能退出来，不能只剩鼠标点 × 一条路。
+     *   · 图片 `object-fit:contain` + `max-*:100%`：不裁切、不放大失真，全屏是为了**看清**，
+     *     不是为了铺满。
+     *   · 底部给一个「在浏览器里打开原图」的链接：需要保存/分享时仍有出口。
+     */
+    function ScreenshotLightbox(props) {
+      var shot = props.shot;
+      var layer = React.useRef(null);
+      React.useEffect(function () {
+        function onKey(event) {
+          if (event && (event.key === "Escape" || event.key === "Esc")) props.onClose();
+        }
+        document.addEventListener("keydown", onKey);
+        return function () { document.removeEventListener("keydown", onKey); };
+      }, [props.onClose]);
+      // 打开时把焦点放到关闭键上：键盘用户 Tab 的第一站就是出口。
+      React.useEffect(function () {
+        var node = layer.current;
+        if (node && typeof node.querySelector === "function") {
+          var close = node.querySelector("[data-action='close']");
+          if (close && typeof close.focus === "function") close.focus();
+        }
+      }, []);
+      if (!shot) return null;
+      return el("div", {
+        className: "dshpm-modalLayer dshpm-lightboxLayer",
+        ref: layer,
+        role: "presentation",
+        onClick: function (event) { if (event.target === event.currentTarget) props.onClose(); }
+      },
+        el("div", {
+          className: "dshpm-lightbox",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-label": shot.alt || t("detail.screenshots")
+        },
+          el("img", {
+            className: "dshpm-lightboxImg",
+            src: shot.src,
+            alt: shot.alt || "",
+            referrerPolicy: "no-referrer"
+          }),
+          el("div", { className: "dshpm-lightboxBar" },
+            el("a", {
+              className: "dshpm-link",
+              href: shot.src,
+              target: "_blank",
+              rel: "noreferrer"
+            }, t("detail.screenshotOpen"), el(IconExternal, { size: 11 })),
+            el("button", {
+              type: "button",
+              className: "dshpm-iconBtn dshpm-lightboxClose",
+              "data-action": "close",
+              "aria-label": t("action.clear"),
+              title: t("action.clear"),
+              onClick: props.onClose
+            }, el(IconClose, { size: 16 }))
+          )
+        )
+      );
     }
 
     function PluginDetails(props) {
@@ -2944,7 +3074,8 @@ function errorCopy(error) {
               return el(ScreenshotThumb, {
                 key: src,
                 src: src,
-                alt: t("detail.screenshotsAlt", { name: item.name, index: index + 1 })
+                alt: t("detail.screenshotsAlt", { name: item.name, index: index + 1 }),
+                onZoom: props.onZoomShot
               });
             })))
           : null,

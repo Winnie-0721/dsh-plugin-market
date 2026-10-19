@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.3.2
+
+- **fix(catalog)：目录源全线抓取失败（502 `catalog-unavailable`）—— npm 解压上限 8 MiB 被上游新增文件顶穿。**
+
+  现象：市场整个打不开数据，三个源依次失败，界面报「目录源抓取数据失败」：
+
+  ```
+  npm registry.npmmirror.com : 读取 tarball 失败：Cannot create a Buffer larger than 8388608 bytes
+  npm registry.npmjs.org     : 读取 tarball 失败：Cannot create a Buffer larger than 8388608 bytes
+  awesome-dsh-plugin.com     : 读取响应体失败：The operation was aborted due to timeout
+  ```
+
+  **不是网络问题，是上限被顶穿。** `MAX_TARBALL_BYTES` 量的是**整个 tar 解压后的总长**，
+  不是我们要取的那一个文件：
+
+  | 项 | 值 |
+  |---|---|
+  | tarball 压缩后 | 2,363,900 B |
+  | 解压后 tar 总长 | **9,532,928 B（9.09 MiB）** ← 超过 8 MiB |
+  | 我们要的 `package/plugins.json` | 7,198,658 B（6.87 MiB）✅ 本身没超 |
+
+  顶穿它的是同一个包里我们**从不读**的 `package/index.json`（2,320,845 B）。
+  上游 2026-10-18 `2026.1018.7728` 把 `fileCount` 从 4 加到 5、塞进这个文件，
+  解压总量从 7.21 MiB 一步跳到 9.53 MiB：
+
+  ```
+  10-16  5,796,742  files=4
+  10-17  6,213,609  files=4
+  10-18  7,206,746  files=4   ← 旧版尚可
+  10-18  9,528,364  files=5   ← latest，首次越线
+  ```
+
+  **次生问题**：npm 两条路一挂，官方 URL 兜底根本指望不上——实测该站 10.9 KB/s，
+  7.2 MB 要 ~11 分钟，而 `OFFICIAL_URL_TIMEOUT_MS` 只有 30s。三个源全灭。
+
+  **逻辑倒挂**：压缩侧上限 `MAX_NPM_TARBALL_BYTES = 16 MiB`，解压侧却是 8 MiB ——
+  允许下载 16 MiB 的压缩包，却只准解出 8 MiB，自相矛盾。
+
+  修复：`MAX_TARBALL_BYTES` 8 MiB → **16 MiB**，与压缩侧上限同档。
+  炸弹防护意图完全不变（32 MiB 测试炸弹仍被 `maxOutputLength` 挡在分配之前），
+  只是把一个按「当时 5 MB 目录」拍的数，改成与压缩侧同一量级。
+
+  实测（真跑 `cache.ensure()`）：
+
+  | | 修复前 | 修复后 |
+  |---|---|---|
+  | 结果 | 502 `catalog-unavailable`，42.2s | **ok**，1.19s |
+  | 条目 | — | **5786**（`count` 与 `plugins.length` 一致） |
+
+  回归锚（`verify/robustness.test.mjs`）：钉住 `MAX_TARBALL_BYTES === 16 MiB`，
+  并加不变式 `MAX_TARBALL_BYTES >= MAX_NPM_TARBALL_BYTES` —— 数值被改回去（或压缩侧
+  再被调小到低于解压侧）时测试必须失败，而不是等线上复现。
+  已用变异验证锚不是死代码：把常量改回 8 MiB，基线 9/9 绿、变异 8/9 且
+  **失败在该条断言上**（`+ 8388608 / - 16777216`）。
+
+  **上限再被逼近时的正确解法是改流式解压、读到目标条目即停**，而不是继续抬这个数——
+  上限越高，同步 `gunzipSync` 对宿主事件循环的代价越大。已写入 `docs/API-CONTRACT.md`。
+
 ## 1.3.1
 
 - **fix(ci)：npm 发布永远 ENEEDAUTH —— 由 `workflow_call` 复用改为「publish-npm.yml 自己被标签触发」。**

@@ -25,8 +25,8 @@ export const DEFAULT_NPM_REGISTRIES = ['https://registry.npmmirror.com', 'https:
 /**
  * 响应体上限（审查任务 1）：packument 是纯元数据，实测 deepseek-harness-market
  * 的完整 packument 约 23 KB（0.02 MiB），2 MiB 是约 90 倍余量；
- * 目录 tarball 里装的是 plugins.json（实测 5.05 MiB、gzip 后 1.21 MiB），
- * 压缩体积必然小于解压后的 8 MiB 上限（MAX_TARBALL_BYTES），16 MiB 足够宽。
+ * 目录 tarball 里装的是 plugins.json（实测 8 MiB 级、gzip 后 2.4 MiB），
+ * 压缩体积必然小于解压后的 16 MiB 上限（MAX_TARBALL_BYTES），16 MiB 足够宽。
  * 超限 = **该源失败**、进 attempts、继续下一个源——绝不拿被截断的字节去做 integrity 校验。
  */
 export const MAX_NPM_METADATA_BYTES = 2 * 1024 * 1024
@@ -268,10 +268,16 @@ export function fileFromTarBuffer(buffer, wanted) {
  *  是**同一份元数据**给的——一个恶意/被劫持的镜像可以自洽地声明一个「压缩 255 KiB、
  *  解压 256 MB」的炸弹，integrity 校验照样通过（它校验的是压缩字节），
  *  然后在**宿主事件循环**上同步吃掉 256 MB；再大就直接 OOM 掉整个 DSH 进程。
- *  这里按「目录 tarball 绝不可能超过 8 MB」设上限：正常目录的 tarball 只有几十 KB，
- *  8 MB 留了 100 倍余量，同时把炸弹挡在分配之前。
- *  独立审计实测：255 KiB → 256 MB（`p49_gzipbomb.mjs`）。 */
-export const MAX_TARBALL_BYTES = 8 * 1024 * 1024
+ *  独立审计实测：255 KiB → 256 MB（`p49_gzipbomb.mjs`）。
+ *
+ *  **上限 = 整个 tar 解压后的总长，不是我们要取的那个文件**，所以它必须按整个包来定。
+ *  2026-10-18 上游在同一个包里新增了 `package/index.json`（2,320,845 B，我们从不读），
+ *  解压总量从 7.21 MiB 一步跳到 9.53 MiB，顶穿了原来的 8 MiB —— 三个源全灭、市场空白，
+ *  而真正要的 `plugins.json` 只有 6.87 MiB、离上限还有余量。
+ *  取 16 MiB：与压缩侧的 `MAX_NPM_TARBALL_BYTES` 同档（允许下 16 MiB 压缩包却只准解 8 MiB
+ *  是自相矛盾的），对当前 9.53 MiB 留 1.7× 余量，仍远小于能 OOM 的量级。
+ *  增长若再次逼近，正确解法是**改流式解压、读到目标条目即停**（见 `docs/API-CONTRACT.md`）。 */
+export const MAX_TARBALL_BYTES = 16 * 1024 * 1024
 
 export function fileFromTarball(gzipBytes, wanted) {
   return fileFromTarBuffer(gunzipSync(gzipBytes, { maxOutputLength: MAX_TARBALL_BYTES }), wanted)

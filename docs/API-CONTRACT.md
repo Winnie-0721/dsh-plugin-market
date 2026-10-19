@@ -738,8 +738,9 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
   （`{count:1.5, plugins:[{}]}`）。合法的 `count:0` 空目录仍然放行。
 - **npm 源解压必须有输出上限**（v1.2.0）：`gunzipSync` 默认不限长，而 `dist.integrity` 来自
   **同一份元数据**，挡不住「自洽地声明 255 KiB 压缩 / 256 MB 解压」的炸弹；解压又是**同步**
-  跑在宿主事件循环上，再大就 OOM 掉整个进程。按 `maxOutputLength = 8 MiB` 限制
-  （正常目录 tarball 只有几十 KB）。
+  跑在宿主事件循环上，再大就 OOM 掉整个进程。按 `maxOutputLength = MAX_TARBALL_BYTES` 限制。
+  **该上限量的是整个 tar 解压后的总长，不是我们取的那一个文件**，所以必须按整包定；
+  16 MiB（2026-10-19 由 8 MiB 上调，见下）。
 - **所有外部响应都有硬性字节上限**（审查 TASK-01 第一步；`lib/http-body.js` 的 `readBoundedBody`）：
   超时限制的是**时间**不是**字节数**，坏源在超时前持续喂数据就能把任意大的正文吸进常驻进程；
   上面那条 gzip 上限只管**解压后**，管不到压缩字节在 `arrayBuffer()` 阶段的分配。
@@ -751,12 +752,20 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
   |---|---|---|---|
   | 目录 JSON | 5.05 MiB（4412→4765 条，每日增长） | **16 MiB** | ~3× |
   | npm packument | ~23 KB | **2 MiB** | ~90× |
-  | npm tarball（压缩） | 1.21 MiB（gzip） | **16 MiB** | 解压上限 8 MiB 保留 |
+  | npm tarball（压缩） | 2.25 MiB（gzip） | **16 MiB** | 解压上限 16 MiB（同档） |
+  | npm tarball（解压） | 9.09 MiB（含 2.21 MiB 的 index.json） | **16 MiB** | ~1.7× |
   | GitHub 线路 JSON/文本 | 2.8–53 KB | **4 MiB** | ~80× |
   | GitHub 线路二进制 | 0.18 MiB | **32 MiB** | ~180× |
   兼容理由：上限必须**大于现值且大于其增长**（目录取 3×，避免正常增长多年后误伤），
   又必须**小到不可能 OOM**。`readBoundedBody` 的降级分支（无 `.body` 流的响应替身）
   只能拒收、防不住分配——真实宿主走流式主分支。
+  **2026-10-18 越界事故（已修）**：上游在同一 tar 里新增 `package/index.json`（2,320,845 B，
+  我们从不读），解压总量 7.21 MiB → 9.53 MiB 顶穿当时的 8 MiB 上限；压缩侧允许 16 MiB
+  而解压侧只准 8 MiB 本身就不自洽。三个源依次失败（两个 npm 报 `Cannot create a Buffer
+  larger than 8388608 bytes`，官方 URL 实测 10.9 KB/s、30s 内取不完 7.2 MB），市场整体
+  502 `catalog-unavailable`。上调到 16 MiB 后实测恢复（`count=5786`）。
+  **增长再次逼近时的正确解法**是改**流式 gunzip + tar 遍历、读到目标条目即停**，
+  而不是继续抬这个数——上限抬得越高，同步解压对宿主事件循环的代价越大。
 - **npm tarball 的 URL 与每一跳重定向必须过闸**（审查 TASK-01 第二步；`validateRemoteTarget`）：
   `dist.tarball` 是**元数据里的字符串**，以前被直接 fetch 且 `redirect:'follow'` 盲从每一跳；
   被污染/恶意的镜像可让宿主去请求非预期目标（`file:`/`data:` 协议、带 userinfo 的 URL、

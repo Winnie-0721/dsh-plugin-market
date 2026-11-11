@@ -216,9 +216,17 @@ Query 参数（全部可选，未知参数忽略）：
 
 ```json
 { "name": "AnonyJcy/dsh-j-space", "spec": "@anonyjcy/dsh-j-space",
-  "requestId": "uuid-可选", "approvedBuilds": ["sharp"], "kind": "update" }
+  "requestId": "uuid-可选", "approvedBuilds": ["sharp"], "kind": "update",
+  "async": true }
 ```
 
+- **`async`（v1.3.5，可选）**：显式 `true` 时**请求受理即返回**，真正的 pnpm 在宿主后台跑，
+  结果靠 `GET /install-jobs` 追（§2.11）。**不传时行为与 v1.3.4 完全一致**（等到底再回）——
+  这是接口形状的变化，不该让不知道它的调用方突然收到 202。
+  **校验仍在前台**：参数缺失、不在目录、重名、不允许安装等 `4xx` 一律当场返回，不进队列。
+  **状态码区分「有没有真的新起作业」**（真机实测后修正）：
+  `202` = 新起了一个作业（去追结果）；`200` = 没有新起——已在队列里（`deduped`）
+  或刚装好过（`alreadyDone`）。把后两者也说成「已受理」是撒谎：客户端会以为又要等一轮。
 - `spec` 可省略：服务端按 `name`（目录 id 或 npm 名，大小写不敏感）在目录里查 `spec`。
 - `spec` 显式给出时必须在目录里存在（等于某个条目的 `spec`、`npm` 或 `url`），否则 `400 not-in-catalog`（安全约束：只允许装目录内的插件）。
 - **`kind`（v1.3.0，可选）**：`"install"` 或 `"update"`。客户端把「更新到 x.y.z」标成 `"update"`。
@@ -378,6 +386,69 @@ Query 参数（全部可选，未知参数忽略）：
 回归：`verify/hot-mount.test.mjs`（34）、`verify/hot-mount-attempt.test.mjs`（22，判定胶水）、
 `verify/hot-mount-client.test.mjs`（14，文案与横幅）；变异测试 24/24 被杀（`_verify/hot-mount-mutation.mjs`）；
 真机实验 13/13（`_verify/probe-hot-mount.ps1`，在真宿主里挂上一个夹具插件并卸载）。
+
+### 2.11 安装作业（v1.3.5）：`GET /plugin-market/install-jobs` · `POST /plugin-market/install-jobs/cancel`
+
+**为什么有这一层**：宿主的 `installBundle(spec, { requestId })` 本来就是**发起式**的——
+一进函数就把 `control` 登记进 `this.installs`（`dsh-plugin-manager/lib/index.js:2720`）
+并返回 result promise，另有 `waitForInstall(requestId)` 取结果、`cancelInstall` 取消。
+**异步能力宿主早就给了，是市场这一层把它 await 在 HTTP 请求里**：点一个插件要等 pnpm
+跑完才回来，期间那次请求挂着；换个插件装，界面上只有一个「安装中」，且客户端 `busyKey`
+只存一个 key，第二个按钮根本不转圈。
+
+**并发安全吗**：安全。宿主的 `change()` 用 `withFileLock(<profile>/package.json, …)`
+把整个安装过程（pnpm + 应用 + reload）包住，多个安装并发提交不会写坏 profile——
+它们在**宿主侧排队**。所以队列解决的不是「防写坏」（宿主已经防了），而是两件事：
+① HTTP 不再等 pnpm；② 状态可查（刷新页面、切页签后再回来，进度与结果都还在）。
+
+**诚实边界（不许把「排队」说成「同时在装」）**：
+- 队列同时只**推进**一个（`concurrency` 默认 1）。看起来像退回串行，但这正是宿主的行为——
+  并发提交只会让它们在 `withFileLock` 外面排队，而排队的那几个**没有任何进度可言**
+  （pnpm 根本没启动）。由我们这一侧排队，才能给每个作业一个诚实的 `queued`。
+- 作业只活在**当前进程**内存里；宿主重启后全部消失。这是刻意的：重启后 pnpm 子进程
+  已不归我们管，把旧作业说成「还在进行」是撒谎。客户端拿到「作业不存在」要说清。
+
+`GET /install-jobs` → `{ ok:true, active:[job…], finished:[job…] }`
+（`active` 未完成、按提交顺序；`finished` 已结束、新→旧）。
+
+作业形状（**只有这些字段**，客户端可依赖）：
+
+```json
+{ "id": "uuid", "key": "AnonyJcy/dsh-j-space", "name": "…", "label": "…",
+  "spec": "@anonyjcy/dsh-j-space@1.2.3", "kind": "install",
+  "state": "queued|running|succeeded|failed|cancelled",
+  "queuedAt": "ISO", "startedAt": "ISO|null", "finishedAt": "ISO|null",
+  "cancelRequested": false, "approvedBuilds": [],
+  "result": { "…就是 §2.4 的响应体…" } , "error": null }
+```
+
+- `result` 只在 `succeeded` 时非空，内容**就是 §2.4 那份响应体**——客户端渲染路径不用改。
+- `state` 是 **作业**状态，不是应用结果。`pendingBuilds` 非空时作业仍是 `succeeded`
+  （runJob 跑完了），"还在等你批准" 是 `result.pendingBuilds` 的事——两者不能混。
+- `cancelRequested:true` 不等于已取消：宿主可能回 `too-late`。
+
+`POST /install-jobs/cancel` 请求 `{ "id": "uuid" }` → `{ ok:true, status, job }`：
+
+| status | 含义 |
+|---|---|
+| `cancelled` | 排队中 → **立刻**取消，`runJob` 从未被调用；或宿主确认已中止 |
+| `too-late` | 已进入应用阶段，停不下来。**如实回，不许假装取消** |
+| `not-running` | 宿主那边已经没有这个 requestId |
+| `already-finished` | 刚好装完（`ok:true`，不是错误——客户端把这条从队列拿掉即可） |
+
+404 `job-not-found`（宿主可能重启过）；429 `too-jobs` 见下。
+
+**上限与清理**：未完成作业上限 24（`MAX_ACTIVE_JOBS`，超出 `429 too-many-jobs`）；
+已完成保留 30 分钟（`FINISHED_JOB_TTL_MS`）且最多 40 条。
+
+**去重**：同一个包（按目录条目 id）已有未完成作业 ⇒ 返回**那一个**（`deduped:true`），
+不排两次队；刚成功过且 **spec 完全一致** ⇒ `deduped:true, alreadyDone:true`
+（不重跑一遍 pnpm）。spec 变了（=真的升级）则正常排队——升级不能被去重吞掉。
+
+**客户端契约**：`POST /install { async:true }` → 立刻 202 → 轮询 `/install-jobs`
+（前 10s 每 500ms，之后 1.5s，出错退到 3s）→ 终态后走**与同步路径完全相同**的收尾
+（`handleInstallResult`：pendingBuilds 保留确认条 / restart 弹窗 / 批量 defer）。
+挂载时拉一次 `/install-jobs` 并重新订阅 `active` 里的作业——**刷新页面不丢进度**。
 
 ### 2.5 `POST /plugin-market/remove`
 
@@ -720,14 +791,17 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
 源的选择顺序（每个源只尝试一次，源列表本身就是重试）：
 
 1. `DSHM_REGISTRY_URL` 非空 → **只**用该 URL 一个源（用户指定自己的目录时不允许悄悄回退到我们的源）。
-2. 否则按顺序：`https://registry.npmmirror.com` 上的 npm 包 `dsh-plugin-catalog` → `https://registry.npmjs.org` 上的同一包 → `https://awesome-dsh-plugin.com/plugins.json`。
+   若该地址**看起来是分片清单**（路径以 `/catalog.json` 结尾），走分片路径；否则按单片 `plugins.json` 处理。
+2. 否则按顺序：**分片源** `https://awesome-dsh-plugin.com/catalog.json` → `https://registry.npmmirror.com` 上的 npm 包 `dsh-plugin-catalog` → `https://registry.npmjs.org` 上的同一包 → 单片 `https://awesome-dsh-plugin.com/plugins.json`。
    - npm 候选注册表在 `DSHM_NPM_MIRROR` 非空时只取该值。
    - 理由（实测）：本机直连时官方源 25s 超时或 35s 才通；npmmirror 的包元数据 97ms、tarball（1.21MB gzip）下载 + 解压 291ms。这与 dsh-market 自己的区域路由一致。
+   - 分片源排第一的理由：它是同一份目录的**更小传输形态**（单片 2 MiB × 24 对 12.9 MiB 单体），弱网下前者能成、后者超时；且清单带每片 sha256，可做增量。**它 404 时按 `no-manifest` 失败并继续下一个源**，所以上游还没跑发布脚本时行为与以前完全一致（v1.3.4 实测：分片 404 → 回退 npm → 2.1s 取到 10,365 条）。
 
 单个源的做法：
 
+- **分片源**（v1.3.4 起，format 2）：`GET <base>/catalog.json`（32 KiB 上限）→ 校验清单 → **有界并发**（6）拉 `<base>/shards/<id>.<part>.json`（每片 8 MiB 上限、20s 超时）→ 每片先验 sha256 再解析 → 按清单顺序拼装 → 核对总条数。详见 §3.10。
 - **URL 源**：`GET <url>`，超时 30s，校验响应必须是 JSON 对象、`plugins` 为数组、`count` 为数字；拒绝 HTML（含 `<html`）或非 JSON 正文。
-- **npm 源**：`GET <registry>/dsh-plugin-catalog/latest`（15s）→ 读 `version` / `dist.tarball` / `dist.integrity`；`GET dist.tarball`（30s）→ gzip 字节；`dist.integrity` **必填**（v1.1.6 起）——元数据本身也来自网络，只信「元数据说没问题」等于没校验，缺字段即整源失败并退到下一个源；不匹配即该源失败。`node:zlib` 解压后用最小 USTAR 解析取出包内 `package/plugins.json`，**`trimStart()` 后再 `JSON.parse`**（包内文件可能带 UTF-8 BOM；URL 那条路走 `response.text()` 已被 fetch 规范自动剥掉，只有这里需要显式处理），再做同样的 JSON 结构校验。
+- **npm 源**：`GET <registry>/dsh-plugin-catalog/latest`（15s）→ 读 `version` / `dist.tarball` / `dist.integrity`；`GET dist.tarball`（30s）→ gzip 字节；`dist.integrity` **必填**（v1.1.6 起）——元数据本身也来自网络，只信「元数据说没问题」等于没校验，缺字段即整源失败并退到下一个源；不匹配即该源失败。解压**边解边扫、读到 `package/plugins.json` 即停**（`readTarballEntry`，v1.3.2 起；理由见下条），**`trimStart()` 后再 `JSON.parse`**（包内文件可能带 UTF-8 BOM；URL 那条路走 `response.text()` 已被 fetch 规范自动剥掉，只有这里需要显式处理），再做同样的 JSON 结构校验。
 - **内容校验交叉核对条数**（v1.1.6；v1.2.0 补漏）：除「对象 + `plugins` 数组 + `count` 数字」外，
   还要求 `count` 是 **≥0 的整数**，且 `plugins.length` 与该 `count` 相差不超过容差
   （`count>0` 而 `plugins` 为空一律拒绝）。否则结构合法但被截断/清空的正文会以
@@ -739,33 +813,51 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
 - **npm 源解压必须有输出上限**（v1.2.0）：`gunzipSync` 默认不限长，而 `dist.integrity` 来自
   **同一份元数据**，挡不住「自洽地声明 255 KiB 压缩 / 256 MB 解压」的炸弹；解压又是**同步**
   跑在宿主事件循环上，再大就 OOM 掉整个进程。按 `maxOutputLength = MAX_TARBALL_BYTES` 限制。
-  **该上限量的是整个 tar 解压后的总长，不是我们取的那一个文件**，所以必须按整包定；
-  16 MiB（2026-10-19 由 8 MiB 上调，见下）。
+- **两个上限必须分开，别再把它们混成一个**（v1.3.2 起，2026-11-10）：
+  - `MAX_CATALOG_PAYLOAD_BYTES`（64 MiB）＝**目录载荷自己**能有多大。URL 源与 npm 源读的是
+    同一份 `plugins.json`，所以 `catalog.js` 的 `MAX_CATALOG_JSON_BYTES` 直接引用它，
+    不另立一套。这是「市场能不能用」的判据。
+  - `MAX_TARBALL_BYTES`（96 MiB）＝**解压预算**，只做炸弹防护，量化「一次解压最多放出多少
+    字节」。它必须 ≥ 载荷上限（目标条目最大就到载荷上限）。
+  - **历史教训**：把「整包解压总长」当成判据，等于让上游**我们从不读的文件**
+    （`package/index.json`）决定市场能不能打开。10-18 越界后靠 8→16 MiB 抬数解决，
+    三周后 11-10 再次被顶穿（解压总量 16.14 MiB），三个源全灭。所以**判据改成目标条目**，
+    tarball 侧的数字退回去只做炸弹防护。
+  - **读取方式跟着一起改**：`readTarballEntry` = `Readable.from(256 KiB 分片).pipe(createGunzip())`
+    + 增量 USTAR 扫描，**读到目标条目就 `break`**——后面的字节根本不解压、不分配。
+    实测：目标在前、尾部 40 MiB 垃圾时，8 MiB 预算也能成功取到；目标在预算之外时
+    仍然是 `too-large`（炸弹防护没被削弱）。`fileFromTarball`（同步整包）保留给
+    **已知的小产物**（自更新 tarball 0.18 MiB），目录那条 13 MiB+ 的路不再用它。
 - **所有外部响应都有硬性字节上限**（审查 TASK-01 第一步；`lib/http-body.js` 的 `readBoundedBody`）：
   超时限制的是**时间**不是**字节数**，坏源在超时前持续喂数据就能把任意大的正文吸进常驻进程；
   上面那条 gzip 上限只管**解压后**，管不到压缩字节在 `arrayBuffer()` 阶段的分配。
   三条语义：**Content-Length 只用于提前拒绝、绝不被信任**（可能缺失/撒谎 ⇒ 实际读取字节必须计数，
   超限就**停**）；**停止后取消剩余正文**（不取消则连接挂到超时）；**超限 = 该源失败**
   （`kind:'too-large'`、进 attempts、继续下一个源），绝不把超限正文当成空目录。
-  上限按 2026-10-16 本机真实测量定，并留可解释的余量：
+  上限按真实测量定，并留可解释的余量（2026-11-10 复测）：
   | 载荷 | 实测 | 上限 | 余量 |
   |---|---|---|---|
-  | 目录 JSON | 5.05 MiB（4412→4765 条，每日增长） | **16 MiB** | ~3× |
-  | npm packument | ~23 KB | **2 MiB** | ~90× |
-  | npm tarball（压缩） | 2.25 MiB（gzip） | **16 MiB** | 解压上限 16 MiB（同档） |
-  | npm tarball（解压） | 9.09 MiB（含 2.21 MiB 的 index.json） | **16 MiB** | ~1.7× |
+  | 目录 JSON（`plugins.json`，两条源共用） | **12.30 MiB**（9,714 条，+0.25 MiB/天） | **64 MiB** | ~5.2×（约 7 个月） |
+  | npm packument | ~259 KB（全量 127 个版本） | **2 MiB** | ~8× |
+  | npm tarball（压缩） | **4.13 MiB**（gzip，+0.09 MiB/天） | **16 MiB** | ~4 个月 |
+  | npm tarball（解压预算） | 16.14 MiB（含 4.01 MiB 我们不读的 `index.json`） | **96 MiB** | 载荷 64 MiB + 32 MiB |
   | GitHub 线路 JSON/文本 | 2.8–53 KB | **4 MiB** | ~80× |
   | GitHub 线路二进制 | 0.18 MiB | **32 MiB** | ~180× |
-  兼容理由：上限必须**大于现值且大于其增长**（目录取 3×，避免正常增长多年后误伤），
-  又必须**小到不可能 OOM**。`readBoundedBody` 的降级分支（无 `.body` 流的响应替身）
-  只能拒收、防不住分配——真实宿主走流式主分支。
+  兼容理由：上限必须**大于现值且大于其增长**，又必须**小到不可能 OOM**。
+  `readBoundedBody` 的降级分支（无 `.body` 流的响应替身）只能拒收、防不住分配——
+  真实宿主走流式主分支。
   **2026-10-18 越界事故（已修）**：上游在同一 tar 里新增 `package/index.json`（2,320,845 B，
   我们从不读），解压总量 7.21 MiB → 9.53 MiB 顶穿当时的 8 MiB 上限；压缩侧允许 16 MiB
   而解压侧只准 8 MiB 本身就不自洽。三个源依次失败（两个 npm 报 `Cannot create a Buffer
   larger than 8388608 bytes`，官方 URL 实测 10.9 KB/s、30s 内取不完 7.2 MB），市场整体
   502 `catalog-unavailable`。上调到 16 MiB 后实测恢复（`count=5786`）。
-  **增长再次逼近时的正确解法**是改**流式 gunzip + tar 遍历、读到目标条目即停**，
-  而不是继续抬这个数——上限抬得越高，同步解压对宿主事件循环的代价越大。
+  **2026-11-10 越界事故（本次）**：同一个 `index.json` 长到 4,014,133 B，`plugins.json`
+  从 6.87 → 12.90 MiB，解压总量 **16,925,696 B（16.14 MiB）**顶穿 16 MiB，市场再次整体
+  502（`Cannot create a Buffer larger than 16777216 bytes`）。修复见上一条——**不是再抬一个
+  数，而是换判据 + 改流式**。实测恢复：npm 源 966 ms、`count=9714`、整条 `refresh()` 865 ms。
+  **这条线的下一步**（不是现在做）：`plugins.json` 单体 12.9 MiB 且每天 +0.25 MiB，
+  迟早要由**数据发布侧**分页/拆片（按分类或字母分片 + 清单），客户端按需取；
+  继续抬 `MAX_CATALOG_PAYLOAD_BYTES` 只是把问题推给下一个季度。
 - **npm tarball 的 URL 与每一跳重定向必须过闸**（审查 TASK-01 第二步；`validateRemoteTarget`）：
   `dist.tarball` 是**元数据里的字符串**，以前被直接 fetch 且 `redirect:'follow'` 盲从每一跳；
   被污染/恶意的镜像可让宿主去请求非预期目标（`file:`/`data:` 协议、带 userinfo 的 URL、
@@ -792,8 +884,73 @@ GitHub 源码归档也只走规范 codeload 地址，让 pnpm 的完整性策略
 
 - 内存缓存：`{ source, updated, count, categories, plugins, fetchedAt, stale }`，TTL 10 分钟；并发抓取共用同一个 in-flight Promise。
 - 失败后的短冷却只影响自动抓取节奏，不改变错误结果；`/refresh` 绕过冷却。
-- `source` 是实际命中的源字符串：npm 源形如 `npm:dsh-plugin-catalog@<version> (registry.npmmirror.com)`，URL 源就是该 URL。
+- `source` 是实际命中的源字符串：npm 源形如 `npm:dsh-plugin-catalog@<version> (registry.npmmirror.com)`，URL 源就是该 URL，分片源就是清单 URL。
 - 只向源发送 GET，不带任何凭据；不写磁盘。
+
+### 3.10 目录分片协议（format 2，v1.3.4 起）
+
+**为什么存在**：`plugins.json` 单体 12.90 MiB、约 +0.25 MiB/天（2026-11-11 实测 9,714 条，
+11-11 已 10,365 条）。v1.3.3 把解压改成流式、上限提到 64 MiB，那只是**买时间**——
+单体 JSON 会撞上任何上限，而每次撞上都是「整个市场打不开」（10-18、11-10 两次都是这个形状）。
+分片把「一次失败 = 全部失败」变成「一次失败 = 一个分类」，并让客户端**只取变化的片**。
+
+**三个文件**（全部 UTF-8 JSON）：
+
+```
+catalog/catalog.json              清单：{ format:2, kind:"catalog-manifest", count, categories, updated, source, shards:[…] }
+catalog/shards/<id>.<part>.json   分片：{ format:2, kind:"catalog-shard", id, part, count, plugins:[…] }
+```
+
+**为什么按分类切、不按名字首字母**：实测 9,714 条里 `dsh-*` 占 9.96 MiB / 11.04 MiB。
+按首字母切会得到一个 9.96 MiB 的 `d.json`，等于没切。按分类切：23 个分类、最大片 2.19 MiB、
+`ui` 1928 条是最大的一个——而且这个维度正是用户浏览时用的（分类 chips）。
+
+| 常量 | 值 | 管什么 |
+|---|---|---|
+| `SHARD_FORMAT` | 2 | 与旧单片不兼容；不匹配即该源失败，**不猜** |
+| `SHARD_TARGET_BYTES` | 2 MiB | 单片目标。实测切出 24 片、最大 2.00 MiB、清单 5.7 KB |
+| `SHARD_MAX_BYTES` | 8 MiB | 单片硬上限：发布端**不许发**、消费端**拒收** |
+| `SHARD_MAX_ITEMS` | 50,000 | 单片条数上限（真实最大 1,928），防放大 |
+| `MAX_MANIFEST_BYTES` | 32 KiB | 清单响应上限（真实 5.7 KB） |
+| `SHARD_CONCURRENCY` | 6 | 并发拉片数 |
+| `SHARD_TIMEOUT_MS` | 20s | 单片超时（短于整目录 30s：一片拉不动就该尽快判失败） |
+
+**消费端语义（五条，每条都有回归）**：
+
+1. **全有或全无**。任何一片失败 = 整个分片源失败，**绝不返回部分目录**。少两个分类的目录
+   看起来只是「插件变少了」，而它会以 `stale:false` 覆盖好缓存——与 §3 那条
+   「超限不能冒充空目录」是同一条原则，只是规模变大。
+2. **哈希先于解析**。每片先验 sha256（覆盖原始字节）与字节数，**再** `JSON.parse`。
+   解析后再核内容与清单是否自洽（`id`/`part`/`count` 三项）。只验哈希挡不住「自洽的坏数据」，
+   只核内容挡不住「截断/投毒」，两者必须都在。
+3. **路径安全**。分片 id 只允许 `[a-z0-9_-]{1,64}` 且不是 `_`/`-`/`.`/`..`。id 会被拼进 URL，
+   一个 `../` 就能把请求引到别处——远端数据不得决定路径形状。`shardPath()` 是唯一的路径生成处。
+4. **清单先做「能不能按它发请求」的校验**：结构 + 每个 id/part 合法 + 不重复 + 片数上限 +
+   **`count` 必须等于各片条数之和**。最后一条是「缺片」在**发请求之前**就能被发现的唯一判据。
+5. **降级要干净**。清单 404 → `kind:'no-manifest'` → 源列表继续走到 npm / 单片 URL。
+   实测（2026-11-11，上游还没发分片）：分片 404 → 回退 npm → **2.1s 取到 10,365 条**。
+
+**发布端**：`scripts/build-catalog-shards.mjs`。读一份 `plugins.json`，写 `catalog/`：
+
+```bash
+node scripts/build-catalog-shards.mjs --in plugins.json --out catalog
+node scripts/build-catalog-shards.mjs --out catalog --check      # CI：只验已有产物
+```
+
+发布端做三件消费端做不了的事：
+- **写盘后读回来重验**。sha256 是按**字节**算的；内存里验一遍证明不了磁盘上的字节。
+  序列化两次（算清单 / 写盘）中间的任何差异只有读回来重算才发现。
+- **自检自己的清单**（调的就是消费端那个 `validateManifest`）。发布端发出自己都验不过的清单，
+  是「两端漂移」最容易发生的形态。
+- **清掉旧分片**。上一版多出来的片（分类消失、part 变少）留着会在静态站上变成
+  「清单里没有、URL 可访问」的陈旧文件。
+
+**发布端与消费端共用 `lib/catalog-shard.js` 一份定义**——两边各写一套就是下一次
+「清单说 9714 条、客户端拼出 9000 条」的来源。
+
+**已知的下一步（不是现在做）**：清单里的 `sha256` 让「只拉变化的分片」成为可能（客户端可缓存
+旧片、按哈希比对），本版**还没做**这个缓存——每次刷新仍拉全部 24 片（11 MiB，实测 120–200ms）。
+真做起来要落盘缓存 + 版本对账，收益在「每天刷一次」的使用频率下不明显，先不引入复杂度。
 
 ## 4. client 半契约
 

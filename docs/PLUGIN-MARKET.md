@@ -105,27 +105,43 @@ DeepSeek Harness 的插件就是 Cordis 插件，Web GUI 的插件还必须额�
 选择它而不是自己维护一份列表，是因为 dsh-market 的目录也来自同一处，两边看到的是同一份事实。
 
 抓取在 host 半完成（浏览器直接抓会撞 CORS，且需要把重试/缓存/降级放在一处）。源的选择顺序是
-**npm 镜像优先、官方源兜底**：
+**分片优先、npm 镜像其次、官方单片兜底**：
 
-1. `DSHM_REGISTRY_URL` 非空 → 只用它（用户指定自己的目录时不该悄悄回退到我们的源）；
-2. 否则 `https://registry.npmmirror.com` → `https://registry.npmjs.org` 上的 npm 包
-   `dsh-plugin-catalog` → `https://awesome-dsh-plugin.com/plugins.json`；
+1. `DSHM_REGISTRY_URL` 非空 → 只用它（用户指定自己的目录时不该悄悄回退到我们的源）。
+   地址以 `/catalog.json` 结尾 ⇒ 按分片清单处理，否则按单片 `plugins.json`；
+2. 否则 `https://awesome-dsh-plugin.com/catalog.json`（分片）→ `https://registry.npmmirror.com`
+   → `https://registry.npmjs.org` 上的 npm 包 `dsh-plugin-catalog` →
+   `https://awesome-dsh-plugin.com/plugins.json`（单片）；
 3. `DSHM_NPM_MIRROR` 可以替换 npm 候选。
 
-**为什么不是直接用官方源**：官方源挂在 GitHub Pages 上，本机直连实测 25s 超时（偶尔 35s 才通），
+**顺序为什么是这样**：分片是同一份目录的**更小传输形态**（单片 2 MiB × 24 对 12.9 MiB 单体），
+弱网下前者能成、后者超时；清单带每片 sha256，为后续「只拉变化的片」留了余地。
+**但分片清单 404 时会干净地降级**（`kind:'no-manifest'` → 继续下一个源），所以上游还没发布
+分片时行为与以前完全一致——2026-11-11 实测：分片 404 → 回退 npm → **2.1s 取到 10,365 条**。
+
+**为什么还要 npm 镜像**：官方源挂在 GitHub Pages 上，本机直连实测 25s 超时（偶尔 35s 才通），
 而 DSH 只认 `HTTP(S)_PROXY` 环境变量、不读 Windows 系统代理，宿主进程拿不到浏览器那套代理。
-同一份目录发布在 npm 包 `dsh-plugin-catalog` 上，npmmirror 的元数据 97ms、1.21MB gzip 的 tarball
-下载 + 解压 291ms——**289ms 对 25s 超时**。这与 dsh-market 自己的区域路由是同一套做法，不是另起炉灶。
+同一份目录发布在 npm 包 `dsh-plugin-catalog` 上，npmmirror 的元数据 97ms、4.13MB gzip 的 tarball
+下载 + 边解边扫 966ms——**对 25s 超时是压倒性的**。这与 dsh-market 自己的区域路由是同一套做法。
 
 单个源的做法：
 
+- 分片源：`GET <base>/catalog.json`（32 KiB 上限）→ 校验清单（含 `count` 必须等于各片条数之和，
+  这是「缺片」在**发请求之前**唯一能发现的判据）→ **有界并发 6** 拉
+  `<base>/shards/<id>.<part>.json`（每片 8 MiB 上限、20s 超时）→ **每片先验 sha256 再解析**
+  → 按清单顺序拼装 → 核对总条数。**任一片失败即整源失败**，绝不返回「少几片」的部分目录；
 - npm 源：`<registry>/dsh-plugin-catalog/latest`（15s 超时）→ `dist.tarball`（30s）→
   `dist.integrity` 存在时用 `node:crypto` 校验（目录是安装目标的信任锚，必须防篡改）→
-  `node:zlib` 解压 + 最小 USTAR 解析取出包内 `package/plugins.json`；
+  **边解压边扫、读到包内 `package/plugins.json` 即停**（不整包解压：包里还有我们不读的
+  `index.json`，整包预算会让它决定市场能不能打开——10-18 / 11-10 两次事故就是这么来的）；
 - URL 源：直接 GET（30s），校验 JSON 对象 + `plugins` 数组 + 数字 `count`，拒绝 HTML；
 - 每个源只试一次（源列表本身就是重试），全失败且无缓存时 502/504，文案列出依次试过的源与
   `DSHM_REGISTRY_URL` / `DSHM_NPM_MIRROR` 两条出路；有缓存则 200 + `stale: true`；
 - 内存缓存 10 分钟，并发请求共用同一个 in-flight Promise，`/status` 冷启动只读缓存快照、不发网络请求。
+
+**发布分片**由 `scripts/build-catalog-shards.mjs` 完成（读上游 `plugins.json`，写
+`catalog/catalog.json` + `catalog/shards/*`）。协议、不变量与实测数据见
+[API-CONTRACT §3.10](API-CONTRACT.md)。
 
 ## 5. 安全决定
 

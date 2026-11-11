@@ -1,5 +1,243 @@
 # Changelog
 
+## 1.4.0
+
+- **feat(install)：安装改成异步作业队列 —— 不用等一个插件装好才去点下一个。**
+
+  用户原话：「安装可以异步 不用等待一个插件安装好」。查下去发现**异步能力宿主早就给了，
+  是市场这一层把它 await 在 HTTP 请求里**：
+
+  ```js
+  // dsh-plugin-manager/lib/index.js:2720（从 app.asar 抠出来读的，不是猜）
+  installBundle(spec, options) {
+    const requestId = options?.requestId
+    const control = { abort: new AbortController(), phase: 'installing', result: Promise.resolve(null) }
+    if (requestId !== void 0) this.installs.set(requestId, control)   // ← 立刻登记
+    const result = this.change(...)                                    // ← 返回 promise
+    return result.finally(() => { if (requestId !== void 0) this.installs.delete(requestId) })
+  }
+  async waitForInstall(requestId) { return this.installs.get(requestId)?.result ?? null }
+  async cancelInstall(requestId) { … }
+  ```
+
+  也就是说 `installBundle` 一调用就登记 requestId 并返回 promise，另有 `waitForInstall` /
+  `cancelInstall` 两个配套入口。市场却把它 `await` 在 `/install` 里 —— 于是：
+  点一个插件要等 pnpm 跑完（几十秒到几分钟）才回来；期间换个插件装，界面上只有一个「安装中」。
+
+  **并发安全**：宿主的 `change()` 用 `withFileLock(<profile>/package.json, …)` 把整个安装过程
+  包住，多个安装并发提交不会写坏 profile——它们在**宿主侧排队**。所以队列解决的不是「防写坏」
+  （宿主已经防了），而是 ① HTTP 不再等 pnpm；② 状态可查（刷新页面不丢进度）。
+
+  **实现**（新增 `lib/install-jobs.js`，约 300 行）：
+  - `POST /install { async:true }` → **立刻 202** + jobId；**校验仍在前台**（参数/目录/重名/
+    不可装等 4xx 当场返回），只有 pnpm 那段进队列——用户输错包名不该先进队列再失败；
+  - 新增 `GET /install-jobs`（active + finished）、`POST /install-jobs/cancel`；
+  - **不传 `async` 时行为与 v1.3.4 完全一致**（等到底）——接口形状的变化不该让老调用方收到 202。
+
+  **诚实边界**（写进契约 §2.11，不是「异步了就都好了」）：
+  - 队列同时只**推进**一个。看着像退回串行，但这正是宿主的行为：并发提交只会让它们排在
+    `withFileLock` 外面，而排队的那几个 **pnpm 根本没启动**、没有任何进度。由我们排队才能
+    给每个作业一个诚实的 `queued`，而不是让三个都显示「安装中」却只有一个在动；
+  - 作业只活在**当前进程**内存里，宿主重启后全消失。重启后 pnpm 子进程已不归我们管，
+    把旧作业说成「还在进行」是撒谎；
+  - 排队中的能**立刻**取消（`runJob` 从未被调用，有回归钉住）；正在跑的只能转达宿主，
+    可能回 `too-late`（已进入应用阶段）——**如实回，不假装取消**。
+
+  **客户端**：
+  - 安装立刻返回 → 轮询作业（前 10s 500ms，之后 1.5s，出错退到 3s）→ 终态后走
+    **与同步路径完全相同**的收尾（抽成 `handleInstallResult`：pendingBuilds 保留确认条 /
+    restart 弹窗 / 批量 defer）——异步只是一个新的**到达方式**，不该有第二套规则；
+  - **修掉一个真缺陷**：`busyKey` 只存一个 key，装 A 时点 B 会让 A 的卡片当场解除禁用、
+    转圈消失（用户以为装完了又点一次）。并行安装后这个缺陷从「偶发」变「必然」，
+    改成按 key **集合**判（`isBusyKey`），每张卡各自转圈；
+  - 新增队列条：「正在装 N 个：A、B」，**排队中**与**安装中**分开显示（不画成一样），
+    每条可取消；
+  - **刷新页面不丢进度**：挂载时拉一次 `/install-jobs` 并重新订阅 active 里的作业。
+
+  回归（新增 `verify/install-jobs.test.mjs`，**19 条**，注入 `runJob`、不联网）：
+  立刻返回/dejson 去重/alreadyDone/升级不被吞、并发 1 与排队顺序、失败与抛错不冒泡、
+  取消排队必不运行、取消 running 如实转达 too-late、上限与 TTL、宿主重启天然清空、
+  HTTP 视图可 JSON 无损往返。
+  **4 个变异全部被捕获**：不清去重键（2 条失败）、不区分 alreadyDone（1 条）、
+  无并发上限（2 条）、取消后仍推进（测试直接挂住——这本身就是信号）。
+
+  **过程中修掉的两个真问题**：
+  1. `_uncategorized` 式的隐患在这轮又出现一次：样式测试抓到我自己写的队列条 CSS 用了
+     硬编码品牌蓝 `#4d6bfe`、字号 `.84em/.92em` 不在阶梯里、回退值与全表不一致
+     （`#1a1a1a`/`#6b7280`/`#fafafa`）。全部改回令牌与既有阶梯——**测试拦住的，不是我审出来的**。
+  2. 「僵尸文案」检查抓到 `jobs.*` 一加就没人用：说明我一开始只写了文案没写 UI。
+     补上队列条后 9 个键全部被真实引用。
+
+  同步更新：`docs/API-CONTRACT.md` §2.4（async 参数）+ 新增 §2.11（作业协议）。
+
+  **真机验收（2026-11-11，运行中的宿主 1.3.5）**——这一轮是它自己抓出了两个问题：
+
+  | 验收项 | 结果 |
+  |---|---|
+  | `POST /install {async:true}` | **202，29ms**（先前是等 pnpm 跑完才回） |
+  | 真装 dsh-plugin-grill-me | 后台 4.6s 完成，`application:"applied"`，pnpm exit 0 |
+  | 同时提交两个 | 两个请求合计 **172ms** 返回；队列显示 `A:running, B:queued` |
+  | 串行性 | 4.2s + 5.2s，**不重叠**（与宿主 `withFileLock` 一致） |
+  | 三个测试插件卸载 | 全部 `applied`，bundle 回到 **36**，dependencies/bundles/node_modules **零残留** |
+  | 校验错误 | 不存在的插件 → `400 not-in-catalog`，且**队列不变**（校验确实在前台） |
+
+  **真机抓出的问题一（已修）**：去重命中时也回 `202 Accepted`。可那是「已受理」的意思，
+  而 actually 什么都没新起——客户端会以为又要等一轮。改成：`deduped=false → 202`、
+  `deduped=true → 200`，并补一条断言把这两个码的语义钉死。
+
+  **真机抓出的问题二（已修，更重要）**：热挂载会重载插件树，**重载期间新装的包已经落盘**
+  （实测 bundle 36 → 38），而作业队列因模块重载被清空。原本文案是
+  「作业不见了…必要时重装」——**这是让用户把装好的东西再装一遍**。现在改成：
+  作业追丢时**先回读 `/installed` 再说话**——读到了就说「其实已经装好了」（success + 刷新列表），
+  读不到才说「不确定，去看一眼」。三种结论（装好/没装/读不到）分开说，宁可不下结论也不下错结论。
+
+  这条也补了变异验证：把「回读」换成「直接报失败」，断言必须失败。**第一版断言是虚的**
+  （函数定义行也会匹配函数名），收紧成「切出 `if (!found)` 分支再要求里面真的调用」之后才真的能拦住。
+
+
+
+- **feat(catalog)：目录改成分片（format 2）—— 单体 `plugins.json` 不再是一个「迟早会撞上限」的定时炸弹。**
+
+  前一天（v1.3.3）修的是「解压上限被顶穿」，那只是**买时间**。数据本身还在长：
+
+  | 日期 | `plugins.json` | 条数 |
+  |---|---|---|
+  | 2026-10-18 | 6.87 MiB | 5,786 |
+  | 2026-11-09 | 12.30 MiB | 9,714 |
+  | 2026-11-11 | **约 13.0 MiB** | **10,365** |
+
+  约 +0.25 MiB/天。任何单体上限迟早会被撞上，而每次撞上都是「整个市场打不开」——
+  10-18、11-10 两次事故都是这个形状。分片把「一次失败 = 全部失败」变成
+  「一次失败 = 一个分类」，并让客户端具备**只取变化的片**的基础（清单带每片 sha256）。
+
+  **为什么按分类切，不按名字首字母**：实测 9,714 条里 `dsh-*` 占 **9.96 MiB / 11.04 MiB**，
+  按首字母会切出一个 9.96 MiB 的 `d.json`，等于没切。按分类切：23 个分类、
+  **最大片 2.19 MiB**、`ui` 1928 条最大——而且这个维度正是用户浏览用的分类 chips。
+
+  实测切分（真实数据，9,714 条、11.04 MiB）：
+
+  | 项 | 值 |
+  |---|---|
+  | 分片数 | **24** |
+  | 最大分片 | **2.00 MiB**（`ui.1`，`ui` 1928 条切成 2 片） |
+  | 清单 | **5,727 B** |
+  | 构建耗时 | **148ms** |
+  | 消费端组装 | **120–200ms**（24 片、并发 6） |
+
+  **协议**（`lib/catalog-shard.js`，发布端与消费端**共用这一份**）：
+
+  ```
+  catalog/catalog.json              { format:2, kind:"catalog-manifest", count, shards:[{id,part,count,bytes,sha256}] }
+  catalog/shards/<id>.<part>.json   { format:2, kind:"catalog-shard", id, part, count, plugins:[…] }
+  ```
+
+  **消费端五条语义**（`lib/catalog-shard-fetch.js`，每条都有回归）：
+  1. **全有或全无**——任一片失败即整源失败，绝不返回「少几片」的部分目录
+     （部分目录会以 `stale:false` 覆盖好缓存，用户只看到「插件变少了」）；
+  2. **哈希先于解析**——先验 sha256 + 字节数，再 `JSON.parse`，最后核 `id`/`part`/`count`
+     与清单自洽。只验哈希挡不住自洽的坏数据，只核内容挡不住截断；
+  3. **路径安全**——分片 id 只允许 `[a-z0-9_-]{1,64}`，`shardPath()` 是唯一路径生成处
+     （远端数据不得决定请求路径）；
+  4. **清单先验「能不能按它发请求」**——结构 + id/part 合法 + 不重复 + 片数上限 +
+     `count` 必须等于各片条数之和（这是「缺片」在发请求**之前**唯一能发现的判据）；
+  5. **降级要干净**——清单 404 → `no-manifest` → 继续走 npm / 单片 URL。
+
+  **降级实测**（2026-11-11，上游尚未发布分片）：源顺序 `分片 → npm×2 → 单片`，
+  分片 404 后回退 npm，**2.1s 取到 10,365 条**。也就是说：分片源没上线时，行为与以前
+  完全一致——这是一次**没有单点风险的部署**。
+
+  **发布端**：`scripts/build-catalog-shards.mjs`（新增）。
+
+  ```bash
+  node scripts/build-catalog-shards.mjs --in plugins.json --out catalog
+  node scripts/build-catalog-shards.mjs --out catalog --check    # CI
+  ```
+
+  发布端多做三件消费端做不了的事：**写盘后读回来重验**（sha256 按字节算，内存里验不算数）、
+  **自检自己生成的清单**（调的就是消费端那个函数）、**清掉旧分片**（否则静态站上会留下
+  「清单里没有、URL 可访问」的陈旧文件）。
+
+  回归锚（`verify/catalog-shard.test.mjs`，**32 条**，全部不联网、注入 fetch）：
+  切分守恒/顺序、非法 id 拦截、清单 8 类坏输入、分片 5 类坏输入、组装 6 类失败路径、
+  源解析与降级 4 条、与旧格式同形 1 条。
+  变异验证（4 个变异全部被捕获）：
+  - 去掉 `count` 总和核对 → 2 条失败；
+  - 跳过 sha256 → 2 条失败；
+  - 放行任意 id（路径逃逸）→ 4 条失败；
+  - 去掉「任一片失败即整体失败」的唯一判定 → 3 条失败。
+
+  **过程中修掉的两个真问题**（不是文档瑕疵）：
+  1. `_uncategorized` 被自己的 id 正则挡住（以 `_` 开头）—— 真实数据里一旦出现无分类条目，
+     整份目录的切分就会把它全塞进非法 id，发布端直接崩。正则改为允许 `_` 开头、
+     但仍禁止 `_`/`-`/`.`/`..` 这类无意义 id。
+  2. 原本写了「`aborted` 短路」+「`outcomes` 扫描」两道并列的失败判定。变异测试证明
+     **前者是死代码**（单独拿掉它，32 条测试全绿）。已合并成单一判定，并把这个结论写进注释
+     ——留着两条会让下一个人以为两条都在关键路径上。
+
+  **还没做的**：清单里的 sha256 已经足够支撑「只拉变化的分片」，但本版**没有做落盘缓存**，
+  每次刷新仍拉全部 24 片。理由：使用频率是「每天刷一次」，收益不明显，而落盘缓存要引入
+  版本对账与失效逻辑。已写入 `docs/API-CONTRACT.md §3.10` 作为下一步。
+
+
+- **fix(catalog)：市场再次整体 502（`catalog-unavailable`）—— 这次不是抬上限，是换判据：解压改成「边解边扫、读到目标条目即停」。**
+
+  现象与三周前那次一模一样，只是数字变大了：
+
+  ```
+  npm registry.npmmirror.com : 读取 tarball 失败：Cannot create a Buffer larger than 16777216 bytes
+  npm registry.npmjs.org     : 读取 tarball 失败：Cannot create a Buffer larger than 16777216 bytes
+  awesome-dsh-plugin.com     : 读取响应体失败：The operation was aborted due to timeout
+  ```
+
+  **v1.3.2 的修复只是把 8 MiB 抬到 16 MiB，没有换判据，所以三周后又撞同一面墙：**
+
+  | 项 | 10-18（v1.3.1 挂） | 11-10（v1.3.2 挂） |
+  |---|---|---|
+  | tarball 压缩后 | 2,363,900 B | **4,329,837 B** |
+  | 解压后 tar 总长 | 9,532,928 B（9.09 MiB） | **16,925,696 B（16.14 MiB）** |
+  | 其中 `package/index.json`（我们从不读） | 2,320,845 B | **4,014,133 B** |
+  | 我们要的 `package/plugins.json` | 7,198,658 B | **12,897,519 B（9,714 条）** |
+
+  **结构性错误不是数字，是判据**：整包 `gunzipSync` + 单一上限，等于让上游**我们从不读的
+  文件**决定市场能不能打开；而 `plugins.json` 自己还在按 ~0.25 MiB/天 长（9,714 条）。
+  抬到 32/64 MiB 只是把下一次推到几个月后。
+
+  修复：**`readTarballEntry` = `Readable.from(256 KiB 分片).pipe(createGunzip())` + 增量
+  USTAR 扫描，读到 `package/plugins.json` 就 `break`** —— 后面的字节根本不解压、不分配、
+  不校验。两个上限从此各司其职：
+
+  | 常量 | 值 | 管什么 |
+  |---|---|---|
+  | `MAX_CATALOG_PAYLOAD_BYTES` | **64 MiB** | 目录载荷自己多大（URL 源与 npm 源**共用**这同一个数） |
+  | `MAX_TARBALL_BYTES` | **96 MiB** | 解压预算，只做炸弹防护（= 载荷 64 + 32 给包里其它条目） |
+  | `MAX_NPM_TARBALL_BYTES` | 16 MiB | 传输上限（压缩字节），不跟着抬 |
+
+  `catalog.js` 的 `MAX_CATALOG_JSON_BYTES` 改为直接引用 `MAX_CATALOG_PAYLOAD_BYTES`——
+  **两条源读同一份 plugins.json，就不该有两套上限**，那正是这次事故的结构性根因。
+
+  实测（真跑 `cache.refresh()`，走 npm 镜像）：
+
+  | | 修复前 | 修复后 |
+  |---|---|---|
+  | 结果 | 502 `catalog-unavailable`，49.96s | **ok**，865ms |
+  | npm 源单跳 | 失败（966ms 后判该源失败） | **ok，966ms** |
+  | 条目 | — | **9,714**（`count` 与 `plugins.length` 一致） |
+
+  回归锚（`verify/robustness.test.mjs`，新增 `[1b]` 共 7 条 + 改写 2 条）：
+  - 目标条目在前、尾部 40 MiB 垃圾 ⇒ **8 MiB 预算也必须成功**（这条直接钉死本次事故形状）；
+  - 目标在预算之外 ⇒ 仍是 `too-large`（炸弹防护没被流式改造削弱）；
+  - 目标条目超 `maxEntryBytes` ⇒ 在**分配之前**就拒（`too-large`，该源失败继续下一个）；
+  - 增量扫描与 `fileFromTarBuffer` 对同一份 tar **必须取到完全相同的字节**；
+  - gzip 损坏 / 非 tarball / 头 size 非八进制 ⇒ 结构化失败、不抛异常；
+  - `MAX_TARBALL_BYTES >= MAX_CATALOG_PAYLOAD_BYTES` 且 `MAX_CATALOG_JSON_BYTES === MAX_CATALOG_PAYLOAD_BYTES`。
+  - 炸弹测试从 32 MiB 抬到 **128 MiB**（> 96 MiB 预算，构造 136ms），判据不变。
+  已用变异验证锚不是死代码：把 `MAX_TARBALL_BYTES` 改回 16 MiB，`[1b]` 的倒数第二条
+  必然失败（`96 MiB` 断言），而不是等线上复现。
+
+  **下一步（不属于本次修复）**：`plugins.json` 单体 12.9 MiB 且每天 +0.25 MiB，迟早要由
+  数据发布侧**分页/拆片**（按分类或字母分片 + 清单）。继续抬常量只是把事情推给下个季度。
+  已写入 `docs/API-CONTRACT.md`。
+
 ## 1.3.2
 
 - **fix(catalog)：目录源全线抓取失败（502 `catalog-unavailable`）—— npm 解压上限 8 MiB 被上游新增文件顶穿。**

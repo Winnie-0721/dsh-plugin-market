@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { createCatalogCache, MAX_CATALOG_JSON_BYTES } from '../plugin-market/lib/catalog.js'
-import { MAX_NPM_METADATA_BYTES } from '../plugin-market/lib/catalog-npm.js'
+import { MAX_NPM_METADATA_BYTES, MAX_CATALOG_PAYLOAD_BYTES } from '../plugin-market/lib/catalog-npm.js'
 import { readBoundedBody, DEFAULT_MAX_BODY_BYTES } from '../plugin-market/lib/http-body.js'
 
 let passed = 0
@@ -181,7 +181,7 @@ await check('无流、小正文 ⇒ 正常通过（既有离线测试的替身�
 
 await check('默认上限存在且可解释', () => {
   assert.ok(Number.isFinite(DEFAULT_MAX_BODY_BYTES) && DEFAULT_MAX_BODY_BYTES > 0)
-  assert.equal(MAX_CATALOG_JSON_BYTES, 16 * MiB, '目录 16 MiB（真实 5.05 MiB，约 3 倍余量）')
+  assert.equal(MAX_CATALOG_JSON_BYTES, MAX_CATALOG_PAYLOAD_BYTES, '目录上限与 npm 源共用同一个数（两套上限正是 2026-11-10 事故的结构性根因）')
   assert.equal(MAX_NPM_METADATA_BYTES, 2 * MiB, 'npm 元数据 2 MiB（真实约 23 KB）')
 })
 
@@ -198,7 +198,7 @@ function urlSource(url) {
 
 await check('首选源超限、备用源正常 ⇒ 整次读取成功（用了备用源）', async () => {
   let clock = 1000
-  const huge = Array.from({ length: 18 }, () => Buffer.alloc(MiB, 0x63))
+  const huge = Array.from({ length: 17 }, () => Buffer.alloc(4 * MiB, 0x63))
   const cache = createCatalogCache({
     now: () => clock,
     sources: [urlSource('https://s1.example/plugins.json'), urlSource('https://s2.example/plugins.json')],
@@ -212,7 +212,7 @@ await check('首选源超限、备用源正常 ⇒ 整次读取成功（用了�
 
 await check('所有源都超限且有缓存 ⇒ **保留旧缓存并标 stale**（不是空目录）', async () => {
   let clock = 1000
-  const huge = Array.from({ length: 18 }, () => Buffer.alloc(MiB, 0x64))
+  const huge = Array.from({ length: 17 }, () => Buffer.alloc(4 * MiB, 0x64))
   const cache = createCatalogCache({
     now: () => clock,
     sources: [urlSource('https://s1.example/plugins.json'), urlSource('https://s2.example/plugins.json')],
@@ -231,7 +231,7 @@ await check('所有源都超限且有缓存 ⇒ **保留旧缓存并标 stale**�
 })
 
 await check('所有源都超限且**无**缓存 ⇒ 返回错误而不是 plugins: []', async () => {
-  const huge = Array.from({ length: 18 }, () => Buffer.alloc(MiB, 0x65))
+  const huge = Array.from({ length: 17 }, () => Buffer.alloc(4 * MiB, 0x65))
   const cache = createCatalogCache({
     sources: [urlSource('https://s1.example/plugins.json')],
     fetch: async () => streamResponse(huge, null)

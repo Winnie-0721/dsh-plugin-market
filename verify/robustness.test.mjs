@@ -16,11 +16,33 @@ import { gzipSync } from 'node:zlib'
 
 import {
   MAX_TARBALL_BYTES,
-  MAX_NPM_TARBALL_BYTES,
-  fileFromTarball
+  MAX_CATALOG_PAYLOAD_BYTES,
+  fileFromTarBuffer,
+  fileFromTarball,
+  readTarballEntry
 } from '../plugin-market/lib/catalog-npm.js'
 import { readJsonBody, BODY_READ_TIMEOUT_MS } from '../plugin-market/lib/http.js'
-import { normalizeLabels, sortPlugins, normalizeItem } from '../plugin-market/lib/catalog.js'
+import { MAX_CATALOG_JSON_BYTES, normalizeLabels, sortPlugins, normalizeItem } from '../plugin-market/lib/catalog.js'
+
+/** 造一个真实的 USTAR 条目（读端解析的就是这个格式；不引 tar 库）。 */
+function tarEntry(name, content) {
+  const body = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')
+  const header = Buffer.alloc(512)
+  header.write(name, 0, 100, 'utf8')
+  header.write('0000644\0', 100, 8, 'ascii')
+  header.write('0000000\0', 108, 8, 'ascii')
+  header.write('0000000\0', 116, 8, 'ascii')
+  header.write(`${body.length.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii')
+  header.write('00000000000\0', 136, 12, 'ascii')
+  header.write('        ', 148, 8, 'ascii')
+  header.write('0', 156, 1, 'ascii')
+  let sum = 0
+  for (const byte of header) sum += byte
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
+  const padded = Buffer.alloc(Math.ceil(body.length / 512) * 512)
+  body.copy(padded)
+  return Buffer.concat([header, padded])
+}
 
 let passed = 0
 const failures = []
@@ -48,26 +70,28 @@ async function checkAsync(name, fn) {
 console.log('\n[1] gunzip 解压炸弹：必须有输出上限')
 check('gzip 炸弹被挡在分配之前（不是先解压再检查长度）', () => {
   // 反向保证：正常的小 tarball 仍要能解压出来。
-  // 32 MiB 解压（= 上限的 2 倍）：integrity 校验挡不住它（校验的是**压缩**字节，
+  // 128 MiB 解压（> 现状 96 MiB 预算的 1.33 倍）：integrity 校验挡不住它（校验的是**压缩**字节，
   // 而且那个 hash 来自同一份元数据），所以必须在解压这一步限长。
   //
   // 尺寸是用探针挑的，不是拍的：原先用 256 MiB + level 9，构造炸弹自己就要 ~830 ms，
   // 而这 830 ms 与「限长是否生效」毫无关系（唯一判据是解压后超过 maxOutputLength）。
-  // 32 MiB + level 1 构造 ~37 ms，仍是上限的 2 倍，同一判据、同一断言强度
-  // （上限 2026-10-19 由 8 MiB 上调到 16 MiB，差距随之从 4 倍变为 2 倍；判据不变）。
-  const bomb = gzipSync(Buffer.alloc(32 * 1024 * 1024), { level: 1 })
+  // 128 MiB + level 1 构造 ~136 ms，仍是预算之上，同一判据、同一断言强度。
+  // （上限沿革：2026-10-19 8→16 MiB；2026-11-10 16→96 MiB，理由见下方「解压预算」注释。）
+  const bomb = gzipSync(Buffer.alloc(128 * 1024 * 1024), { level: 1 })
   assert.ok(bomb.length < 1024 * 1024, `前置条件：炸弹压缩后应远小于 1 MiB，实际 ${bomb.length}`)
-  assert.ok(32 * 1024 * 1024 > MAX_TARBALL_BYTES, '前置条件：解压后必须真的超过上限，否则这条测试没在测限长')
+  assert.ok(128 * 1024 * 1024 > MAX_TARBALL_BYTES, '前置条件：解压后必须真的超过上限，否则这条测试没在测限长')
   assert.throws(
     () => fileFromTarball(bomb, 'plugins.json'),
     (error) => error.code === 'ERR_BUFFER_TOO_LARGE' || /maxOutputLength|output length/i.test(String(error.message)),
-    '超限解压必须抛错（ERR_BUFFER_TOO_LARGE），不得静默分配 32 MiB'
+    '超限解压必须抛错（ERR_BUFFER_TOO_LARGE），不得静默分配 128 MiB'
   )
-  assert.ok(MAX_TARBALL_BYTES > 0 && MAX_TARBALL_BYTES <= 64 * 1024 * 1024, '上限本身应是个合理的小值')
-  // 回归锚：2026-10-18 上游新增 index.json 使解压总量达 9.53 MiB，8 MiB 判据把整个市场打挂。
-  // 数值一旦被改回去（或压缩侧再被调小到低于解压侧），这里必须失败，而不是等线上复现。
-  assert.equal(MAX_TARBALL_BYTES, 16 * 1024 * 1024, '解压上限 16 MiB（实测解压总量 9.09 MiB，留 1.7×）')
-  assert.ok(MAX_TARBALL_BYTES >= MAX_NPM_TARBALL_BYTES, '解压上限不得低于压缩上限——允许下 16 MiB 却只准解 8 MiB 是自相矛盾的')
+  assert.ok(MAX_TARBALL_BYTES > 0 && MAX_TARBALL_BYTES <= 128 * 1024 * 1024, '上限本身应是个合理的小值')
+  // 回归锚：2026-11-10 上游把解压总量推到 16.14 MiB，顶穿当时的 16 MiB 整包上限，
+  // 市场再次整体 502。这条锚钉的不是「某个数字好看」，而是**解压预算必须 ≥ 载荷上限**：
+  // 目标条目最大可到 MAX_CATALOG_PAYLOAD_BYTES，预算若低于它，一个合法目录会永远读不出来
+  // （这就是那次事故的倒挂：允许下 16 MiB、却只准解出 16 MiB，而包里还有不读的文件）。
+  assert.equal(MAX_TARBALL_BYTES, 96 * 1024 * 1024, '解压预算 96 MiB = 载荷 64 MiB + 32 MiB 给包里其它条目')
+  assert.ok(MAX_TARBALL_BYTES >= MAX_CATALOG_PAYLOAD_BYTES, '解压预算不得低于载荷上限——否则贴着上限的合法目录永远读不出来')
 })
 check('正常小 tarball 仍能解压（上限不能误伤）', () => {
   // 造一个最小的合法 tar，内含 plugins.json
@@ -90,6 +114,92 @@ check('正常小 tarball 仍能解压（上限不能误伤）', () => {
   assert.ok(file !== null, '正常 tarball 必须能取到条目')
   assert.equal(file.toString('utf8'), content.toString('utf8'))
 })
+
+console.log('\n[1b] 增量扫描：上游「我们不读的文件」不能决定市场能不能用（2026-11-10）')
+// 事故形状：整包 gunzipSync + 单个上限，把「要读的 plugins.json」与「从不读的 index.json」
+// 绑在同一个数上。上游 10-18 加了 4.1 MiB 的 index.json、plugins.json 又每天长 0.25 MiB，
+// 解压总量 9.53 → 16.14 MiB 顶穿 16 MiB 上限 ⇒ 三个源全灭、市场空白。
+// 下面每条都按那个形状钉住：判据是**目标条目自己**，不是整包。
+await checkAsync('目标条目在前、后面 40 MiB 我们不读 ⇒ 只要预算没被目标用掉就必须成功', async () => {
+  const payload = Buffer.from(JSON.stringify({ count: 0, plugins: [] }), 'utf8')
+  const tar = Buffer.concat([
+    tarEntry('package/plugins.json', payload),
+    tarEntry('package/index.json', Buffer.alloc(40 * 1024 * 1024, 0x61)), // 从不读，且远超整包预算
+    Buffer.alloc(1024)
+  ])
+  assert.ok(tar.length > 40 * 1024 * 1024, '前置条件：整包必须真的超过预算，否则这条没在测「跳过」')
+  const read = await readTarballEntry(gzipSync(tar, { level: 1 }), 'package/plugins.json', { maxBytes: 8 * 1024 * 1024 })
+  assert.equal(read.ok, true, `目标在预算内就必须成功，实际 ${JSON.stringify(read)}`)
+  assert.equal(read.value.toString('utf8'), payload.toString('utf8'), '取回的必须是目标条目本身的字节')
+})
+
+await checkAsync('增量扫到的条目名与 fileFromTarBuffer 一致（两条实现对同一份 tar 不能各说各话）', async () => {
+  const tar = Buffer.concat([
+    tarEntry('package/LICENSE', 'x'.repeat(700)),
+    tarEntry('package/plugins.json', '{"a":1}'),
+    Buffer.alloc(1024)
+  ])
+  for (const name of ['package/LICENSE', 'package/plugins.json', 'package/nope']) {
+    const sync = fileFromTarBuffer(tar, name)
+    const streamed = await readTarballEntry(gzipSync(tar), name)
+    if (sync === null) {
+      assert.equal(streamed.ok, false, `${name}：同步版没有，流式版也不该有`)
+      assert.equal(streamed.kind, 'bad-tarball')
+    } else {
+      assert.equal(streamed.ok, true, `${name}：${JSON.stringify(streamed)}`)
+      assert.deepEqual([...streamed.value], [...sync], `${name}：两份实现取到的字节必须完全相同`)
+    }
+  }
+})
+
+await checkAsync('目标条目自己有上限，且**在分配之前**就拒（不先读进来再判）', async () => {
+  const big = Buffer.alloc(2 * 1024 * 1024, 0x62)
+  const tar = Buffer.concat([tarEntry('package/plugins.json', big), Buffer.alloc(1024)])
+  const read = await readTarballEntry(gzipSync(tar, { level: 1 }), 'package/plugins.json', { maxEntryBytes: 1024 * 1024 })
+  assert.equal(read.ok, false)
+  assert.equal(read.kind, 'too-large', '条目超限必须是 too-large（该源失败、继续下一个源），不能当 bad-tarball')
+  assert.match(read.reason, /字节/, '文案要说清是条目多大、超了哪个上限')
+})
+
+await checkAsync('目标在预算之外 ⇒ too-large（炸弹防护没有被流式改造削弱）', async () => {
+  const tar = Buffer.concat([
+    tarEntry('package/huge.bin', Buffer.alloc(8 * 1024 * 1024, 0x63)),
+    tarEntry('package/plugins.json', '{}'),
+    Buffer.alloc(1024)
+  ])
+  const read = await readTarballEntry(gzipSync(tar, { level: 1 }), 'package/plugins.json', { maxBytes: 1024 * 1024 })
+  assert.equal(read.ok, false)
+  assert.equal(read.kind, 'too-large')
+})
+
+await checkAsync('不是 tarball / gzip 损坏 ⇒ 结构化失败，不抛异常（该源失败、继续下一个源）', async () => {
+  for (const bytes of [Buffer.from('not a tarball'), Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00])]) {
+    const read = await readTarballEntry(bytes, 'package/plugins.json')
+    assert.equal(read.ok, false, `${bytes.length} 字节的垃圾必须被拒绝`)
+    assert.ok(['bad-tarball', 'too-large'].includes(read.kind), `kind=${read.kind}`)
+  }
+  assert.equal((await readTarballEntry(Buffer.alloc(0), 'x')).ok, false)
+})
+
+await checkAsync('tar 头里的 size 不是八进制 ⇒ bad-tarball（不猜、不抛）', async () => {
+  const header = Buffer.alloc(512)
+  header.write('package/plugins.json', 0, 'utf8')
+  header.write('zzzzzz', 124, 'utf8') // 非八进制
+  const read = await readTarballEntry(gzipSync(Buffer.concat([header, Buffer.alloc(1024)])), 'package/plugins.json')
+  assert.equal(read.ok, false)
+  assert.equal(read.kind, 'bad-tarball')
+})
+
+await checkAsync('全局预算缺省值本身就是「载荷上限 + 余量」，不得小于载荷上限', async () => {
+  // 结构性不变式：目标条目最大可到 MAX_CATALOG_PAYLOAD_BYTES，预算若小于它，
+  // 一个**合法**的、刚好贴着载荷上限的目录会永远读不出来（就是这次事故的倒挂）。
+  assert.ok(MAX_TARBALL_BYTES >= MAX_CATALOG_PAYLOAD_BYTES,
+    `解压预算 ${MAX_TARBALL_BYTES} 不得低于载荷上限 ${MAX_CATALOG_PAYLOAD_BYTES}`)
+  assert.equal(MAX_CATALOG_JSON_BYTES, MAX_CATALOG_PAYLOAD_BYTES,
+    'URL 源与 npm 源读的是同一份 plugins.json，上限必须共用同一个数（两套上限正是事故根因）')
+  assert.equal(MAX_CATALOG_PAYLOAD_BYTES, 64 * 1024 * 1024, '载荷上限 64 MiB（实测 12.30 MiB，留 5.2× 增长余量）')
+})
+
 
 console.log('\n[2] 请求体读取：卡住的连接不能把 handler 永远挂住')
 await checkAsync('客户端发一半就不动 ⇒ 超时后 settle（以前永远不 settle）', async () => {

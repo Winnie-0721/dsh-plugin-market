@@ -12,6 +12,7 @@
 import {
   CATALOG_PACKAGE,
   DEFAULT_NPM_REGISTRIES,
+  MAX_CATALOG_PAYLOAD_BYTES,
   NPM_METADATA_TIMEOUT_MS,
   NPM_TARBALL_TIMEOUT_MS,
   readCatalogFromNpm,
@@ -19,22 +20,33 @@ import {
   timeoutSignal
 } from './catalog-npm.js'
 import { readBoundedBody } from './http-body.js'
+import { looksLikeShardManifestUrl, readCatalogFromShards, SHARD_PROTOCOL } from './catalog-shard-fetch.js'
 
 /** 官方快照地址：npm 路线全部失败时的最后兜底。 */
 export const DEFAULT_SOURCE = 'https://awesome-dsh-plugin.com/plugins.json'
+/**
+ * 分片清单地址（format 2，2026-11-11 起）。
+ *
+ * 与 `DEFAULT_SOURCE` **同站同目录**：发布端把 `catalog/catalog.json` + `catalog/shards/*`
+ * 发布到同一个静态站，所以以后者推导前者。分片清单 404（上游还没跑发布脚本）时
+ * 这个源按 `no-manifest` 失败，源列表继续走到 npm / 单片 URL——行为与以前完全一致。
+ */
+export const DEFAULT_SHARD_MANIFEST = new URL(`${SHARD_PROTOCOL.SHARD_MANIFEST_NAME}`, new URL('./', DEFAULT_SOURCE)).toString()
 export const SOURCE_ENV = 'DSHM_REGISTRY_URL'
 export const NPM_MIRROR_ENV = 'DSHM_NPM_MIRROR'
 
 /**
  * 目录 JSON 的响应体上限（审查任务 1）。
  *
- * 真实体积（2026-10-16 本机量，`_verify/payload-sizes.mjs`）：4412 条目录的
- * plugins.json 是 **5.05 MiB**，目录每日增长。取 16 MiB ≈ 3 倍余量：
- * 正常增长多年碰不到，而"永远流式吐 JSON"的坏源在 16 MiB 处被停住——
- * 而不是拖到 15s 超时前吸进几百 MB。别把两个数写反：上限要比现值大，
- * 又必须小到不可能 OOM（宿主进程是常驻的）。
+ * **与 npm 源共用同一个数**（`MAX_CATALOG_PAYLOAD_BYTES`）：两条路读的是同一份
+ * plugins.json，两套上限正是 2026-11-10 那次事故的结构性根因（npm 那条量的是整包解压
+ * 总量、把用户不读的 `index.json` 也算进去，于是同一份载荷在一条路上撞墙、另一条没事）。
+ * 这个数由 npm 侧按「载荷自身增长」定，这里只是引用，不另立一套。
+ *
+ * 真实体积（`dsh-plugin-catalog` 包内量）：2026-10-18 是 6.87 MiB，2026-11-09 是
+ * 12.30 MiB（9,714 条），约 0.25 MiB/天。
  */
-export const MAX_CATALOG_JSON_BYTES = 16 * 1024 * 1024
+export const MAX_CATALOG_JSON_BYTES = MAX_CATALOG_PAYLOAD_BYTES
 
 /** 契约 §3.4：内存缓存 TTL 10 分钟。 */
 export const CACHE_TTL_MS = 10 * 60 * 1000
@@ -89,19 +101,40 @@ function hostOf(url) {
  *
  * - `DSHM_REGISTRY_URL` 非空 → 只用它：用户指名了自己的目录，就不该在他那边不通时
  *   悄悄换回我们的源（那样会让基于 fixture 的测试打到真实网络）。写错了也照样报错，
- *   错误里带上他填的值。
+ *   错误里带上他填的值。**如果它看起来是分片清单**（`…/catalog.json`），走分片路径。
  * - `DSHM_NPM_MIRROR` 非空 → 只用它；否则国内镜像优先、npm 官方兜底。
  * - 最后永远留一个官方 URL 源，保证镜像全挂时市场还有救。
+ *
+ * **分片源排在最前**（2026-11-11）：分片是同一份目录的更小传输形态，单片 2 MiB × 24
+ * 对 12.9 MiB 单体——弱网下前者能成、后者超时。官方 URL 那一条同时保留**单片**
+ * `plugins.json` 的兜底，所以分片清单 404（上游还没跑发布脚本）时行为与以前完全一致。
  */
 export function resolveSources(env = process.env) {
   const custom = optionalText(env?.[SOURCE_ENV])
   if (custom !== null) {
-    return [{ kind: 'url', url: custom, timeoutMs: CUSTOM_URL_TIMEOUT_MS, label: custom, short: hostOf(custom) }]
+    const isShard = looksLikeShardManifestUrl(custom)
+    return [{
+      kind: isShard ? 'shards' : 'url',
+      url: custom,
+      manifestUrl: isShard ? custom : undefined,
+      timeoutMs: CUSTOM_URL_TIMEOUT_MS,
+      label: custom,
+      short: hostOf(custom)
+    }]
   }
 
   const mirror = optionalText(env?.[NPM_MIRROR_ENV])
   const registries = (mirror !== null ? [mirror] : DEFAULT_NPM_REGISTRIES).map(stripTrailingSlashes)
-  const sources = registries.map((registry) => ({
+  const sources = []
+  // 分片源（官方站）：优先试，因为它是「小分片 + 可增量」的那条路。
+  sources.push({
+    kind: 'shards',
+    manifestUrl: DEFAULT_SHARD_MANIFEST,
+    timeoutMs: OFFICIAL_URL_TIMEOUT_MS,
+    label: DEFAULT_SHARD_MANIFEST,
+    short: `${hostOf(DEFAULT_SHARD_MANIFEST)} (分片)`
+  })
+  sources.push(...registries.map((registry) => ({
     kind: 'npm',
     registry,
     pkg: CATALOG_PACKAGE,
@@ -109,7 +142,7 @@ export function resolveSources(env = process.env) {
     tarballTimeoutMs: NPM_TARBALL_TIMEOUT_MS,
     label: `npm:${CATALOG_PACKAGE} (${registryHost(registry)})`,
     short: `npm ${registryHost(registry)}`
-  }))
+  })))
   sources.push({
     kind: 'url',
     url: DEFAULT_SOURCE,
@@ -1011,7 +1044,15 @@ export function createCatalogCache(options = {}) {
     const attempts = []
     for (const source of sourcesOf()) {
       const result =
-        source.kind === 'npm' ? await readCatalogFromNpm(source, { fetch: fetchImpl }) : await readUrlSource(source)
+        source.kind === 'npm'
+          ? await readCatalogFromNpm(source, { fetch: fetchImpl })
+          : source.kind === 'shards'
+            ? await readCatalogFromShards({
+                fetch: fetchImpl,
+                manifestUrl: source.manifestUrl ?? source.url,
+                label: source.label
+              })
+            : await readUrlSource(source)
       if (result.ok === true) {
         const validation = validateCatalogPayload(result.raw)
         if (validation.ok === true) return { ok: true, raw: result.raw, source: result.label ?? source.label }

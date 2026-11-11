@@ -38,6 +38,7 @@ import { createSelfUpdater } from './self-update.js'
 import { RESTART_EXIT_DELAY_MS, spawnRestartHelper } from './restart.js'
 import { restartDecision, restartReachableFrom, trustedRestartRequest } from './restart-policy.js'
 import { cleanHotDir, hotMount, hotUnmount, isHotMounted, listHotMounts } from './hot-mount.js'
+import { createInstallJobQueue } from './install-jobs.js'
 
 const PLUGIN_NAME = 'deepseek-harness-market'
 /**
@@ -818,6 +819,20 @@ export function restartPendingSnapshot() {
 
 function createHandlers(ctx, catalog, selfUpdate, config = {}) {
   /**
+   * 安装作业队列（v1.3.5）：发起即返回，装完再报。见 lib/install-jobs.js 的长注释。
+   *
+   * 放在 createHandlers 里（而不是模块级）：它必须在 `runInstallJob` 的作用域内，
+   * 而 runInstallJob 用到 ctx / catalog / 热挂载这些闭包状态。作业**只活在当前进程**，
+   * 宿主重启后清空——重启后 pnpm 子进程已不归我们管，把旧作业说成"还在跑"就是撒谎。
+   */
+  const jobs = createInstallJobQueue({
+    runJob: (job) => runInstallJob(job),
+    concurrency: Number.isSafeInteger(config?.installConcurrency) && config.installConcurrency > 0
+      ? config.installConcurrency
+      : 1
+  })
+
+  /**
    * 「一键重启能不能用」的判定，**每次读时重算**（与 POST /restart 用同一个函数，
    * 两处不会漂移）。不用模块级常量：调试器是运行期状态（附着/断开），
    * 缓存一次会让按钮在调试结束后仍然不出现。
@@ -860,6 +875,125 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
       console.warn(`[${PLUGIN_NAME}] 读取已安装列表失败，本次目录结果不带安装标记：${describe(error)}`)
       return { available: true, bundles: [] }
     }
+  }
+
+  /**
+   * 真正执行一次安装（**不碰 res**）——原 `/install` 的内联逻辑搬到这里。
+   *
+   * 返回 `{ ok, payload, activation, hot }`：`payload` 是宿主 ChangeResult，
+   * 两种消费方式共用：前台路径直接 sendChangeResult，异步路径存进作业结果。
+   *
+   * **为什么错误也返回 payload 而不是抛**：`sendChangeResult` 负责把宿主的拒绝
+   * （already-installed / not-allowed / incompatible-version…）翻成契约错误码，
+   * 异步路径必须能复用同一份翻译——否则队列里的失败会退化成一句「安装失败」，
+   * 而用户真正需要的是「宿主认为这个包已经存在，去终端 dsh plugin add …」。
+   */
+  async function runInstallJob(job) {
+    const { spec, requestId, approvedBuilds, kind } = job
+    const manager = managerOf(ctx)
+    if (!hasMethod(manager, 'installBundle')) {
+      return { ok: false, payload: { application: 'failed', error: { code: 'manager-unavailable' } } }
+    }
+
+    const options = {}
+    if (typeof requestId === 'string' && requestId !== '') options.requestId = requestId
+    // 契约 §2.4：空数组不传，避免让宿主以为用户批准过什么。
+    if (Array.isArray(approvedBuilds) && approvedBuilds.length > 0) options.approvedBuilds = approvedBuilds
+
+    // 装之前先记一份 bundle 名字表：装完之后靠**前后差集**认出这次装上的到底是哪个 bundle，
+    // 而不是假设「包名 == bundle 名」（两者并不总相等）。读不到就退化成 unknown，不猜。
+    const before = await captureBundles(manager)
+
+    let result
+    try {
+      result = await manager.installBundle(spec, Object.keys(options).length > 0 ? options : undefined)
+    } catch (error) {
+      return {
+        ok: false,
+        payload: {
+          application: 'failed',
+          error: {
+            code: 'install-failed',
+            message: '安装调用失败。',
+            hint: `宿主 installBundle 抛错：${describe(error)}；看宿主日志，确认网络与 pnpm 可用后重试。`
+          }
+        }
+      }
+    }
+    if (isReadOnlyResult(result)) {
+      return {
+        ok: false,
+        payload: {
+          application: 'failed',
+          error: {
+            code: 'not-allowed',
+            message: '当前 profile 不允许安装插件。',
+            hint: '用 dsh plugin 命令行安装，或换一个可管理的 profile。'
+          }
+        }
+      }
+    }
+
+    // 更新路径的兜底诊断：正常情况已经被 updateTarballSpec 绕过去了（宿主只拦
+    // 「已有的 registry 包名」）。如果这里还收到 already-installed，说明 tarball
+    // 改写没生效（例如目录给的 spec 形态特殊、或宿主换了判定），此时必须说清
+    // 「宿主认为这个包已经存在」以及该怎么绕，而不是把宿主那句「宿主拒绝了」原样丢给用户。
+    const failureCode = result !== null && typeof result === 'object' && result.error && typeof result.error.code === 'string'
+      ? result.error.code
+      : ''
+    if (failureCode === 'already-installed' && kind === 'update') {
+      const atVersion = optionalText(result?.error?.version) ?? ''
+      return {
+        ok: false,
+        payload: {
+          application: 'failed',
+          target: job.label,
+          error: {
+            code: 'already-installed',
+            message: '宿主认为这个包已经存在，因此拒绝了这次更新。',
+            hint: '在终端执行 `dsh plugin add ' + (optionalText(job.spec) ?? job.name) + (atVersion === '' ? '' : '@' + atVersion) +
+              '`；宿主同一入口既装也升，这一步会真正把版本推上去。'
+          }
+        }
+      }
+    }
+
+    const shape = result !== null && typeof result === 'object' ? result : {}
+    const after = await captureBundles(manager)
+    // 候选身份：目录条目的 npm 名 / 显示名 / 用户给的名字 / spec。
+    // 判定按 before→after 差集优先，这些只是差集不唯一时的兜底（见 verifyActivation）。
+    const candidates = [job.npm, job.name, job.label, spec].filter((entry) => typeof entry === 'string' && entry !== '')
+    const activation = verifyActivation({
+      application: optionalText(shape.application) ?? 'failed',
+      pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
+      before,
+      after,
+      // 目录条目的真实身份可能和 bundle 名不同：几个候选都交给判定。
+      candidates,
+      // 版本回读的期望值取自**目录**（用户点的就是那个版本），不是宿主回显。
+      expectedVersion: job.expectedVersion
+    })
+    // 宿主说「重启后生效」时，替它把这一步做掉（见 hot-mount.js 的推理）。
+    const hot = await attemptHotMount(
+      ctx,
+      {
+        application: optionalText(shape.application) ?? 'failed',
+        pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
+        before,
+        after,
+        candidates
+      },
+      // 本该会话已经热挂载过的包不重复挂：第二次会在 YAML 里再插一行，
+      // 同一条前缀路由注册两遍（宿主对重复注册会 throw）。
+      { isMounted: isHotMounted }
+    )
+    if (hot.attempted === true) {
+      logHot(hot)
+      // 挂上了就是真的在跑：把回读状态改成 live（并且不再记待重启）。
+      // 只在真挂上时改；attempted 但失败的不动——回读说什么就是什么。
+      mergeHotIntoActivation(activation, hot)
+    }
+    return { ok: true, payload: result, activation, hot }
   }
 
   return {
@@ -1000,7 +1134,21 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
       })
     },
 
-    /** 契约 §2.4 */
+    /**
+     * 契约 §2.4 —— **异步**安装（v1.3.5）。
+     *
+     * 分两段：**校验**在前台（同步走完，参数/目录/重名/不可装等 4xx 照旧当场返回），
+     * **真正的安装**进作业队列（`lib/install-jobs.js`），立刻回 `202 { job }`。
+     *
+     * 为什么这么切：宿主的 `installBundle` 本来就登记 requestId 立即返回
+     * （见 install-jobs.js 的模块注释），慢的是 pnpm 那几分钟。把它留在 HTTP 里
+     * 等于让用户盯着一个挂起的请求；而校验是毫秒级的、且错误码有明确语义，留前台更诚实
+     * ——用户输错了包名不该先进队列再失败。
+     *
+     * 兼容：客户端不带 `async:true` 时**仍然等到底**（老客户端/第三方调用方行为不变），
+     * 带 `async:true` 才是「立刻回 jobId」。默认不开异步，是因为这是**接口形状的变化**，
+     * 不该让不知道它的调用方突然收到 202。
+     */
     async install(req, res) {
       if (!requireSameOrigin(req, res)) return
       const manager = managerOf(ctx)
@@ -1068,88 +1216,109 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
       // 更新走 tarball 形态：宿主的 installBundle 见到「已有的 registry 包名」就抛
       // already-installed（见 updateTarballSpec 的注释）。**必须在上面目录校验之后**——
       // 先确认 spec 属于目录，再改写，否则这里就成了任意包安装器。
-      if (optionalText(payload.kind) === 'update') spec = updateTarballSpec(spec, hit)
+      const kind = optionalText(payload.kind) === 'update' ? 'update' : 'install'
+      if (kind === 'update') spec = updateTarballSpec(spec, hit)
 
-      const options = {}
-      const requestId = optionalText(payload.requestId)
-      if (requestId !== null) options.requestId = requestId
-      if (Array.isArray(payload.approvedBuilds)) {
-        const approved = payload.approvedBuilds.filter((entry) => typeof entry === 'string' && entry !== '')
-        // 契约 §2.4：空数组不传，避免让宿主以为用户批准过什么。
-        if (approved.length > 0) options.approvedBuilds = approved
+      const approvedBuilds = Array.isArray(payload.approvedBuilds)
+        ? payload.approvedBuilds.filter((entry) => typeof entry === 'string' && entry !== '')
+        : []
+
+      // 作业键：同一个包只排一次队（重复点「安装」返回同一个作业，不重复跑 pnpm）。
+      // 用目录条目的 id 而不是 spec：同一条目可能被 spec/name 两种方式提交。
+      const jobKey = optionalText(hit?.id) ?? requestedName ?? spec
+
+      const jobInput = {
+        key: jobKey,
+        name: requestedName ?? jobKey,
+        label: hit?.name ?? requestedName ?? jobKey,
+        // npm 名与目录版本要随作业带上：verifyActivation 的候选身份与版本回读期望
+        // 都取自**目录**（用户点的就是目录那条），而作业在后台跑时已经没有那个请求了。
+        npm: optionalText(hit?.npm) ?? undefined,
+        expectedVersion: optionalText(hit?.version) ?? undefined,
+        spec,
+        kind,
+        requestId: optionalText(payload.requestId) ?? undefined,
+        approvedBuilds
       }
 
-      // 装之前先记一份 bundle 名字表：装完之后靠**前后差集**认出这次装上的到底是哪个 bundle，
-      // 而不是假设「包名 == bundle 名」（两者并不总相等）。读不到就退化成 unknown，不猜。
-      const before = await captureBundles(manager)
-
-      let result
-      try {
-        result = await manager.installBundle(spec, Object.keys(options).length > 0 ? options : undefined)
-      } catch (error) {
-        sendError(res, 502, 'install-failed', {
-          message: '安装调用失败。',
-          hint: `宿主 installBundle 抛错：${describe(error)}；看宿主日志，确认网络与 pnpm 可用后重试。`
-        })
-        return
-      }
-      if (isReadOnlyResult(result)) {
-        sendError(res, 400, 'not-allowed', {
-          message: '当前 profile 不允许安装插件。',
-          hint: '用 dsh plugin 命令行安装，或换一个可管理的 profile。'
-        })
-        return
-      }
-
-      // 更新路径的兜底诊断：正常情况已经被 updateTarballSpec 绕过去了（宿主只拦
-      // 「已有的 registry 包名」）。如果这里还收到 already-installed，说明 tarball
-      // 改写没生效（例如目录给的 spec 形态特殊、或宿主换了判定），此时必须说清
-      // 「宿主认为这个包已经存在」以及该怎么绕，而不是把宿主那句「宿主拒绝了」原样丢给用户。
-      const failureCode = result !== null && typeof result === 'object' && result.error && typeof result.error.code === 'string'
-        ? result.error.code
-        : '';
-      if (failureCode === 'already-installed' && optionalText(payload.kind) === 'update') {
-        sendError(res, 409, 'already-installed', {
-          message: '宿主认为这个包已经存在，因此拒绝了这次更新。',
-          hint: '在终端执行 `dsh plugin add ' + (optionalText(hit?.npm) ?? requestedName ?? '名字') +
-            '@' + (optionalText(hit?.version) ?? '最新版') + '`；宿主同一入口既装也升，这一步会真正把版本推上去。'
-        })
+      // 兼容路径：不显式要异步就等到底（行为与 v1.3.4 完全一致）。
+      if (payload.async !== true) {
+        const outcome = await runInstallJob(jobInput)
+        if (outcome.ok !== true) {
+          sendChangeResult(res, outcome.payload, 'install', null, null)
+          return
+        }
+        sendChangeResult(res, outcome.payload, 'install', outcome.activation, outcome.hot)
         return
       }
 
-      const shape = result !== null && typeof result === 'object' ? result : {}
-      const after = await captureBundles(manager)
-      const activation = verifyActivation({
-        application: optionalText(shape.application) ?? 'failed',
-        pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
-        before,
-        after,
-        // 目录条目的真实身份可能和 bundle 名不同：三个都作为候选交给判定。
-        candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName],
-        // 版本回读的期望值取自**目录**（用户点的就是那个版本），不是宿主回显。
-        expectedVersion: hit?.version
+      const submitted = jobs.submit(jobInput)
+      if (submitted.ok !== true) {
+        sendError(res, submitted.code === 'too-many-jobs' ? 429 : 400, submitted.code ?? 'bad-request', {
+          message: submitted.message
+        })
+        return
+      }
+      // 状态码要如实反映「这次受理了什么」：
+      //   202 Accepted  = 真的**新**起了一个作业（还没装完，去追）；
+      //   200 OK        = 没有新起作业——要么已经在队列里（deduped），
+      //                   要么刚装好过（alreadyDone）。把它也说成「已受理」是撒谎，
+      //                   客户端会以为又要等一轮。
+      sendJson(res, submitted.deduped === true ? 200 : 202, {
+        ok: true,
+        async: true,
+        job: submitted.job,
+        deduped: submitted.deduped === true,
+        // 「刚装好过」与「已经在队列里」是两件不同的事，客户端要说不一样的话：
+        // 前者是「已经是这个版本了」，后者是「正在装，别催」。
+        alreadyDone: submitted.alreadyDone === true
       })
-      // 宿主说「重启后生效」时，替它把这一步做掉（见 hot-mount.js 的推理）。
-      const hot = await attemptHotMount(
-        ctx,
-        {
-          application: optionalText(shape.application) ?? 'failed',
-          pending: Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0,
-          before,
-          after,
-          candidates: [hit?.npm, hit?.name, hit?.id, requestedSpec, requestedName]
-        },
-        // 本该会话已经热挂载过的包不重复挂：第二次会在 YAML 里再插一行，
-        // 同一条前缀路由注册两遍（宿主对重复注册会 throw）。
-        { isMounted: isHotMounted }
-      )
-      if (hot.attempted === true) {
-        logHot(hot)
-        // 挂上了就是真的在跑：把回读状态改成 live（并且不再记待重启）。
-        // 只在真挂上时改；attempted 但失败的不动——回读说什么就是什么。
-        mergeHotIntoActivation(activation, hot)
+    },
+
+    /**
+     * 契约 §2.11 —— 安装作业列表。
+     *
+     * `active` 是未完成的（queued/running，按提交顺序），`finished` 是已结束的（新→旧）。
+     * 客户端首屏、轮询、刷新页面恢复都读它。
+     */
+    async installJobs(req, res) {
+      const list = jobs.list()
+      sendJson(res, 200, { ok: true, ...list })
+    },
+
+    /**
+     * 契约 §2.11 —— 取消一个安装作业。
+     *
+     * 排队中的能立刻取消；正在跑的只能**转达**宿主（`cancelInstall`），
+     * 宿主可能回 `too-late`（应用阶段已开始）——那时如实回 `too-late`，不假装成功。
+     */
+    async cancelInstallJob(req, res) {
+      if (!requireSameOrigin(req, res)) return
+      const body = await readJsonObject(req, res)
+      if (body.ok !== true) return
+      const id = optionalText(body.value.id)
+      if (id === null) {
+        sendError(res, 400, 'bad-request', { message: '缺少 id。', hint: '给出要取消的作业 id。' })
+        return
       }
-      sendChangeResult(res, result, 'install', activation, hot)
+      const manager = managerOf(ctx)
+      const cancelJob = hasMethod(manager, 'cancelInstall')
+        ? (requestId) => manager.cancelInstall(requestId)
+        : null
+      const verdict = await jobs.cancel(id, cancelJob)
+      if (verdict.ok !== true) {
+        // 作业已经结束不是错误，是「没什么可取消的」——用 200 + 状态说清，
+        // 让客户端把这一条从队列里拿掉而不是弹一个失败。
+        if (verdict.code === 'job-finished') {
+          sendJson(res, 200, { ok: true, status: 'already-finished', job: verdict.job })
+          return
+        }
+        sendError(res, verdict.code === 'job-not-found' ? 404 : 502, verdict.code ?? 'cancel-failed', {
+          message: verdict.message
+        })
+        return
+      }
+      sendJson(res, 200, { ok: true, status: verdict.status, job: verdict.job })
     },
 
     /** 契约 §2.5 */
@@ -1447,6 +1616,8 @@ function buildRoutes(ctx, catalog, selfUpdate, config) {
     .on(`${ROUTE_PREFIX}/catalog`, ['GET'], handlers.catalog)
     .on(`${ROUTE_PREFIX}/installed`, ['GET'], handlers.installed)
     .on(`${ROUTE_PREFIX}/install`, ['POST'], handlers.install)
+    .on(`${ROUTE_PREFIX}/install-jobs`, ['GET'], handlers.installJobs)
+    .on(`${ROUTE_PREFIX}/install-jobs/cancel`, ['POST'], handlers.cancelInstallJob)
     .on(`${ROUTE_PREFIX}/remove`, ['POST'], handlers.remove)
     .on(`${ROUTE_PREFIX}/toggle`, ['POST'], handlers.toggle)
     .on(`${ROUTE_PREFIX}/refresh`, ['POST'], handlers.refresh)

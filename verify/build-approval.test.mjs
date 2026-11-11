@@ -177,7 +177,10 @@ check('pendingBuilds 里的非字符串被过滤掉（脏数据不该进 UI）',
 
 console.log('\n[2] 客户端：拿到 pendingBuilds 必须能弹批准框，而不是掉进 catch')
 check('客户端读 pendingBuilds 的分支在 then 里存在（有批准入口）', () => {
-  assert.match(clientSource, /if \(payload\.pendingBuilds && payload\.pendingBuilds\.length\)/, '要有 pendingBuilds 分支')
+  // v1.3.5 起这段收尾被抽进 handleInstallResult（同步与异步安装共用同一套规则），
+  // 所以变量名是 result 而不是 payload，位置也不再在 then 里。**断言强度不变**：
+  // 仍然要求「存在 pendingBuilds 分支 + 会弹批准框 + 有批准按钮」。
+  assert.match(clientSource, /if \(result\.pendingBuilds && result\.pendingBuilds\.length\)/, '要有 pendingBuilds 分支')
   assert.match(clientSource, /setPending\(\{ name: requestName/, '要弹出批准框（setPending）')
   assert.match(clientSource, /t\("pending\.approve"\)/, '批准框要有「批准」按钮')
 })

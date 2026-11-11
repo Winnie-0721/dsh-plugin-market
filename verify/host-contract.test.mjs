@@ -490,13 +490,17 @@ check('激活状态进入了 install 的响应体（真调 sendChangeResult 读 
   assert.equal('activation' in JSON.parse(res2.body), false, '没传时不得凭空造一个 activation')
 })
 check('install 路由真的做了前后快照并传给 sendChangeResult（源码形状）', () => {
+  // v1.3.5：安装本体搬进 runInstallJob（同步/异步共用），快照与 activation 判定
+  // 都还在**同一条路径**上。断言强度不变：仍然要求「装前基线 + 装后回读 +
+  // activation 传进 sendChangeResult」三者都在源码里。
   assert.match(indexSource, /const before = await captureBundles\(manager\)/, '装之前要有基线')
   assert.match(indexSource, /const after = await captureBundles\(manager\)/, '装之后要回读')
-  // activation 必须传进去；第 5 个参数（热挂载结果）是新增的，写成可选以满足同一意图。
+  // 异步路径把 activation 交给作业结果，前台路径直接 sendChangeResult——
+  // 两种消费方式都必须把 activation 带下去（否则「装上了但没生效」会被说成成功）。
   assert.match(
     indexSource,
-    /sendChangeResult\(res, result, 'install', activation(?:, hot)?\)/,
-    '要把 activation 传进去（热挂载结果作为可选的第五个参数）'
+    /sendChangeResult\(res, outcome\.payload, 'install', outcome\.activation, outcome\.hot\)/,
+    '前台路径要把 activation 传进去（热挂载结果作为第五个参数）'
   )
 })
 

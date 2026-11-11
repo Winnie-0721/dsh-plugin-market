@@ -160,6 +160,16 @@ window.__ModuleLoader__.load({
         "notice.installRestart": "已安装 {name}，重启 DSH 后生效",
         "notice.installOverridden": "已安装 {name}，但 profile 配置的覆盖层优先",
         "notice.installCancelled": "{name} 的安装已取消",
+        "notice.installQueued": "{name} 已经在安装队列里，装好会自动告诉你。",
+        "notice.installAlreadyDone": "{name} 刚刚已经装好了，不用重复安装。",
+        "notice.installNotQueued": "{name} 没有排进安装队列，请重试。",
+        "notice.installJobGone": "{name} 的安装作业追丢了（宿主可能重载过），装没装上不确定。去「已安装」页看一眼，没有的话再装一次。",
+        "notice.installJobGoneButInstalled": "{name} 已经装好了（我们没追到作业，但它在已安装列表里）。",
+        "jobs.active": "正在装 {count} 个：{names}",
+        "jobs.queued": "排队中",
+        "jobs.running": "安装中",
+        "jobs.cancel": "取消",
+        "notice.installCancelTooLate": "已经开始写文件了，停不下来；等它装完再去「已安装」页看结果。",
         "notice.installWarnings": "安装完成，但有提示：{warnings}",
         "notice.unknownApplication": "操作结果无法确认（宿主回了「{application}」），先别当成成功；看宿主日志后重试。",
         "notice.removeApplied": "已卸载 {name}",
@@ -543,6 +553,16 @@ window.__ModuleLoader__.load({
         "notice.installRestart": "Installed {name}; restart DSH to apply",
         "notice.installOverridden": "Installed {name}, but a profile override takes precedence",
         "notice.installCancelled": "The install of {name} was cancelled",
+        "notice.installQueued": "{name} is already in the install queue; you will be told when it finishes.",
+        "notice.installAlreadyDone": "{name} was just installed; no need to install it again.",
+        "notice.installNotQueued": "{name} did not get queued; please retry.",
+        "notice.installJobGone": "Lost track of the install job for {name} (the host may have reloaded), so whether it installed is unknown. Check the Installed tab; reinstall if it is not there.",
+        "notice.installJobGoneButInstalled": "{name} is installed (we lost the job, but it is in the installed list).",
+        "jobs.active": "Installing {count}: {names}",
+        "jobs.queued": "queued",
+        "jobs.running": "installing",
+        "jobs.cancel": "Cancel",
+        "notice.installCancelTooLate": "It already started writing files and cannot be stopped; check the Installed tab once it finishes.",
         "notice.installWarnings": "Installed, with warnings: {warnings}",
         "notice.unknownApplication": "Could not confirm the result (the host replied \"{application}\"); do not treat it as success. Check the host log and retry.",
         "notice.removeApplied": "Removed {name}",
@@ -1114,6 +1134,20 @@ window.__ModuleLoader__.load({
       // 组件改为在卸载后忽略结果（mountedRef）。
       install: function (body) {
         return requestJSON("/install", { method: "POST", body: body });
+      },
+      // 异步安装（v1.3.5）：同一路径 + `async:true`，立刻回 202 + job。
+      installAsync: function (body) {
+        var payload = {};
+        var keys = Object.keys(body || {});
+        for (var i = 0; i < keys.length; i++) payload[keys[i]] = body[keys[i]];
+        payload.async = true;
+        return requestJSON("/install", { method: "POST", body: payload });
+      },
+      installJobs: function (signal) {
+        return requestJSON("/install-jobs", { signal: signal });
+      },
+      cancelInstallJob: function (id) {
+        return requestJSON("/install-jobs/cancel", { method: "POST", body: { id: id } });
       },
       remove: function (name) {
         return requestJSON("/remove", { method: "POST", body: { name: name } });
@@ -1944,6 +1978,15 @@ function errorCopy(error) {
 .dshpm-tab::after { content:""; position:absolute; left:10px; right:10px; bottom:0; height:2px; border-radius:2px; background:var(--dsw-alias-brand-primary,#4176e6); transform:scaleX(0); transform-origin:right center; transition:transform .18s cubic-bezier(.4,0,.2,1); }
 .dshpm-tab[data-active="true"]::after { transform:scaleX(1); transform-origin:left center; }
 .dshpm-notice { animation:dshpm-toastin .18s cubic-bezier(.4,0,.2,1) backwards; }
+/* 安装队列条（v1.3.5）：常驻状态，不是一次性回执——所以不用 toast 的定位与自动消失。 */
+.dshpm-queue { display:flex; align-items:flex-start; gap:8px; margin:0 0 10px; padding:9px 12px; box-sizing:border-box; border:1px solid var(--dsw-alias-border-l1,#0000000a); border-left-width:3px; border-left-color:var(--dsw-alias-brand-primary); border-radius:var(--dsw-radius-md,10px); background:var(--dsw-alias-bg-layer-1,#fff); font-size:.86em; line-height:1.45; }
+.dshpm-queueIcon { display:flex; align-items:center; flex:0 0 auto; margin-top:2px; color:var(--dsw-alias-brand-primary); }
+.dshpm-queueBody { flex:1 1 auto; min-width:0; }
+.dshpm-queueTitle { color:var(--dsw-alias-label-primary,#0f1115); font-weight:600; overflow-wrap:anywhere; }
+.dshpm-queueRows { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+.dshpm-queueRow { display:flex; align-items:center; gap:8px; justify-content:flex-end; }
+.dshpm-queueState { color:var(--dsw-alias-label-secondary,#61666b); }
+.dshpm-queueCancel { padding:1px 8px; font-size:.93em; }
 /* 弹窗：遮罩淡入 + 卡片升起。两者都用 backwards（用 forwards 会把 transform 钉死在末帧，
    之后 hover/位移类样式就再也动不了——门禁有断言盯着这条）。 */
 .dshpm-modalLayer { animation:dshpm-fade .18s ease backwards; }
@@ -3348,7 +3391,11 @@ function errorCopy(error) {
               item: item,
               categories: props.categories,
               expanded: expanded,
-              busy: props.busyKey === "install:" + key,
+              // 读 key **集合**：同时装多个时每张卡各自转圈（原先只认 busyKey 单个 key，
+              // 装 A 又点 B 会让 A 的转圈消失——见 index 里 busyKeys 的注释）。
+              busy: typeof props.isBusyKey === "function"
+                ? props.isBusyKey("install:" + key)
+                : props.busyKey === "install:" + key,
               busyKind: props.busyKind,
               copied: props.copied === key,
               readOnly: props.readOnly,
@@ -3689,7 +3736,9 @@ function errorCopy(error) {
             expanded: !!props.expanded[key],
             confirming: props.confirming === key,
             readOnly: props.readOnly,
-            busy: props.busyKey === "remove:" + key || props.busyKey === "toggle:" + key || props.busyKey === "install:" + key,
+            busy: typeof props.isBusyKey === "function"
+              ? (props.isBusyKey("remove:" + key) || props.isBusyKey("toggle:" + key) || props.isBusyKey("install:" + key))
+              : (props.busyKey === "remove:" + key || props.busyKey === "toggle:" + key || props.busyKey === "install:" + key),
             busyKind: props.busyKey === "remove:" + key ? "remove" : props.busyKey === "install:" + key ? "update" : null,
             batchRunning: props.batchRunning === true,
             entryBusyKey: props.busyKey,
@@ -4481,6 +4530,49 @@ function errorCopy(error) {
       var tokenRef = React.useRef(0);
       // 在跑作业的 key 集合（同步可见）：守卫重复点击时不能读 state，见 jobRunning。
       var jobKeysRef = React.useRef({});
+      // 当前这批安装的开始时刻：轮询间隔按「已经等了多久」调整（见 installPollDelay）。
+      var installStartedAtRef = React.useRef(0);
+      // 已经在本地挂上 awaitJob 的作业 id：刷新恢复时靠它跳过重复订阅。
+      var installingJobsRef = React.useRef({});
+      // 服务端作业队列的快照（用于顶部「正在装 N 个」）。轮询由 awaitJob 驱动，
+      // 这里只是把最近一次已知状态留给渲染。
+      var installJobsState = React.useState({ active: [], finished: [] });
+      var installJobs = installJobsState[0];
+      var setInstallJobs = installJobsState[1];
+      /** 拉一次服务端队列快照（失败不报错：它只影响那个提示条，不影响安装本身）。 */
+      function trackJobs() {
+        api.installJobs().then(function (payload) {
+          if (!mountedRef.current) return;
+          setInstallJobs({
+            active: payload && payload.active ? payload.active : [],
+            finished: payload && payload.finished ? payload.finished : []
+          });
+        }).catch(function () { /* 队列快照是可选信息，拿不到就不显示 */ });
+      }
+
+      /**
+       * 取消一个安装作业。
+       *
+       * 排队中的**立刻**能取消；正在跑的只能转达宿主（pnpm 已启动，要等它退出），
+       * 宿主还可能回 `too-late`（应用阶段已开始）——那时如实说「已经停不下来了」，
+       * 而不是从队列里划掉假装取消成功（那会让用户以为没装，实际装上了）。
+       */
+      function cancelJob(id) {
+        api.cancelInstallJob(id).then(function (verdict) {
+          if (!mountedRef.current) return;
+          var status = verdict && verdict.status ? verdict.status : "requested";
+          if (status === "too-late") {
+            setNotice({ kind: "warn", text: t("notice.installCancelTooLate") });
+          } else if (status === "already-finished") {
+            // 刚好装完，没什么可取消的：不弹错误，刷一次列表让结果落位。
+            bumpTick();
+          }
+          trackJobs();
+        }).catch(function (error) {
+          if (!mountedRef.current) return;
+          setNotice({ kind: "error", error: error });
+        });
+      }
 
       function startRequest(key) {
         var previous = registryRef.current[key];
@@ -4667,6 +4759,51 @@ function errorCopy(error) {
         };
       }, [installedTick]);
 
+      /**
+       * 挂载时接管**已经存在的**安装作业（v1.3.5）。
+       *
+       * 这是异步安装必须具备的一半：作业活在宿主进程里，页面刷新/切页签/关掉再打开
+       * 都不该让进度消失——否则用户「装到一半刷新一下」就只能看到一个装不完的东西。
+       * 作业在服务端，所以这里只要重新订阅：
+       *  1. 拉一次快照，把队列条显示出来；
+       *  2. 对每一个还活着的作业重新挂上 awaitJob，装完照常弹回执、刷列表。
+       * 已有本地作业在等的（刚点的那些）不重复挂：按 jobId 记在 installingJobsRef 里。
+       */
+      React.useEffect(function () {
+        if (!mountedRef.current) return undefined;
+        var cancelled = false;
+        api.installJobs().then(function (payload) {
+          if (cancelled || !mountedRef.current) return;
+          var active = payload && payload.active ? payload.active : [];
+          setInstallJobs({
+            active: active,
+            finished: payload && payload.finished ? payload.finished : []
+          });
+          for (var i = 0; i < active.length; i += 1) {
+            var job = active[i];
+            if (!job || !job.id) continue;
+            if (installingJobsRef.current[job.id] === true) continue;
+            installingJobsRef.current[job.id] = true;
+            // 恢复出来的作业没有原始 target（用户这次刷新前的那个对象已经不在内存里），
+            // 只能用作业自带的名字重建一份**够用**的 target：收尾逻辑只用到 spec/kind/key。
+            awaitJob(
+              job.id,
+              { spec: job.spec, kind: job.kind },
+              job.label || job.name || job.key,
+              job.name || job.key,
+              job.key,
+              job.approvedBuilds || [],
+              true, // silent：不是这次点击发起的，别弹一堆迟到的回执
+              function () { /* 恢复路径没有 onDone */ },
+              undefined
+            );
+          }
+        }).catch(function () { /* 宿主不支持/暂时不可达：当作没有作业，不影响其他功能 */ });
+        return function () {
+          cancelled = true;
+        };
+      }, []);
+
       // 每小时的自动检查（见 startUpdateScheduler）会通知这里重读已安装列表；
       // 只有「多出新更新」时才给回执，否则每小时弹一条提示会很吵。角标不依赖这里，
       // 它读的是模块级计数，后台那次检查会直接更新它。
@@ -4779,40 +4916,39 @@ function errorCopy(error) {
         // 服务端只在 kind=update 时改写 spec（见 index.js 的 updateTarballSpec）。
         if (target.kind) body.kind = target.kind;
         if (approvedBuilds && approvedBuilds.length) body.approvedBuilds = approvedBuilds;
-        api.install(body).then(function (payload) {
+        // **异步提交（v1.3.5）**：宿主那边 pnpm 要跑几十秒到几分钟，把它留在 HTTP 里
+        // 等于让用户盯着一个挂起的请求、且一次只能等一个。现在立刻拿 jobId，结果靠
+        // /install-jobs 追。校验类错误（not-in-catalog / bad-request / manager-unavailable）
+        // 仍然当场返回 4xx —— 那一段没进队列，见 index.js 的 install。
+        api.installAsync(body).then(function (accepted) {
           if (!mountedRef.current) return;
-          clearJob(jobKey);
-          if (payload.pendingBuilds && payload.pendingBuilds.length) {
-            if (approvedBuilds && approvedBuilds.length) {
-              // 已经带着批准重提了一次、宿主仍说待批准（常见于 `stale-approval`：
-              // pnpm 这一轮没写出占位，宿主的 approveBuilds 因此拒绝了这次批准）。
-              // **绝不能在这里关掉确认条**：那会移除唯一的批准入口，而宿主的
-              // hint 写的是「重新点一次安装」——入口没了，hint 就指向一个不存在的 UI，
-              // 用户点一次即断头、这个插件永远装不上。
-              // 正确做法是**保留确认条**（换上这一轮真实的包名），让用户再点一次：
-              // 第二次往往会命中 pnpm 写出的占位、真的批准成功。
-              var stillText = t("notice.buildsStillPending", { builds: payload.pendingBuilds.join(", ") });
-              setPending({ name: requestName, label: label, spec: target.spec, kind: target.kind || "install", key: key, builds: payload.pendingBuilds });
-              setNotice({ kind: "warn", text: stillText });
-              report({ ok: false, text: stillText, pending: true });
+          // 服务端去重命中：同一个包已经在队列里，或刚刚已经装好。两种都**不重新发起**，
+          // 但要说清是哪一种（「正在装」和「已经是这个版本了」不是一件事）。
+          var acceptedJob = accepted && accepted.job ? accepted.job : null;
+          if (accepted && accepted.deduped === true) {
+            clearJob(jobKey);
+            if (accepted.alreadyDone === true) {
+              var doneText = t("notice.installAlreadyDone", { name: label });
+              setNotice({ kind: "info", text: doneText });
+              report({ ok: true, text: doneText });
             } else {
-              var pendingText = t("notice.buildsPending", { name: label });
-              setPending({ name: requestName, label: label, spec: target.spec, kind: target.kind || "install", key: key, builds: payload.pendingBuilds });
-              setNotice({ kind: "warn", text: pendingText });
-              report({ ok: false, text: pendingText, pending: true });
+              // 已经在队列里：不弹错误，也不 claim 成功——把这一条挂到队列显示上。
+              report({ ok: true, text: t("notice.installQueued", { name: label }), queued: true });
             }
+            trackJobs();
             return;
           }
-          setPending(null);
-          var outcome = noticeFromResult(payload, "install", label);
-          // 批量（silent）里的每一步只记账、不弹窗——否则「一键更新（N）」会弹 N 次，
-          // 由批量的 finish 统一问一次。
-          noteRestartFrom(payload, { label: label, defer: silent === true });
-          if (!silent) setNotice(outcome);
-          // 计成功看 applied（restart-required 也算装上了），不看气泡级别——
-          // 否则「装好待重启」的更新会被批量汇成失败（用户截图里的「成功 0、失败 2」）。
-          report({ ok: outcome.applied === true, text: outcome.text });
-          bumpTick();
+          if (!acceptedJob) {
+            clearJob(jobKey);
+            var oddText = t("notice.installNotQueued", { name: label });
+            setNotice({ kind: "warn", text: oddText });
+            report({ ok: false, text: oddText });
+            return;
+          }
+          // 作业已经在队列里跑：本地只等**这一个**作业的终态，拿到后走与同步路径
+          // 完全相同的收尾（pendingBuilds / notice / restart / report）。
+          awaitJob(acceptedJob.id, target, label, requestName, key, approvedBuilds, silent, report, onDone);
+          trackJobs();
         }).catch(function (error) {
           if (!mountedRef.current) return;
           clearJob(jobKey);
@@ -4821,6 +4957,170 @@ function errorCopy(error) {
           report({ ok: false, text: shortFailureText(error) || t("updates.failed", { name: label }) });
         });
       }
+
+      /**
+       * 等一个安装作业到终态，然后走**与同步路径完全相同**的收尾。
+       *
+       * 为什么坚持同一套收尾：pendingBuilds 的「保留确认条」、restart-required 的弹窗、
+       * 批量更新的 defer……这些都是踩出来的，异步只是一个新的**到达方式**，不该有第二套规则。
+       * 所以这里只负责「等到结果」，剩下的原样交给 handleInstallResult。
+       */
+      function awaitJob(jobId, target, label, requestName, key, approvedBuilds, silent, report, onDone) {
+        var timer = null;
+        var stopped = false;
+        installStartedAtRef.current = Date.now();
+        installingJobsRef.current[jobId] = true;
+        function stop() {
+          stopped = true;
+          delete installingJobsRef.current[jobId];
+          if (timer !== null) { clearTimeout(timer); timer = null; }
+        }
+        function poll() {
+          if (stopped || !mountedRef.current) return;
+          api.installJobs().then(function (payload) {
+            if (stopped || !mountedRef.current) return;
+            var all = []
+              .concat(payload && payload.active ? payload.active : [])
+              .concat(payload && payload.finished ? payload.finished : []);
+            var found = null;
+            for (var i = 0; i < all.length; i++) {
+              if (all[i] && all[i].id === jobId) { found = all[i]; break; }
+            }
+            if (!found) {
+              // 作业不见了 = 宿主重载过（作业只活在进程内存里）。
+              //
+              // **但「作业不见了」不等于「没装上」**：2026-11-11 在真实宿主上实测到——
+              // 热挂载会把插件树重载一遍，重载期间新装的包**已经落盘**（bundle 从 36 变 38），
+              // 而队列是空的。这时如果说「必要时重装」，用户会去重装一个已经装好的东西。
+              // 正确做法：**先回读已安装列表**再说话。
+              stop();
+              clearJob("install:" + key);
+              confirmAfterJobGone(label, report);
+              return;
+            }
+            if (found.state === "succeeded") {
+              stop();
+              clearJob("install:" + key);
+              handleInstallResult(found.result, target, label, requestName, key, approvedBuilds, silent, report, onDone);
+              bumpTick();
+              return;
+            }
+            if (found.state === "failed") {
+              stop();
+              clearJob("install:" + key);
+              var failText = (found.error && String(found.error)) || t("updates.failed", { name: label });
+              if (!silent) setNotice({ kind: "error", text: failText });
+              report({ ok: false, text: failText });
+              return;
+            }
+            if (found.state === "cancelled") {
+              stop();
+              clearJob("install:" + key);
+              var cancelText = t("notice.installCancelled", { name: label });
+              if (!silent) setNotice({ kind: "info", text: cancelText });
+              report({ ok: true, text: cancelText, cancelled: true });
+              return;
+            }
+            timer = setTimeout(poll, installPollDelay());
+          }).catch(function () {
+            // 轮询失败不立刻判死：宿主可能在忙（安装期间事件循环被 pnpm 占着）。
+            // 退避重试，直到作业出现终态或组件卸载。
+            if (stopped || !mountedRef.current) return;
+            timer = setTimeout(poll, installPollDelay(true));
+          });
+        }
+        poll();
+        return { stop: stop, settled: function () { return settled; } };
+      }
+
+      /**
+       * 作业追丢了之后，**先回读真实状态再说话**。
+       *
+       * 为什么不能直接说「作业不见了，必要时重装」：2026-11-11 在真实宿主上实测过这条——
+       * 热挂载会重载插件树，重载期间新装的包**已经落盘**（bundle 36 → 38），而作业队列
+       * 因为模块重载被清空了。此时喊「重装」就是让用户把一个装好的东西再装一遍。
+       *
+       * 三种结论分开说，宁可不结论也不下错结论：
+       *   已装上 → 「其实已经装好了」（success，并刷新列表）
+       *   没装上 → 「作业追丢了，装没装上不确定」（warn）
+       *   读不到 → 同上，但**不猜**（把「读不到」当「没装」会诱导用户重装）
+       */
+      function confirmAfterJobGone(label, report) {
+        var settle = function (landed) {
+          if (!mountedRef.current) return;
+          if (landed) {
+            var okText = t("notice.installJobGoneButInstalled", { name: label });
+            setNotice({ kind: "success", text: okText });
+            report({ ok: true, text: okText });
+            bumpTick();
+            return;
+          }
+          var goneText = t("notice.installJobGone", { name: label });
+          setNotice({ kind: "warn", text: goneText });
+          report({ ok: false, text: goneText });
+        };
+        api.installed().then(function (payload) {
+          var bundles = payload && payload.bundles ? payload.bundles : [];
+          var landed = bundles.some(function (bundle) {
+            var name = bundle && typeof bundle.name === "string" ? bundle.name : "";
+            if (name === "") return false;
+            // 目录里的 label 经常是 `owner/repo` 这类 id，而 bundle 名是包名——
+            // 两边互为子串即认为命中也太松，所以用「相等 或 一方以 / 分隔后的最后一段相等」。
+            if (name === label) return true;
+            var tail = label.split("/").pop();
+            return tail !== "" && name === tail;
+          });
+          settle(landed);
+        }).catch(function () {
+          settle(false);
+        });
+      }
+
+      /**
+       * 安装结果的**唯一**收尾路径（同步/异步共用）。
+       *
+       * 抽出来是因为这些规则全是踩出来的、不能有第二份：
+       *  - `pendingBuilds` 非空时**保留确认条**（哪怕是带批准重提又被打回）——
+       *    关掉它等于移除唯一的批准入口，那个插件从此永远装不上；
+       *  - `restart-required` 要点横幅 + 弹窗，批量里 defer 掉；
+       *  - 批量计成功看 `applied`，不看气泡级别（否则「装好待重启」会被汇成失败）。
+       */
+      function handleInstallResult(payload, target, label, requestName, key, approvedBuilds, silent, report, onDone) {
+        if (!mountedRef.current) return;
+        var result = payload || {};
+        if (result.pendingBuilds && result.pendingBuilds.length) {
+          if (approvedBuilds && approvedBuilds.length) {
+            // 已经带着批准重提了一次、宿主仍说待批准（常见于 `stale-approval`：
+            // pnpm 这一轮没写出占位，宿主的 approveBuilds 因此拒绝了这次批准）。
+            // **绝不能在这里关掉确认条**：那会移除唯一的批准入口，而宿主的
+            // hint 写的是「重新点一次安装」——入口没了，hint 就指向一个不存在的 UI，
+            // 用户点一次即断头、这个插件永远装不上。
+            // 正确做法是**保留确认条**（换上这一轮真实的包名），让用户再点一次：
+            // 第二次往往会命中 pnpm 写出的占位、真的批准成功。
+            var stillText = t("notice.buildsStillPending", { builds: result.pendingBuilds.join(", ") });
+            setPending({ name: requestName, label: label, spec: target.spec, kind: target.kind || "install", key: key, builds: result.pendingBuilds });
+            setNotice({ kind: "warn", text: stillText });
+            report({ ok: false, text: stillText, pending: true });
+          } else {
+            var pendingText = t("notice.buildsPending", { name: label });
+            setPending({ name: requestName, label: label, spec: target.spec, kind: target.kind || "install", key: key, builds: result.pendingBuilds });
+            setNotice({ kind: "warn", text: pendingText });
+            report({ ok: false, text: pendingText, pending: true });
+          }
+          return;
+        }
+        setPending(null);
+        var outcome = noticeFromResult(result, "install", label);
+        // 批量（silent）里的每一步只记账、不弹窗——否则「一键更新（N）」会弹 N 次，
+        // 由批量的 finish 统一问一次。
+        noteRestartFrom(result, { label: label, defer: silent === true });
+        if (!silent) setNotice(outcome);
+        // 计成功看 applied（restart-required 也算装上了），不看气泡级别——
+        // 否则「装好待重启」的更新会被批量汇成失败（用户截图里的「成功 0、失败 2」）。
+        report({ ok: outcome.applied === true, text: outcome.text });
+        bumpTick();
+      }
+
 
       function installItem(item) {
         submitInstall({
@@ -5150,6 +5450,18 @@ function errorCopy(error) {
         }
         : null;
       var refreshing = !!job && job.kind === "refresh";
+      // 早先这里是 `var busyKey = job ? job.key : null`：**只存一个 key**。
+      // 装 A 的过程中点装 B，job 被覆盖成 B —— A 的卡片当场解除禁用、转圈消失，
+      // 用户以为 A 装完了又点一次（重复安装）。v1.3.5 起安装可以并行排队，
+      // 这个缺陷从「偶发」变成「必然」。
+      //
+      // 现在按 **key 集合**判：每个卡片/行自己问「我这个 key 在不在进行中」
+      // （读 ref，同步可见，见 jobRunning）。同时保留 `busyKey`/`busyKind` 给
+      // 那些确实只关心「当前这一个」的地方（抽屉里的单条操作提示）。
+      var busyKeys = jobKeysRef.current;
+      function isBusyKey(key) {
+        return typeof key === "string" && busyKeys[key] === true;
+      }
       var busyKey = job ? job.key : null;
 
       // ── 头部两个按钮与抽屉要用的派生值 ──
@@ -5206,6 +5518,7 @@ function errorCopy(error) {
             copied: copied,
             readOnly: readOnly,
             busyKey: busyKey,
+            isBusyKey: isBusyKey,
             busyKind: job ? job.kind : null,
             onQueryInput: handleQueryInput,
             onQuerySubmit: function () { commitQueryInput(true); },
@@ -5231,6 +5544,7 @@ function errorCopy(error) {
             confirming: confirming,
             readOnly: readOnly,
             busyKey: busyKey,
+            isBusyKey: isBusyKey,
             // 一键更新在跑时禁止从这一页插更新（与「可更新」页行内按钮口径一致）。
             batchRunning: !!(batch && batch.running),
             onDiscover: function () { setTab("discover"); },
@@ -5252,6 +5566,7 @@ function errorCopy(error) {
             catalogUpdated: catalogMeta && catalogMeta.updated ? catalogMeta.updated : null,
             results: updateResults,
             busyKey: busyKey,
+            isBusyKey: isBusyKey,
             readOnly: readOnly,
             batch: batch,
             // 头部搬来的自更新按钮：状态机在模块级，这里只给它读写入口。
@@ -5326,6 +5641,39 @@ function errorCopy(error) {
             open: noticeClosing ? false : true,
             onDismiss: dismissNotice
           })
+          : null,
+        // 安装队列条（v1.3.5）：装 A 的同时可以继续点 B，它们在宿主侧排队。
+        // **只在有作业时渲染**，且不抢 notice 的位置——它是常驻状态，不是一次性回执。
+        // 说清「几个在装/装什么」而不是一个转圈：用户点了三个就该看到三个名字。
+        installJobs && installJobs.active && installJobs.active.length
+          ? el("div", { className: "dshpm-queue", role: "status", "aria-live": "polite" },
+            el("span", { className: "dshpm-queueIcon" }, el(IconSpinner, { size: 12 })),
+            el("div", { className: "dshpm-queueBody" },
+              el("div", { className: "dshpm-queueTitle" },
+                t("jobs.active", {
+                  count: installJobs.active.length,
+                  names: installJobs.active.map(function (entry) {
+                    return entry.label || entry.name || entry.key;
+                  }).join("、")
+                })
+              ),
+              el("div", { className: "dshpm-queueRows" },
+                installJobs.active.map(function (entry) {
+                  return el("div", { className: "dshpm-queueRow", key: entry.id },
+                    // 排队 ≠ 安装中：排队的那几个 pnpm 根本还没启动（宿主侧靠文件锁串行），
+                    // 把两者画成一模一样会让用户以为「三个都在装，怎么这么慢」。
+                    el("span", { className: "dshpm-queueState" },
+                      entry.state === "running" ? t("jobs.running") : t("jobs.queued")),
+                    el("button", {
+                      type: "button",
+                      className: "dshpm-btn dshpm-btn--quiet dshpm-queueCancel",
+                      onClick: function () { cancelJob(entry.id); }
+                    }, t("jobs.cancel"))
+                  );
+                })
+              )
+            )
+          )
           : null,
         pending
           ? el(Banner, {

@@ -200,11 +200,11 @@ check('submitInstall 的 approvedBuilds 分支必须保留 pending（setPending(
   // 当前实现：`setPending(null)` 关掉确认条 + buildsStillPending 提示说「请重试」，
   // 而宿主 MANAGEMENT_HINT['stale-approval'] 说「重新点一次安装，按提示批准构建脚本」——
   // 提示已经没了，用户没有第二次入口。修法是保留确认条（允许再点一次）或给出真能走通的下一步。
-  const submitSrc = grab(clientSource, 'function submitInstall(')
-  assert.ok(submitSrc !== '', '找不到 submitInstall')
+  const submitSrc = grab(clientSource, 'function handleInstallResult(')
+  assert.ok(submitSrc !== '', '找不到 handleInstallResult（安装结果收尾的唯一路径）')
   // 定位「已带 approvedBuilds 仍 pending」的子分支
   const stillIdx = submitSrc.indexOf('approvedBuilds && approvedBuilds.length')
-  assert.ok(stillIdx > 0, 'submitInstall 里必须有「已批准仍 pending」的子分支')
+  assert.ok(stillIdx > 0, 'handleInstallResult 里必须有「已批准仍 pending」的子分支')
   const stillBranch = submitSrc.slice(stillIdx, submitSrc.indexOf('} else {', stillIdx))
   // 注意：注释里提到 setPending(null) 不算——只看**实际调用**（行首不是 // 的那行）。
   const liveLines = stillBranch.split('\n').filter((line) => !/^\s*\/\//.test(line))
@@ -229,7 +229,7 @@ check('stale-approval 的 hint 不得指向已消失的确认条（与客户端�
   assert.ok(hintMatch, '宿主必须有 stale-approval 的 hint（在 MANAGEMENT_HINT 里）')
   const hint = hintMatch[1]
   const stillPendingBranchHasSetPendingNull = (() => {
-    const submitSrc = grab(clientSource, 'function submitInstall(')
+    const submitSrc = grab(clientSource, 'function handleInstallResult(')
     const stillIdx = submitSrc.indexOf('approvedBuilds && approvedBuilds.length')
     if (stillIdx <= 0) return false
     const stillBranch = submitSrc.slice(stillIdx, submitSrc.indexOf('} else {', stillIdx))

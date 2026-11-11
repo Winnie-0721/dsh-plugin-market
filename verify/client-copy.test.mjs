@@ -220,8 +220,12 @@ check('重启助手：横幅点亮 → POST /restart → 先见过死才自动�
   assert.match(source, /"restart-failed": true/, 'restart-failed 要进错误码表（errorCopy 才有三段式文案）')
   // 点亮：安装/更新/卸载/开关/自更新回来的 restart-required、requiresRestart 都要接上。
   // v1.2.0 起带 options（label / defer / marketVersion），所以按前缀匹配而不是 `(payload)`。
-  const lightUps = [...source.matchAll(/noteRestartFrom\(payload, \{/g)]
+  // 安装那一路的变量名是 `result`（v1.3.5 起收尾走 handleInstallResult，同步/异步共用），
+  // 其余五路是 `payload`。断言强度不变：仍然要求**至少 5 处**点亮，
+  // 且安装这一处必须真的存在（下面单独钉住，防止「总数够但安装漏了」）。
+  const lightUps = [...source.matchAll(/noteRestartFrom\((?:payload|result), \{/g)]
   assert.ok(lightUps.length >= 5, `各写操作都要点亮重启横幅，当前只有 ${lightUps.length} 处`)
+  assert.match(source, /noteRestartFrom\(result, \{ label: label, defer: silent === true \}\)/, '安装路径必须点亮重启横幅（异步装完待重启也要横幅）')
   assert.match(source, /payload\.application === "restart-required" \|\| payload\.requiresRestart === true/, '点亮条件覆盖两种写法')
   // 探活回路：宿主死掉期间先记下「见过死」，之后 /status 恢复才刷新页面
   assert.match(source, /restartSawDownRef\.current = true/, '宿主死掉期间要记下「见过死」')

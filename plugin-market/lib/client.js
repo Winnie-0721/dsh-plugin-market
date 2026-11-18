@@ -371,7 +371,6 @@ window.__ModuleLoader__.load({
         "updates.subtitle": "已安装 {installed} 个 · {count} 个有新版本",
         "updates.subtitleEmpty": "已安装 {installed} 个 · 全部最新",
         "updates.batchProgress": "一键更新中 {done}/{total}…",
-        "updates.hint": "逐个确认更稳（一次只改动一个依赖）；「一键更新」按顺序逐个跑，失败不影响其余。",
         "updates.loading": "正在读取已安装列表…",
         "updates.empty.title": "全部都是最新",
         "updates.empty.body": "已安装的插件都没有可用更新。目录数据更新于 {updated}。",
@@ -752,7 +751,6 @@ window.__ModuleLoader__.load({
         "updates.subtitle": "{installed} installed · {count} have a newer version",
         "updates.subtitleEmpty": "{installed} installed · all up to date",
         "updates.batchProgress": "Updating {done}/{total}…",
-        "updates.hint": "Confirm one at a time (each change touches a single dependency), or use Update all to run them in order — a failure leaves the rest alone.",
         "updates.loading": "Reading installed plugins…",
         "updates.empty.title": "Everything is up to date",
         "updates.empty.body": "No installed plugin has a newer version. Catalog data is from {updated}.",
@@ -4086,7 +4084,10 @@ function errorCopy(error) {
                 : (self.phase === "ready" || self.phase === "done") ? el(IconCheck, { size: 13 })
                   : el(IconUpgrade, { size: 13 }),
               self.label || t("action.checkSelf")))),
-        el("div", { className: "dshpm-drawerHint" }, t("updates.hint")),
+        // 「逐个确认更稳（一次只改动一个依赖）；「一键更新」按顺序逐个跑，失败不影响其余。」
+        // 这行按用户要求删除（v1.4.2）：它只是解释「点单个 vs 点一键更新」的区别，
+        // 而按钮本身已经写清了动作（「更新到 x.y.z」/「一键更新（N）」），
+        // 多这一行只是在抽屉顶部占一行说明性文字。
         // 有旧数据且这次读取失败：列表还用旧的，但必须明说「这是旧的、这次没读到」，
         // 否则用户会以为看到的是刚才那次「检查更新」的结果。
         staleFailure !== null

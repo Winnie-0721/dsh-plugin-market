@@ -77,7 +77,7 @@ check('新增的两组文案职责齐全（自更新 / 可更新列表 / 三个�
   for (const key of [
     'action.checkSelf', 'action.checkingSelf', 'action.updateSelf', 'action.updatingSelf',
     'action.recheckSelf', 'action.checkUpdates', 'action.updateAllCount', 'action.updatingAll',
-    'updates.title', 'updates.entryBadge', 'updates.hint', 'updates.batchProgress', 'updates.empty.title', 'updates.empty.body',
+    'updates.title', 'updates.entryBadge', 'updates.batchProgress', 'updates.empty.title', 'updates.empty.body',
     'notice.selfFound', 'notice.selfCurrent', 'notice.selfUpdated', 'notice.updatesFound', 'notice.updatesNone',
     'notice.updateAllStart', 'notice.updateAllDone', 'notice.updateAllNone', 'tab.updates',
     'err.self-update-unavailable.title', 'err.self-update-integrity.title', 'err.self-update-download.title',

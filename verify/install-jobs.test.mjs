@@ -33,6 +33,15 @@ async function check(name, fn) {
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * 「宿主真的装上了」的 ChangeResult。
+ *
+ * 为什么要有这个常量（v1.4.1）：`alreadyDone` 现在要求**作业成功**且**payload 真的生效**
+ * 两道都过。原先测试里用的是 `payload: {}`——按新判据那不算装好（没有 application），
+ * 于是「刚装好再点」的去重测试会失败。用一份真实的成功 payload 才表达得对。
+ */
+const APPLIED = { application: 'applied', changed: true, stage: 'install' }
+
 console.log('\n[1] 提交与去重：同一个包不许排队两次')
 
 await check('提交立刻返回 queued 作业，不等 runJob 完成', async () => {
@@ -79,7 +88,7 @@ await check('刚成功过、同 spec 再点 ⇒ deduped + alreadyDone（不重�
   const queue = createInstallJobQueue({
     runJob: async () => {
       calls += 1
-      return { ok: true, payload: {} }
+      return { ok: true, payload: APPLIED }
     }
   })
   const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a' })
@@ -93,7 +102,7 @@ await check('刚成功过、同 spec 再点 ⇒ deduped + alreadyDone（不重�
 })
 
 await check('spec 变了（=真的升级）⇒ **不**沿用旧作业，正常排队', async () => {
-  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: {} }) })
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
   const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
   await tick(20)
   assert.equal(queue.get(first.job.id).state, 'succeeded')
@@ -230,14 +239,14 @@ await check('取消正在跑的作业 ⇒ 转达宿主，status 如实回传（�
 })
 
 await check('取消不存在的作业 ⇒ job-not-found（不抛）', async () => {
-  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: {} }) })
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
   const verdict = await queue.cancel('no-such-id')
   assert.equal(verdict.ok, false)
   assert.equal(verdict.code, 'job-not-found')
 })
 
 await check('取消已结束的作业 ⇒ job-finished（不是错误，是「没什么可取消」）', async () => {
-  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: {} }) })
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
   const submitted = queue.submit({ key: 'a', name: 'A' })
   await tick(20)
   const verdict = await queue.cancel(submitted.job.id)
@@ -267,7 +276,7 @@ await check('已完成作业超过 TTL ⇒ 被清掉（长跑的宿主不会无�
   let clock = 1000
   const queue = createInstallJobQueue({
     now: () => clock,
-    runJob: async () => ({ ok: true, payload: {} })
+    runJob: async () => ({ ok: true, payload: APPLIED })
   })
   const submitted = queue.submit({ key: 'a', name: 'A' })
   await tick(20)
@@ -280,7 +289,7 @@ await check('已完成作业超过 TTL ⇒ 被清掉（长跑的宿主不会无�
 })
 
 await check('宿主重启 = 队列天然清空：旧作业查不到（不许假装还在装）', async () => {
-  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: {} }) })
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
   const submitted = queue.submit({ key: 'a', name: 'A' })
   await tick(20)
   // 模拟重启：整个队列换新实例
@@ -343,7 +352,7 @@ await check('去重命中时 Submit 要能被上层区分：新起作业 vs 复�
   //   deduped=true  → 200 OK（没有新作业：已在队列里，或刚装好过）
   // 把 alreadyDone 也说成 202 是撒谎——客户端会以为又要等一轮。
   // 2026-11-11 在真实宿主上实测时就是这么发现的：两个 alreadyDone 响应都是 202。
-  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: {} }) })
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
   const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
   assert.equal(first.deduped, false, '新作业：上层回 202')
   assert.equal(first.alreadyDone, undefined)
@@ -387,6 +396,72 @@ await check('作业消失时**不得**直接下「没装上」的结论（先回
   }
   // 「不见了」的文案不许再教用户直接重装
   assert.doesNotMatch(client, /作业不见了（宿主可能重启过）/, '旧的误导性文案应已替换')
+})
+
+console.log('\n[7] 失败不得被当成「已装好」（v1.4.1，2026-11-18 真机踩到）')
+
+await check('作业 succeeded 但 payload 是 failed ⇒ alreadyDone **不许**成立（要能重试）', async () => {
+  // 真机原样：三个更新全部 pnpm EPERM 失败，宿主回 application:'failed'，
+  // 而当时 runInstallJob 无条件 ok:true → 作业层记 succeeded → alreadyDone 命中 →
+  // 界面对**没装上**的包弹「刚刚已经装好了，不用重复安装」。用户再点也装不上。
+  let calls = 0
+  const queue = createInstallJobQueue({
+    runJob: async () => {
+      calls += 1
+      return { ok: true, payload: { application: 'failed', changed: false, error: { code: 'operation-error', kind: 'permission' } } }
+    }
+  })
+  const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  await tick(20)
+  // 作业本身确实"跑完了"，所以 state 仍是 succeeded —— 那是 runJob 的语义，不是装好了
+  assert.equal(queue.get(first.job.id).state, 'succeeded')
+
+  const again = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  assert.notEqual(again.alreadyDone, true, '装失败的包绝不能被去重成「已经装好了」')
+  assert.equal(again.deduped, false, '必须是一次新的提交，用户才能重试')
+  await tick(20)
+  assert.equal(calls, 2, '第二次必须真的重新跑（calls=2），而不是复用失败的那个作业')
+})
+
+await check('payload 真的 applied ⇒ alreadyDone 成立（对照组，避免上一条把功能改死）', async () => {
+  const queue = createInstallJobQueue({ runJob: async () => ({ ok: true, payload: APPLIED }) })
+  const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  await tick(20)
+  const again = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  assert.equal(again.alreadyDone, true, '真装上了就该去重')
+  assert.equal(queue.get(first.job.id).state, 'succeeded')
+})
+
+await check('restart-required **也算**装好（已落盘，只是待重启），不许逼用户重装', async () => {
+  const queue = createInstallJobQueue({
+    runJob: async () => ({ ok: true, payload: { application: 'restart-required', changed: true } })
+  })
+  const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  await tick(20)
+  const again = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  assert.equal(again.alreadyDone, true, 'restart-required 已经装在磁盘上了，去重是诚实的')
+  assert.equal(queue.get(first.job.id).state, 'succeeded')
+})
+
+await check('pendingBuilds 非空 **不算**装好（那是在等用户批准）', async () => {
+  const queue = createInstallJobQueue({
+    runJob: async () => ({ ok: true, payload: { application: 'failed', pendingBuilds: ['sharp'] } })
+  })
+  const first = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  await tick(20)
+  const again = queue.submit({ key: 'a', name: 'A', spec: 'dsh-a@1.0.0' })
+  assert.notEqual(again.alreadyDone, true, '还在等批准不是装好了——批准后要能重提')
+  assert.equal(again.deduped, false)
+})
+
+await check('runInstallJob 的成败判据：failed/unknown 不算，applied/restart-required/热挂载算', async () => {
+  // 这条按源码形状钉住 index.js 的判据（它与 install-jobs 的 payloadReallyApplied 必须同源）。
+  const fs = await import('node:fs')
+  const host = fs.readFileSync('plugin-market/lib/index.js', 'utf8')
+  assert.match(host, /const appliedOk = application === 'applied' \|\| application === 'restart-required' \|\| hotOk/,
+    'runInstallJob 必须按 application 判成败，而不是无条件 ok:true')
+  assert.match(host, /if \(!pendingBuilds && !appliedOk\) \{/, '不生效时必须走失败分支')
+  assert.match(host, /ok: false,\n        payload: result,/, '失败分支要带 payload（客户端靠它渲染详细原因）')
 })
 
 console.log('')

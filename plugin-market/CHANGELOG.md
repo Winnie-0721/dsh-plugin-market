@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.4.1
+
+- **fix(install)：装失败被说成「已经装好了」，且进度条从不刷新 —— 用户报「安装太慢、也不会更新」。**
+
+  2026-11-18 真机现象：三个更新（dsh-memory / dsh-office / dsh-connect-workbuddy）
+  全部失败，界面却对其中两个说「刚刚已经装好了，不用重复安装」，卡片上仍显示「更新到 x.y.z」。
+
+  **根因（两个叠加）**：
+  1. `runInstallJob` 无论宿主回什么，只要调用没抛错就 `return { ok: true }`。宿主把这次安装
+     判成 `application:'failed'` 时，作业层照样记 `succeeded`；
+  2. `alreadyDone` 只看「这个作业 succeeded」就认定装好了（还看 spec 一致、5 分钟内）——
+     于是对**没装上**的包回「刚刚已经装好了，不用重复安装」。用户再点也装不上，因为
+     去重直接把它吞了。
+
+  **真正的安装失败原因**（顺带查清）：pnpm 报
+  `ERR_PNPM_EPERM ... node_modules/dsh-ops/runtime`。现场 `node_modules/dsh-ops/` 里
+  **只剩一个 `runtime` 目录，lib 与 package.json 全没了**——上一次安装把包写坏，之后每次
+  安装都卡在替换这个孤儿目录上。手动清掉后 pnpm 自动装回了完整的 0.5.2，同一条更新立即成功
+  （1.2.0 → 1.2.1，`application: applied`）。
+
+  **修法**：
+  - `runInstallJob` 改为按宿主的 `application` 判成败：只有 `applied` /
+    `restart-required` / 热挂载成功才算装上；`failed`/`cancelled`/`unknown` 返回 `ok:false`。
+    `pendingBuilds` 非空**不算失败**（那是在等你批准）。
+  - `alreadyDone` 增加第二道判据 `payloadReallyApplied`：作业成功 **且** payload 真的生效
+    才去重。两处判据同源——各写一份正是这次事故的成因。
+  - 失败时给一句**照做得到**的原因（`shortInstallError`）：EPERM/占用 → 提示完全退出 DSH 再试、
+    目录已损坏则先卸载；构建脚本未批准、网络失败各自有话说。不再把整段 pnpm 诊断甩给用户。
+  - 失败后**也刷新已安装列表**：失败前 pnpm 可能已改过 package.json/node_modules，
+    不刷新会让用户对着一个既装不上、又永远显示「有更新」的条目反复点。
+
+  **「太慢」的另一半是真的看不见进度**：队列条原来只在提交/取消时拉一次快照，
+  安装中那一行永远停在提交那一刻——状态一直是 `queued`、数字不动。用户看到「正在装 1 个」
+  十几分钟没变化，只能得出「卡死了/太慢」。现在：
+  - 有活作业时每 2s 刷新一次队列快照（空队列不轮询）；
+  - 运行中的那条显示**已跑 Ns**（每秒推进，用 state 驱动，别只在拉取时跳）；
+  - 排队中的明说「宿主一次只装一个，前一个装完就轮到它」——不说这句，用户以为它卡住了。
+
+  实测耗时口径（供判断「慢」是否正常）：pnpm 本身 3–42s（看网络），加上宿主排队与 reload，
+  **单条 70–86s 是常态**；串行是宿主 `withFileLock` 的硬约束，市场这侧无法并行。
+
+  回归：verify/install-jobs.test.mjs 从 21 条增到 **26 条**，新增 [7] 组五条钉住
+  「failed 不得算已装好 / applied 才去重 / restart-required 也算装好 / pendingBuilds 不算装好 /
+  runInstallJob 判据与 payloadReallyApplied 同源」。
+  变异验证：把 `payloadReallyApplied` 从已去重判断里去掉 → 2 条失败（不是只绿不报警）。
+
 ## 1.4.0
 
 - **feat(install)：安装改成异步作业队列 —— 不用等一个插件装好才去点下一个。**

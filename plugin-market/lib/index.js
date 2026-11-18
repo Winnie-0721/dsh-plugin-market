@@ -118,6 +118,39 @@ function describe(error) {
   return message.length > 200 ? `${message.slice(0, 200)}…` : message
 }
 
+/**
+ * 从宿主 ChangeResult 里抽一句**用户照做得到**的失败原因（v1.4.1）。
+ *
+ * 为什么不能只把 `error.code` 抛给用户：宿主的 pnpm 失败多半是
+ * `{ code: 'operation-error', kind: 'permission', diagnostic: '<整段 pnpm 输出>' }`——
+ * 把 diagnostic 原样贴出来就是几百行 WARN/Progress，用户抓不到重点。
+ *
+ * 这里只做**分类 + 一句处置**，且必须与客户端已有的文案分类对齐
+ * （`err.file-locked.*` 那三行已经在 client.js 里了，此处只负责把错误认出来）。
+ */
+function shortInstallError(result) {
+  const error = result !== null && typeof result === 'object' ? result.error : null
+  if (error === null || typeof error !== 'object') return ''
+  const diagnostic = typeof error.diagnostic === 'string' ? error.diagnostic : ''
+  const kind = optionalText(error.kind)
+  // EPERM/EACCES/EBUSY：运行中的 DSH 占着插件文件，pnpm 换不了目录。
+  // 真实案例（2026-11-18）：三个更新同时失败在 node_modules/dsh-ops/runtime 上。
+  if (kind === 'permission' || /ERR_PNPM_EPERM|EPERM|EACCES|EBUSY|拒绝访问/i.test(diagnostic)) {
+    return '插件文件被占用（EPERM）：pnpm 换不了目录。先完全退出 DSH 再重试；若仍失败，' +
+      '说明该插件目录已损坏（只剩空目录、没有 package.json），需要先卸载再安装。'
+  }
+  // 构建脚本未批准：这不是失败，是等用户点一下。
+  if (kind === 'build-blocked' || /ERR_PNPM_IGNORED_BUILDS|Ignored build scripts/i.test(diagnostic)) {
+    return '这个包要执行构建脚本，需要你批准（不是失败）。'
+  }
+  // 网络/注册表：可重试。
+  if (kind === 'network' || /ETIMEDOUT|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network/i.test(diagnostic)) {
+    return '下载失败（网络/注册表不可达），检查网络后重试。'
+  }
+  // 其它：只取宿主自带的 message，没有就给空串让调用方用通用句。
+  return optionalText(error.message) ?? ''
+}
+
 function sameKey(a, b) {
   const left = optionalText(a)
   const right = optionalText(b)
@@ -992,6 +1025,33 @@ function createHandlers(ctx, catalog, selfUpdate, config = {}) {
       // 挂上了就是真的在跑：把回读状态改成 live（并且不再记待重启）。
       // 只在真挂上时改；attempted 但失败的不动——回读说什么就是什么。
       mergeHotIntoActivation(activation, hot)
+    }
+
+    // **作业成败按宿主的应用结果定，不按「调用没抛错」定**（v1.4.1 修的 bug）。
+    //
+    // 原先这里无条件 `ok: true`，于是：宿主把这次安装判成 `application:'failed'`
+    // （pnpm 非零退出、EPERM、被占用…）时，作业层仍然记成 `succeeded`。
+    // 后果有两层，都在真实使用里撞到了：
+    //   ① `alreadyDone` 用「这个作业 succeeded」作判据 → 界面对一个**没装上**的包
+    //      弹出「刚刚已经装好了，不用重复安装」（2026-11-18 实测，3 个更新全 EPERM 失败）；
+    //   ② `/install-jobs` 的 `state` 说成功，任何按作业状态汇报的调用方都会被骗。
+    //
+    // `application` 的封闭集合见 http.js 的 CHANGE_APPLICATIONS：只有 `applied` 与
+    // `restart-required`（以及热挂载成功）算装上了；`failed` / `cancelled` / `unknown`
+    // 都不是。**`pendingBuilds` 非空不算失败**——那是在等用户批准，不是装不上。
+    const pendingBuilds = Array.isArray(shape.pendingBuilds) && shape.pendingBuilds.length > 0
+    const application = optionalText(shape.application) ?? 'failed'
+    const hotOk = hot?.ok === true
+    const appliedOk = application === 'applied' || application === 'restart-required' || hotOk
+    if (!pendingBuilds && !appliedOk) {
+      return {
+        ok: false,
+        payload: result,
+        activation,
+        hot,
+        // 给作业层与客户端一句**照做得到**的原因；详细诊断仍在 payload.error 里。
+        error: shortInstallError(result) || `宿主报告安装没有生效（application=${application}）`
+      }
     }
     return { ok: true, payload: result, activation, hot }
   }

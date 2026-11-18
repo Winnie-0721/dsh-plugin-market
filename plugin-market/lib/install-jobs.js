@@ -60,6 +60,26 @@ function shortError(error) {
  * @param options.concurrency - 同时推进的作业数（默认 1，见模块注释的诚实边界）
  * @param options.finishedTtlMs / options.maxFinished / options.maxActive - 见上方常量
  */
+/**
+ * 宿主那份 ChangeResult 是否真的表示「装上了」。
+ *
+ * 这是「作业成功」之外的第二道，因为两者含义不同：
+ *   作业 succeeded = runJob 跑完了（没抛错）；
+ *   这里 true      = 宿主自己说应用生效了。
+ * 只认三种：`applied` / `restart-required`（已落盘、待重启）/ 热挂载成功。
+ * `pendingBuilds` 非空不算（那是在等用户批准），`failed`/`cancelled`/`unknown` 更不算。
+ *
+ * 与 index.js 的 runInstallJob 用**同一套判据**——两处各写一份，正是
+ * 2026-11-18 那次「失败被当成已装好」的成因。
+ */
+function payloadReallyApplied(payload) {
+  if (payload === null || typeof payload !== 'object') return false
+  if (payload.hotMounted === true) return true
+  if (Array.isArray(payload.pendingBuilds) && payload.pendingBuilds.length > 0) return false
+  const application = typeof payload.application === 'string' ? payload.application : ''
+  return application === 'applied' || application === 'restart-required'
+}
+
 export function createInstallJobQueue(options = {}) {
   const runJob = options.runJob
   if (typeof runJob !== 'function') throw new Error('createInstallJobQueue 需要 runJob')
@@ -216,6 +236,12 @@ export function createInstallJobQueue(options = {}) {
     // 而用户看到的是「怎么又在装」。返回那个已完成作业并标 `alreadyDone`，让客户端说
     // 「刚装好了」而不是假装刚发起一次。
     // 只认**成功**且 spec 完全一致：失败的、或 spec 变了的（=真的升级）都不该被吞。
+    //
+    // **「作业 succeeded」还不够**（v1.4.1 修的 bug）：作业 succeeded 只说明 runJob 跑完了，
+    // 不代表宿主说装上去了。2026-11-18 真机实测：三个更新全部 pnpm EPERM 失败，
+    // 作业层却因为上游 `ok:true` 一律记成 succeeded，于是这里对**没装上**的包回
+    // 「刚刚已经装好了，不用重复安装」——比不给提示更坏。
+    // 现在两道都要过：作业成功 **且** payload 里 application 真的生效。
     if (input.allowRecentlyDone !== false) {
       const recentWindowMs = Number.isFinite(options.recentlyDoneMs) ? options.recentlyDoneMs : 5 * 60 * 1000
       // 从**最新**往回找：同一个包可能装成功过多次（装 → 升级 → 又装回旧版），
@@ -225,6 +251,7 @@ export function createInstallJobQueue(options = {}) {
         if (job.state !== 'succeeded' || job.key !== key) continue
         if (job.spec !== (input.spec ?? null)) continue
         if (job.finishedAtMs === null || now() - job.finishedAtMs > recentWindowMs) continue
+        if (!payloadReallyApplied(job.payload)) continue
         return { ok: true, job: publicView(job), deduped: true, alreadyDone: true }
       }
     }

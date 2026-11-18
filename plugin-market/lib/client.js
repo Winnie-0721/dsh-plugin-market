@@ -166,8 +166,9 @@ window.__ModuleLoader__.load({
         "notice.installJobGone": "{name} 的安装作业追丢了（宿主可能重载过），装没装上不确定。去「已安装」页看一眼，没有的话再装一次。",
         "notice.installJobGoneButInstalled": "{name} 已经装好了（我们没追到作业，但它在已安装列表里）。",
         "jobs.active": "正在装 {count} 个：{names}",
-        "jobs.queued": "排队中",
         "jobs.running": "安装中",
+        "jobs.runningFor": "安装中 {seconds}s",
+        "jobs.queuedHint": "排队中（宿主一次只装一个，前一个装完就轮到它）",
         "jobs.cancel": "取消",
         "notice.installCancelTooLate": "已经开始写文件了，停不下来；等它装完再去「已安装」页看结果。",
         "notice.installWarnings": "安装完成，但有提示：{warnings}",
@@ -559,8 +560,9 @@ window.__ModuleLoader__.load({
         "notice.installJobGone": "Lost track of the install job for {name} (the host may have reloaded), so whether it installed is unknown. Check the Installed tab; reinstall if it is not there.",
         "notice.installJobGoneButInstalled": "{name} is installed (we lost the job, but it is in the installed list).",
         "jobs.active": "Installing {count}: {names}",
-        "jobs.queued": "queued",
         "jobs.running": "installing",
+        "jobs.runningFor": "installing {seconds}s",
+        "jobs.queuedHint": "queued (the host installs one at a time; this starts when the previous finishes)",
         "jobs.cancel": "Cancel",
         "notice.installCancelTooLate": "It already started writing files and cannot be stopped; check the Installed tab once it finishes.",
         "notice.installWarnings": "Installed, with warnings: {warnings}",
@@ -4539,6 +4541,10 @@ function errorCopy(error) {
       var installJobsState = React.useState({ active: [], finished: [] });
       var installJobs = installJobsState[0];
       var setInstallJobs = installJobsState[1];
+      // 「现在」这个时刻本身也要是 state：只有它能驱动「已跑 Ns」每秒重渲染。
+      var jobsNowState = React.useState(Date.now());
+      var jobsNowMs = jobsNowState[0];
+      var setJobsNowMs = jobsNowState[1];
       /** 拉一次服务端队列快照（失败不报错：它只影响那个提示条，不影响安装本身）。 */
       function trackJobs() {
         api.installJobs().then(function (payload) {
@@ -4549,6 +4555,29 @@ function errorCopy(error) {
           });
         }).catch(function () { /* 队列快照是可选信息，拿不到就不显示 */ });
       }
+
+      /**
+       * 队列条要**持续刷新**（v1.4.1）。
+       *
+       * 原先只有「提交/取消」时调一次 trackJobs，于是安装过程中那一条永远停在提交那一刻的
+       * 快照上：状态一直是 `queued`、耗时数字不动。用户看到「正在装 1 个」十几分钟没有变化，
+       * 主观上就是「装得太慢 / 卡死了」——**进度不刷新比真的慢更糟**，因为它连「还在动」都看不出来。
+       *
+       * 频率按需求定：队列里有活作业时 2s 一次（要能看见状态从 queued→running 与秒数在走），
+       * 空队列不轮询（省掉后台无意义的请求）。卸载时清掉定时器。
+       */
+      React.useEffect(function () {
+        var hasActive = !!(installJobs && installJobs.active && installJobs.active.length > 0)
+        if (!hasActive) return undefined
+        var timer = setInterval(function () {
+          if (!mountedRef.current) return
+          trackJobs()
+          // 同时推进「现在」这个时刻：**秒数要真的在跳**，否则两次拉取之间那 2s 里
+          // 界面仍是静止的，等于没改善「看不出它在动」。
+          setJobsNowMs(Date.now())
+        }, 2000)
+        return function () { clearInterval(timer) }
+      }, [installJobs && installJobs.active ? installJobs.active.length : 0])
 
       /**
        * 取消一个安装作业。
@@ -5011,6 +5040,11 @@ function errorCopy(error) {
               var failText = (found.error && String(found.error)) || t("updates.failed", { name: label });
               if (!silent) setNotice({ kind: "error", text: failText });
               report({ ok: false, text: failText });
+              // **失败也要重读列表**（v1.4.1）：失败前 pnpm 可能已经改过 package.json /
+              // node_modules（EPERM 那种就是在写盘中途失败的），界面上的「更新到 x.y.z」
+              // 与「已安装」角标可能已经和磁盘不一致。不刷新的话用户会看着一个
+              // 既装不上、又永远显示「有更新」的条目反复点。
+              bumpTick();
               return;
             }
             if (found.state === "cancelled") {
@@ -5659,11 +5693,21 @@ function errorCopy(error) {
               ),
               el("div", { className: "dshpm-queueRows" },
                 installJobs.active.map(function (entry) {
+                  // 带上**实时耗时**：一次真实安装 pnpm 要 3–42s，加上宿主排队与 reload，
+                  // 单条 70–86s 是常态。只显示「安装中」而不显示它跑了多久，用户无法区分
+                  // 「在正常跑」和「卡死了」，而人面对不动的界面只会得出「太慢」。
+                  var elapsed = entry.state === "running" && entry.startedAt
+                    ? Math.max(0, Math.round((jobsNowMs - Date.parse(entry.startedAt)) / 1000))
+                    : 0
+                  var stateText = entry.state === "running"
+                    ? (elapsed > 0 ? t("jobs.runningFor", { seconds: elapsed }) : t("jobs.running"))
+                    // 排队时要**说清为什么还没开始**：宿主一次只装一个（文件锁串行），
+                    // 不说这句，用户会以为它卡住了。
+                    : t("jobs.queuedHint")
                   return el("div", { className: "dshpm-queueRow", key: entry.id },
                     // 排队 ≠ 安装中：排队的那几个 pnpm 根本还没启动（宿主侧靠文件锁串行），
                     // 把两者画成一模一样会让用户以为「三个都在装，怎么这么慢」。
-                    el("span", { className: "dshpm-queueState" },
-                      entry.state === "running" ? t("jobs.running") : t("jobs.queued")),
+                    el("span", { className: "dshpm-queueState" }, stateText),
                     el("button", {
                       type: "button",
                       className: "dshpm-btn dshpm-btn--quiet dshpm-queueCancel",
